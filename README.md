@@ -113,3 +113,4 @@ The CSV file must be **BOM-prefixed UTF-8** with 15 columns:
    Or install manually: copy `main.js`, `manifest.json`, and `styles.css` to your vault's `.obsidian/plugins/csv-quiz-practice/` and reload Obsidian
 
 ---
+
