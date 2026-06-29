@@ -1,0 +1,11 @@
+{
+  "id": "csv-quiz-practice",
+  "name": "刷题啊",
+  "version": "1.3.6",
+  "minAppVersion": "0.15.0",
+  "description": "天下苦X题帮久矣！什么破app也敢打广告，还要几十一个月",
+  "author": "Kong",
+  "authorUrl": "",
+  "fundingUrl": "",
+  "isDesktopOnly": false
+}
