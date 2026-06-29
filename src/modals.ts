@@ -22,6 +22,7 @@ export interface ChoiceModalOptions {
  * user closes the modal (Esc / backdrop) without choosing.
  */
 export class ChoiceModal extends Modal {
+  readonly promise: Promise<string | null>;
   private resolveFn!: (value: string | null) => void;
   private resolved = false;
   private readonly opts: ChoiceModalOptions;
@@ -29,12 +30,8 @@ export class ChoiceModal extends Modal {
   constructor(app: App, opts: ChoiceModalOptions) {
     super(app);
     this.opts = opts;
-  }
-
-  open(): Promise<string | null> {
-    return new Promise<string | null>((resolve) => {
+    this.promise = new Promise<string | null>((resolve) => {
       this.resolveFn = resolve;
-      void super.open();
     });
   }
 

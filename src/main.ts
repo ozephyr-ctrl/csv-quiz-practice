@@ -21,55 +21,55 @@ export default class CSVQuizPlugin extends Plugin {
       const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ);
       if (existing.length > 0 && existing[0] !== leaf) {
         leaf.detach();
-        this.app.workspace.revealLeaf(existing[0]);
+        this.app.workspace.setActiveLeaf(existing[0], false, true);
         return new QuizView(leaf, this, this.stateManager, this.app.vault, this.csvWriteQueue);
       }
       return new QuizView(leaf, this, this.stateManager, this.app.vault, this.csvWriteQueue);
     });
 
     this.addRibbonIcon("book-open", "刷题啊", () => {
-      this.activateView();
+      void this.activateView();
     });
 
     this.addCommand({
-      id: "open-csv-quiz-practice",
+      id: "open-quiz-practice",
       name: "打开刷题面板",
       callback: () => {
-        this.activateView();
+        void this.activateView();
       },
     });
 
     this.addSettingTab(new CSVQuizSettingTab(this.app, this));
   }
 
-  async onunload(): Promise<void> {
+  onunload(): void {
     const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ);
     for (const leaf of leaves) {
       const view = leaf.view as QuizView;
       if (view && view.onClose) {
-        await view.onClose();
+        void view.onClose();
       }
     }
   }
 
-  async activateView(): Promise<void> {
+  activateView(): void {
     const { workspace } = this.app;
 
     let leaf = workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
 
     if (!leaf) {
-      leaf = workspace.getLeaf('tab');
-      await leaf.setViewState({ type: VIEW_TYPE_QUIZ, active: true });
+      leaf = workspace.getLeaf(true);
+      void leaf.setViewState({ type: VIEW_TYPE_QUIZ, active: true });
     }
 
-    workspace.revealLeaf(leaf);
+    workspace.setActiveLeaf(leaf, false, true);
   }
 
-  async refreshQuiz(): Promise<void> {
+  refreshQuiz(): void {
     const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
     if (leaf) {
       const view = leaf.view as QuizView;
-      await view.refresh();
+      void view.refresh();
     }
   }
 

@@ -112,7 +112,7 @@ export class QuizView extends ItemView {
     this.isClosed = true;
     this.cancelAutoNext();
     if (this.autoSaveTimer !== null) {
-      clearInterval(this.autoSaveTimer);
+      window.clearInterval(this.autoSaveTimer);
       this.autoSaveTimer = null;
     }
     this.stateManager.cancelScheduledSave();
@@ -255,9 +255,9 @@ export class QuizView extends ItemView {
         return "empty";
       }
       return "ok";
-    } catch (e) {
+    } catch (e: unknown) {
       console.error("CSV Quiz: Failed to load CSV", e);
-      this.showError(`无法加载 CSV 文件: ${e.message}`);
+      this.showError(`无法加载 CSV 文件: ${e instanceof Error ? e.message : String(e)}`);
       return "error";
     }
   }
@@ -364,7 +364,7 @@ export class QuizView extends ItemView {
   /** Periodic auto-save every 5s to protect against sudden app close. */
   private startAutoSave(): void {
     if (this.autoSaveTimer !== null) {
-      clearInterval(this.autoSaveTimer);
+      window.clearInterval(this.autoSaveTimer);
     }
     this.autoSaveTimer = window.setInterval(() => {
       if (this.stateManager.getState()) {
@@ -395,7 +395,8 @@ export class QuizView extends ItemView {
         },
       ],
     });
-    const res = await modal.open();
+    modal.open();
+    const res = await modal.promise;
     if (res === "current") return "current";
     if (res === "external") return "external";
     return null;
@@ -421,7 +422,8 @@ export class QuizView extends ItemView {
         },
       ],
     });
-    const res = await modal.open();
+    modal.open();
+    const res = await modal.promise;
     if (res === "reset") return "reset";
     if (res === "keep") return "keep";
     return null;
@@ -448,7 +450,8 @@ export class QuizView extends ItemView {
         },
       ],
     });
-    const res = await modal.open();
+    modal.open();
+    const res = await modal.promise;
     if (res === "reset") return "reset";
     if (res === "abort") return "abort";
     return null;
@@ -461,7 +464,7 @@ export class QuizView extends ItemView {
       "csv-quiz-filter-toggle"
     );
     const toggleIcon = toggleHeader.createSpan("csv-quiz-filter-icon");
-    const toggleText = toggleHeader.createEl("span", { text: "筛选条件" });
+    toggleHeader.createEl("span", { text: "筛选条件" });
 
     const panelOpen = settings.filterPanelOpen;
     const filterBody = this.filterContainer.createDiv(
@@ -469,18 +472,13 @@ export class QuizView extends ItemView {
     );
 
     toggleHeader.addEventListener("click", () => {
-      const isHidden = filterBody.style.display === "none";
-      filterBody.style.display = isHidden ? "block" : "none";
+      const isHidden = filterBody.classList.contains("csv-quiz-filter-body-hidden");
+      filterBody.classList.toggle("csv-quiz-filter-body-hidden");
       toggleIcon.textContent = isHidden ? "▼" : "▶";
     });
 
-    if (panelOpen) {
-      filterBody.style.display = "block";
-      toggleIcon.textContent = "▼";
-    } else {
-      filterBody.style.display = "none";
-      toggleIcon.textContent = "▶";
-    }
+    filterBody.classList.toggle("csv-quiz-filter-body-hidden", !panelOpen);
+    toggleIcon.textContent = panelOpen ? "▼" : "▶";
 
     // Tag filter
     const tagRow = filterBody.createDiv("csv-quiz-filter-row");
@@ -502,20 +500,23 @@ export class QuizView extends ItemView {
       cls: "csv-quiz-select csv-quiz-filter-select",
     });
 
-    this.cat1Select.addEventListener("change", async () => {
-      await this.saveCurrentEdit();
-      this.filterCat1 = this.cat1Select.value;
-      this.applyFiltersAndReset();
+    this.cat1Select.addEventListener("change", () => {
+      void this.saveCurrentEdit().then(() => {
+        this.filterCat1 = this.cat1Select.value;
+        this.applyFiltersAndReset();
+      });
     });
-    this.cat2Select.addEventListener("change", async () => {
-      await this.saveCurrentEdit();
-      this.filterCat2 = this.cat2Select.value;
-      this.applyFiltersAndReset();
+    this.cat2Select.addEventListener("change", () => {
+      void this.saveCurrentEdit().then(() => {
+        this.filterCat2 = this.cat2Select.value;
+        this.applyFiltersAndReset();
+      });
     });
-    this.cat3Select.addEventListener("change", async () => {
-      await this.saveCurrentEdit();
-      this.filterCat3 = this.cat3Select.value;
-      this.applyFiltersAndReset();
+    this.cat3Select.addEventListener("change", () => {
+      void this.saveCurrentEdit().then(() => {
+        this.filterCat3 = this.cat3Select.value;
+        this.applyFiltersAndReset();
+      });
     });
 
     // Boolean filters row
@@ -536,12 +537,8 @@ export class QuizView extends ItemView {
         cls: "csv-quiz-bool-chip" + (bf.value === "1" ? " csv-quiz-bool-chip-active" : ""),
         attr: { "data-bool-key": bf.key, "data-bool-val": "1" },
       });
-      posChip.addEventListener("click", async () => {
-        await this.saveCurrentEdit();
-        const cur = (this as any)[bf.key] as string;
-        (this as any)[bf.key] = cur === "1" ? "" : "1";
-        this.syncBoolChips();
-        this.applyFiltersAndReset();
+      posChip.addEventListener("click", () => {
+        void this.toggleBoolFilter(bf.key, "1");
       });
 
       const negChip = group.createEl("span", {
@@ -549,12 +546,8 @@ export class QuizView extends ItemView {
         cls: "csv-quiz-bool-chip" + (bf.value === "0" ? " csv-quiz-bool-chip-active csv-quiz-bool-chip-inverse" : ""),
         attr: { "data-bool-key": bf.key, "data-bool-val": "0" },
       });
-      negChip.addEventListener("click", async () => {
-        await this.saveCurrentEdit();
-        const cur = (this as any)[bf.key] as string;
-        (this as any)[bf.key] = cur === "0" ? "" : "0";
-        this.syncBoolChips();
-        this.applyFiltersAndReset();
+      negChip.addEventListener("click", () => {
+        void this.toggleBoolFilter(bf.key, "0");
       });
     }
   }
@@ -596,6 +589,14 @@ export class QuizView extends ItemView {
     });
   }
 
+  private async toggleBoolFilter(key: string, val: string): Promise<void> {
+    await this.saveCurrentEdit();
+    const self = this as unknown as Record<string, string>;
+    self[key] = self[key] === val ? "" : val;
+    this.syncBoolChips();
+    this.applyFiltersAndReset();
+  }
+
   private populateTagChips(): void {
     if (!this.tagsContainer) return;
     this.tagsContainer.empty();
@@ -622,22 +623,24 @@ export class QuizView extends ItemView {
         cls: "csv-quiz-tag-chip" + (selectedSet.has(tag) ? " csv-quiz-tag-chip-selected" : ""),
       });
       chip.dataset.tag = tag;
-      chip.addEventListener("click", async () => {
-        await this.saveCurrentEdit();
-        const tagStr = chip.dataset.tag!;
-        const current = this.filterTags
-          .trim()
-          .split(/\s+/)
-          .filter((t) => t.length > 0);
-        const idx = current.indexOf(tagStr);
-        if (idx >= 0) {
-          current.splice(idx, 1);
-        } else {
-          current.push(tagStr);
-        }
-        this.filterTags = current.join(" ");
-        this.populateTagChips();
-        this.applyFiltersAndReset();
+      chip.addEventListener("click", () => {
+        void (async () => {
+          await this.saveCurrentEdit();
+          const tagStr = chip.dataset.tag!;
+          const current = this.filterTags
+            .trim()
+            .split(/\s+/)
+            .filter((t) => t.length > 0);
+          const idx = current.indexOf(tagStr);
+          if (idx >= 0) {
+            current.splice(idx, 1);
+          } else {
+            current.push(tagStr);
+          }
+          this.filterTags = current.join(" ");
+          this.populateTagChips();
+          this.applyFiltersAndReset();
+        })();
       });
     }
   }
@@ -647,7 +650,6 @@ export class QuizView extends ItemView {
     options: string[],
     currentValue: string
   ): void {
-    const prevValue = select.value;
     select.empty();
     const allOpt = select.createEl("option", { text: "全部" });
     allOpt.value = "";
@@ -741,8 +743,8 @@ export class QuizView extends ItemView {
 
     // Stem with Markdown rendering
     const stemDiv = this.questionArea.createDiv("csv-quiz-stem");
-    MarkdownRenderer.renderMarkdown(question.stem, stemDiv, "", this).catch(
-      (e) => console.error("CSV Quiz: markdown render failed", e)
+    MarkdownRenderer.render(this.app, question.stem, stemDiv, "", this).catch(
+      (e: unknown) => console.error("CSV Quiz: markdown render failed", e)
     );
 
     // Options
@@ -810,7 +812,7 @@ export class QuizView extends ItemView {
 
       if (!this.answering && !this.showingAnswer) {
         optDiv.addEventListener("click", () => {
-          this.handleAnswer(opt.key);
+          void this.handleAnswer(opt.key);
         });
       }
     }
@@ -884,10 +886,10 @@ export class QuizView extends ItemView {
       cb.checked = f.value === "1";
       labelEl.createSpan({ text: " " + f.label });
 
-      cb.addEventListener("change", async () => {
-        (question as any)[f.key] = cb.checked ? "1" : "";
-        await this.saveQuestionToCSV(question);
-        this.saveState();
+      cb.addEventListener("change", () => {
+        const q = question as unknown as Record<string, string>;
+        q[f.key] = cb.checked ? "1" : "";
+        void this.saveQuestionToCSV(question).then(() => { this.saveState(); });
       });
     }
   }
@@ -905,17 +907,12 @@ export class QuizView extends ItemView {
     const editBody = this.editArea.createDiv("csv-quiz-edit-grid");
 
     const panelOpen = settings.editPanelOpen;
-    if (panelOpen) {
-      editBody.style.display = "block";
-      toggleIcon.textContent = "▼";
-    } else {
-      editBody.style.display = "none";
-      toggleIcon.textContent = "▶";
-    }
+    editBody.classList.toggle("csv-quiz-edit-grid-hidden", !panelOpen);
+    toggleIcon.textContent = panelOpen ? "▼" : "▶";
 
     toggleHeader.addEventListener("click", () => {
-      const isHidden = editBody.style.display === "none";
-      editBody.style.display = isHidden ? "block" : "none";
+      const isHidden = editBody.classList.contains("csv-quiz-edit-grid-hidden");
+      editBody.classList.toggle("csv-quiz-edit-grid-hidden");
       toggleIcon.textContent = isHidden ? "▼" : "▶";
     });
 
@@ -973,19 +970,23 @@ export class QuizView extends ItemView {
       text: "保存修改",
       cls: "csv-quiz-btn csv-quiz-btn-primary",
     });
-    saveBtn.addEventListener("click", () => this.saveCurrentEdit());
+    saveBtn.addEventListener("click", () => { void this.saveCurrentEdit(); });
   }
 
   private async handleAnswer(selectedKey: string): Promise<void> {
     if (this.answering || this.showingAnswer) return;
 
+    this.answering = true;
+    this.selectedOption = selectedKey;
+
     await this.saveCurrentEdit();
 
     const question = this.filteredQuestions[this.currentIndex];
-    if (!question) return;
+    if (!question) {
+      this.answering = false;
+      return;
+    }
 
-    this.answering = true;
-    this.selectedOption = selectedKey;
     this.showingAnswer = true;
 
     this.answeredQuestions[question.id] = selectedKey;
@@ -998,7 +999,7 @@ export class QuizView extends ItemView {
       const settings = this.getSettings();
       if (settings.autoNextDelay > 0) {
         this.autoNextTimer = window.setTimeout(() => {
-          this.nextQuestion();
+          void this.nextQuestion();
         }, settings.autoNextDelay * 1000);
       } else {
         this.answering = false;
@@ -1020,7 +1021,7 @@ export class QuizView extends ItemView {
 
   private cancelAutoNext(): void {
     if (this.autoNextTimer !== null) {
-      clearTimeout(this.autoNextTimer);
+      window.clearTimeout(this.autoNextTimer);
       this.autoNextTimer = null;
     }
   }
@@ -1083,7 +1084,7 @@ export class QuizView extends ItemView {
       cls: "csv-quiz-btn",
     });
     prevBtn.disabled = this.currentIndex <= 0;
-    prevBtn.addEventListener("click", async () => await this.prevQuestion());
+    prevBtn.addEventListener("click", () => { void this.prevQuestion(); });
 
     // Jump input
     const jumpGroup = navInner.createDiv("csv-quiz-nav-jump");
@@ -1099,24 +1100,26 @@ export class QuizView extends ItemView {
       cls: "csv-quiz-btn",
     });
 
-    jumpBtn.addEventListener("click", async () => {
-      await this.saveCurrentEdit();
-      const targetStr = jumpInput.value.trim();
-      if (!targetStr) return;
-      const targetNum = parseInt(targetStr, 10);
-      if (
-        isNaN(targetNum) ||
-        targetNum < 1 ||
-        targetNum > this.filteredQuestions.length
-      ) {
-        new Notice("题号不存在或已被筛选");
-        return;
-      }
-      this.currentIndex = targetNum - 1;
-      this.currentShuffledQId = null;
-      this.cancelAutoNext();
-      this.renderQuestion();
-      this.saveState();
+    jumpBtn.addEventListener("click", () => {
+      void (async () => {
+        await this.saveCurrentEdit();
+        const targetStr = jumpInput.value.trim();
+        if (!targetStr) return;
+        const targetNum = parseInt(targetStr, 10);
+        if (
+          isNaN(targetNum) ||
+          targetNum < 1 ||
+          targetNum > this.filteredQuestions.length
+        ) {
+          new Notice("题号不存在或已被筛选");
+          return;
+        }
+        this.currentIndex = targetNum - 1;
+        this.currentShuffledQId = null;
+        this.cancelAutoNext();
+        this.renderQuestion();
+        this.saveState();
+      })();
     });
 
     // Next button
@@ -1126,7 +1129,7 @@ export class QuizView extends ItemView {
     });
     nextBtn.disabled =
       this.currentIndex >= this.filteredQuestions.length - 1;
-    nextBtn.addEventListener("click", () => this.nextQuestion());
+    nextBtn.addEventListener("click", () => { void this.nextQuestion(); });
 
     // Bottom bar: 下一个未答题 + 题号
     this.bottomBar.empty();
@@ -1186,14 +1189,15 @@ export class QuizView extends ItemView {
     ) as HTMLInputElement[];
 
     let changed = false;
+    const q = question as unknown as Record<string, string>;
 
     for (const input of editInputs) {
       const field = input.dataset.field;
       if (!field) continue;
 
       const value = input.value;
-      if ((question as any)[field] !== value) {
-        (question as any)[field] = value;
+      if (q[field] !== value) {
+        q[field] = value;
         changed = true;
       }
     }
@@ -1241,12 +1245,12 @@ export class QuizView extends ItemView {
         }
         return updatedContent;
       });
-    } catch (e) {
+    } catch (e: unknown) {
       console.error("CSV Quiz: Failed to save question to CSV", e);
       if (e instanceof Error && e.message === "CSV 中未找到对应题号") {
         new Notice("CSV 中未找到对应题号，修改未保存");
       } else {
-        new Notice(`保存到 CSV 失败: ${e.message}`);
+        new Notice(`保存到 CSV 失败: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
   }
@@ -1255,7 +1259,7 @@ export class QuizView extends ItemView {
     await this.saveCurrentEdit();
     this.cancelAutoNext();
     if (this.autoSaveTimer !== null) {
-      clearInterval(this.autoSaveTimer);
+      window.clearInterval(this.autoSaveTimer);
       this.autoSaveTimer = null;
     }
 
@@ -1313,9 +1317,9 @@ export class QuizView extends ItemView {
       this.saveState();
       this.startAutoSave();
       new Notice("已刷新，重新开始");
-    } catch (e) {
+    } catch (e: unknown) {
       console.error("CSV Quiz: Refresh failed", e);
-      this.showError(`刷新失败: ${e.message}`);
+      this.showError(`刷新失败: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -1328,7 +1332,7 @@ export class QuizView extends ItemView {
   }
 
   private getSettings(): PluginSettings {
-    return (this.plugin as any).settings;
+    return (this.plugin as { settings: PluginSettings }).settings;
   }
 
   private buildCurrentState(): QuizSessionState {

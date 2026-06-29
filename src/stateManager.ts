@@ -1,3 +1,4 @@
+import { Plugin } from "obsidian";
 import { QuizSessionState, PluginData, PluginSettings } from "./types";
 
 interface DataPatch {
@@ -9,19 +10,19 @@ class StateWriteQueue {
   private queue: Array<{
     patch: DataPatch;
     resolve: () => void;
-    reject: (e: any) => void;
+    reject: (e: unknown) => void;
   }> = [];
   private processing = false;
-  private plugin: any;
+  private plugin: Plugin;
 
-  constructor(plugin: any) {
+  constructor(plugin: Plugin) {
     this.plugin = plugin;
   }
 
   enqueue(patch: DataPatch): Promise<void> {
     return new Promise((resolve, reject) => {
       this.queue.push({ patch, resolve, reject });
-      this.processNext();
+      void this.processNext();
     });
   }
 
@@ -39,11 +40,11 @@ class StateWriteQueue {
       }
       await this.plugin.saveData(data);
       item.resolve();
-    } catch (e) {
+    } catch (e: unknown) {
       item.reject(e);
     } finally {
       this.processing = false;
-      this.processNext();
+      void this.processNext();
     }
   }
 
@@ -53,24 +54,24 @@ class StateWriteQueue {
 }
 
 export class StateManager {
-  private plugin: any;
+  private plugin: Plugin;
   private currentState: QuizSessionState | null = null;
   private saveTimer: number | null = null;
   private writeQueue: StateWriteQueue;
 
-  constructor(plugin: any) {
+  constructor(plugin: Plugin) {
     this.plugin = plugin;
     this.writeQueue = new StateWriteQueue(plugin);
   }
 
   async loadPluginData(): Promise<PluginData> {
-    const data = (await this.plugin.loadData()) || {};
+    const data: Record<string, unknown> = (await this.plugin.loadData()) || {};
     const settings: PluginSettings = {
-      ...this.plugin.settings,
-      ...(data.settings || {}),
+      ...(this.plugin.settings as PluginSettings),
+      ...(data.settings as Partial<PluginSettings> | undefined || {}),
     };
     const quizState: QuizSessionState | null = data.quizState
-      ? { ...data.quizState }
+      ? { ...(data.quizState as QuizSessionState) }
       : null;
     this.currentState = quizState;
     return { settings, quizState };
@@ -92,7 +93,7 @@ export class StateManager {
   scheduleSave(state: QuizSessionState, delay: number = 300): void {
     this.currentState = state;
     if (this.saveTimer !== null) {
-      clearTimeout(this.saveTimer);
+      window.clearTimeout(this.saveTimer);
     }
     this.saveTimer = window.setTimeout(() => {
       this.saveTimer = null;
@@ -109,7 +110,7 @@ export class StateManager {
 
   cancelScheduledSave(): void {
     if (this.saveTimer !== null) {
-      clearTimeout(this.saveTimer);
+      window.clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
   }

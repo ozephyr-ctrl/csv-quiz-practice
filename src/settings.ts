@@ -2,17 +2,22 @@ import {
   App,
   PluginSettingTab,
   Setting,
-  TAbstractFile,
   Notice,
   SuggestModal,
 } from "obsidian";
 import { PluginSettings, DEFAULT_SETTINGS } from "./types";
 
-export class CSVQuizSettingTab extends PluginSettingTab {
-  private plugin: any;
+interface PluginHandle {
+  settings: PluginSettings;
+  refreshQuiz(): void;
+  saveSettings(): Promise<void>;
+}
 
-  constructor(app: App, plugin: any) {
-    super(app, plugin);
+export class CSVQuizSettingTab extends PluginSettingTab {
+  private plugin: PluginHandle;
+
+  constructor(app: App, plugin: PluginHandle) {
+    super(app, plugin as any);
     this.plugin = plugin;
   }
 
@@ -20,7 +25,7 @@ export class CSVQuizSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    containerEl.createEl("h2", { text: "刷题啊 - 设置" });
+    new Setting(containerEl).setName("刷题啊 - 设置").setHeading();
 
     this.addCSVPathSetting(containerEl);
     this.addToggleSetting(
@@ -56,7 +61,7 @@ export class CSVQuizSettingTab extends PluginSettingTab {
       "editPanelOpen"
     );
 
-    containerEl.createEl("h3", { text: "标记筛选默认值" });
+    new Setting(containerEl).setName("标记筛选默认值").setHeading();
 
     this.addFilterDefaultSetting(
       containerEl,
@@ -79,13 +84,13 @@ export class CSVQuizSettingTab extends PluginSettingTab {
       "defaultFilterWrong"
     );
 
-    containerEl.createEl("h3", { text: "管理" });
+    new Setting(containerEl).setName("管理").setHeading();
     new Setting(containerEl)
       .setName("重置刷题进度")
       .setDesc("清除所有答题记录、统计和筛选状态，重新加载题库")
       .addButton((btn) =>
-        btn.setButtonText("重置").onClick(async () => {
-          await this.plugin.refreshQuiz();
+        btn.setButtonText("重置").onClick(() => {
+          this.plugin.refreshQuiz();
         })
       );
   }
@@ -98,9 +103,9 @@ export class CSVQuizSettingTab extends PluginSettingTab {
         text
           .setPlaceholder("题库.csv")
           .setValue(this.plugin.settings.csvPath)
-          .onChange(async (value) => {
+          .onChange((value) => {
             this.plugin.settings.csvPath = value;
-            await this.plugin.saveSettings();
+            void this.plugin.saveSettings();
           })
       )
       .addButton((btn) => {
@@ -111,8 +116,8 @@ export class CSVQuizSettingTab extends PluginSettingTab {
   private pickCSVFile(): void {
     const csvFiles = this.app.vault
       .getFiles()
-      .filter((f: TAbstractFile & { extension?: string }) => f.extension === "csv")
-      .map((f: any) => f.path);
+      .filter((f) => f.extension === "csv")
+      .map((f) => f.path);
 
     if (csvFiles.length === 0) {
       new Notice("库中没有找到 CSV 文件");
@@ -122,10 +127,9 @@ export class CSVQuizSettingTab extends PluginSettingTab {
     const modal = new FilePickerModal(
       this.app,
       csvFiles,
-      async (selectedPath: string) => {
+      (selectedPath: string) => {
         this.plugin.settings.csvPath = selectedPath;
-        await this.plugin.saveSettings();
-        this.display();
+        void this.plugin.saveSettings();
       }
     );
     modal.open();
@@ -143,9 +147,9 @@ export class CSVQuizSettingTab extends PluginSettingTab {
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings[key] as boolean)
-          .onChange(async (value) => {
-            (this.plugin.settings as any)[key] = value;
-            await this.plugin.saveSettings();
+          .onChange((value) => {
+            (this.plugin.settings as unknown as Record<string, boolean | string>)[key] = value;
+            void this.plugin.saveSettings();
           })
       );
   }
@@ -165,11 +169,11 @@ export class CSVQuizSettingTab extends PluginSettingTab {
         text
           .setPlaceholder(String(DEFAULT_SETTINGS[key] as number))
           .setValue(String(this.plugin.settings[key] as number))
-          .onChange(async (value) => {
+          .onChange((value) => {
             const num = parseInt(value, 10);
             if (!isNaN(num) && num >= min && num <= max) {
-              (this.plugin.settings as any)[key] = num;
-              await this.plugin.saveSettings();
+              (this.plugin.settings as unknown as Record<string, boolean | string | number>)[key] = num;
+              void this.plugin.saveSettings();
             }
           })
       );
@@ -189,9 +193,9 @@ export class CSVQuizSettingTab extends PluginSettingTab {
           .addOption("1", `仅${label}`)
           .addOption("0", `不${label}`)
           .setValue(this.plugin.settings[key] as string)
-          .onChange(async (value) => {
-            (this.plugin.settings as any)[key] = value;
-            await this.plugin.saveSettings();
+          .onChange((value) => {
+            (this.plugin.settings as unknown as Record<string, string>)[key] = value;
+            void this.plugin.saveSettings();
           })
       );
   }

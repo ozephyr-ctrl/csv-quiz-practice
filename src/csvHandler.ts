@@ -1,11 +1,11 @@
 import Papa from "papaparse";
-import { Question, QuizSessionState } from "./types";
+import { Question } from "./types";
 
 import { Vault } from "obsidian";
 
 export function parseCSV(content: string): Question[] {
-  const result = Papa.parse(content, { header: false, skipEmptyLines: true }) as Papa.ParseResult<string[]>;
-  const rows = result.data;
+  const result = Papa.parse(content, { header: false, skipEmptyLines: true });
+  const rows = result.data as string[][];
 
   // Remove BOM from first cell if present
   if (rows.length > 0 && rows[0].length > 0) {
@@ -59,8 +59,8 @@ export function findAndUpdateRow(
   questionId: string,
   newData: string[]
 ): string | null {
-  const result = Papa.parse(csvContent, { header: false, skipEmptyLines: true }) as Papa.ParseResult<string[]>;
-  const rows = result.data;
+  const result = Papa.parse(csvContent, { header: false, skipEmptyLines: true });
+  const rows = result.data as string[][];
   if (rows.length < 2) return null;
 
   const header = rows[0];
@@ -206,7 +206,7 @@ export class CSVWriteQueue {
     csvPath: string;
     transform: CSVTransform;
     resolve: (value: void) => void;
-    reject: (reason: any) => void;
+    reject: (reason: unknown) => void;
   }> = [];
   private processing = false;
   private vault: Vault;
@@ -218,7 +218,7 @@ export class CSVWriteQueue {
   enqueue(csvPath: string, transform: CSVTransform): Promise<void> {
     return new Promise((resolve, reject) => {
       this.queue.push({ csvPath, transform, resolve, reject });
-      this.processNext();
+      void this.processNext();
     });
   }
 
@@ -232,11 +232,11 @@ export class CSVWriteQueue {
       const newContent = await Promise.resolve(item.transform(currentContent));
       await writeCSVFile(this.vault, item.csvPath, newContent);
       item.resolve();
-    } catch (e) {
+    } catch (e: unknown) {
       item.reject(e);
     } finally {
       this.processing = false;
-      this.processNext();
+      void this.processNext();
     }
   }
 
@@ -246,7 +246,7 @@ export class CSVWriteQueue {
 
   async drain(): Promise<void> {
     while (this.processing || this.queue.length > 0) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 10));
     }
   }
 }
