@@ -80,6 +80,14 @@
   border-top: 1px solid var(--background-modifier-border);
 }
 
+.csv-quiz-filter-body-hidden {
+  display: none;
+}
+
+.csv-quiz-edit-grid-hidden {
+  display: none;
+}
+
 /* Tag chips */
 .csv-quiz-tags-container {
   display: flex;

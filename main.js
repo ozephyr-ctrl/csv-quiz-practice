@@ -486,7 +486,7 @@ var CSVQuizSettingTab = class extends import_obsidian.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "\u5237\u9898\u554A - \u8BBE\u7F6E" });
+    new import_obsidian.Setting(containerEl).setName("\u5237\u9898\u554A - \u8BBE\u7F6E").setHeading();
     this.addCSVPathSetting(containerEl);
     this.addToggleSetting(
       containerEl,
@@ -520,7 +520,7 @@ var CSVQuizSettingTab = class extends import_obsidian.PluginSettingTab {
       "\u6253\u5F00\u5237\u9898\u9762\u677F\u65F6\u6807\u7B7E/\u5206\u7C7B\u7F16\u8F91\u680F\u9ED8\u8BA4\u662F\u5426\u5C55\u5F00",
       "editPanelOpen"
     );
-    containerEl.createEl("h3", { text: "\u6807\u8BB0\u7B5B\u9009\u9ED8\u8BA4\u503C" });
+    new import_obsidian.Setting(containerEl).setName("\u6807\u8BB0\u7B5B\u9009\u9ED8\u8BA4\u503C").setHeading();
     this.addFilterDefaultSetting(
       containerEl,
       "\u6536\u85CF",
@@ -541,18 +541,18 @@ var CSVQuizSettingTab = class extends import_obsidian.PluginSettingTab {
       "\u9519\u9898",
       "defaultFilterWrong"
     );
-    containerEl.createEl("h3", { text: "\u7BA1\u7406" });
+    new import_obsidian.Setting(containerEl).setName("\u7BA1\u7406").setHeading();
     new import_obsidian.Setting(containerEl).setName("\u91CD\u7F6E\u5237\u9898\u8FDB\u5EA6").setDesc("\u6E05\u9664\u6240\u6709\u7B54\u9898\u8BB0\u5F55\u3001\u7EDF\u8BA1\u548C\u7B5B\u9009\u72B6\u6001\uFF0C\u91CD\u65B0\u52A0\u8F7D\u9898\u5E93").addButton(
-      (btn) => btn.setButtonText("\u91CD\u7F6E").onClick(async () => {
-        await this.plugin.refreshQuiz();
+      (btn) => btn.setButtonText("\u91CD\u7F6E").onClick(() => {
+        this.plugin.refreshQuiz();
       })
     );
   }
   addCSVPathSetting(containerEl) {
     new import_obsidian.Setting(containerEl).setName("CSV \u6587\u4EF6\u8DEF\u5F84").setDesc("\u9898\u5E93 CSV \u6587\u4EF6\u76F8\u5BF9\u4E8E\u5E93\u6839\u76EE\u5F55\u7684\u8DEF\u5F84").addText(
-      (text) => text.setPlaceholder("\u9898\u5E93.csv").setValue(this.plugin.settings.csvPath).onChange(async (value) => {
+      (text) => text.setPlaceholder("\u9898\u5E93.csv").setValue(this.plugin.settings.csvPath).onChange((value) => {
         this.plugin.settings.csvPath = value;
-        await this.plugin.saveSettings();
+        void this.plugin.saveSettings();
       })
     ).addButton((btn) => {
       btn.setButtonText("\u4ECE\u5E93\u4E2D\u9009\u62E9").onClick(() => this.pickCSVFile());
@@ -567,38 +567,37 @@ var CSVQuizSettingTab = class extends import_obsidian.PluginSettingTab {
     const modal = new FilePickerModal(
       this.app,
       csvFiles,
-      async (selectedPath) => {
+      (selectedPath) => {
         this.plugin.settings.csvPath = selectedPath;
-        await this.plugin.saveSettings();
-        this.display();
+        void this.plugin.saveSettings();
       }
     );
     modal.open();
   }
   addToggleSetting(containerEl, name, desc, key) {
     new import_obsidian.Setting(containerEl).setName(name).setDesc(desc).addToggle(
-      (toggle) => toggle.setValue(this.plugin.settings[key]).onChange(async (value) => {
+      (toggle) => toggle.setValue(this.plugin.settings[key]).onChange((value) => {
         this.plugin.settings[key] = value;
-        await this.plugin.saveSettings();
+        void this.plugin.saveSettings();
       })
     );
   }
   addNumberSetting(containerEl, name, desc, key, min, max) {
     new import_obsidian.Setting(containerEl).setName(name).setDesc(desc).addText(
-      (text) => text.setPlaceholder(String(DEFAULT_SETTINGS[key])).setValue(String(this.plugin.settings[key])).onChange(async (value) => {
+      (text) => text.setPlaceholder(String(DEFAULT_SETTINGS[key])).setValue(String(this.plugin.settings[key])).onChange((value) => {
         const num = parseInt(value, 10);
         if (!isNaN(num) && num >= min && num <= max) {
           this.plugin.settings[key] = num;
-          await this.plugin.saveSettings();
+          void this.plugin.saveSettings();
         }
       })
     );
   }
   addFilterDefaultSetting(containerEl, label, key) {
     new import_obsidian.Setting(containerEl).setName(`\u9ED8\u8BA4\u7B5B\u9009: ${label}`).setDesc(`\u6253\u5F00\u5237\u9898\u9762\u677F\u65F6\u300C${label}\u300D\u7B5B\u9009\u7684\u9ED8\u8BA4\u72B6\u6001`).addDropdown(
-      (dd) => dd.addOption("", "\u4E0D\u9650").addOption("1", `\u4EC5${label}`).addOption("0", `\u4E0D${label}`).setValue(this.plugin.settings[key]).onChange(async (value) => {
+      (dd) => dd.addOption("", "\u4E0D\u9650").addOption("1", `\u4EC5${label}`).addOption("0", `\u4E0D${label}`).setValue(this.plugin.settings[key]).onChange((value) => {
         this.plugin.settings[key] = value;
-        await this.plugin.saveSettings();
+        void this.plugin.saveSettings();
       })
     );
   }
@@ -771,7 +770,7 @@ var CSVWriteQueue = class {
   enqueue(csvPath, transform) {
     return new Promise((resolve, reject) => {
       this.queue.push({ csvPath, transform, resolve, reject });
-      this.processNext();
+      void this.processNext();
     });
   }
   async processNext() {
@@ -787,7 +786,7 @@ var CSVWriteQueue = class {
       item.reject(e);
     } finally {
       this.processing = false;
-      this.processNext();
+      void this.processNext();
     }
   }
   get pending() {
@@ -795,7 +794,7 @@ var CSVWriteQueue = class {
   }
   async drain() {
     while (this.processing || this.queue.length > 0) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await new Promise((resolve) => window.setTimeout(resolve, 10));
     }
   }
 };
@@ -854,11 +853,8 @@ var ChoiceModal = class extends import_obsidian2.Modal {
     super(app);
     this.resolved = false;
     this.opts = opts;
-  }
-  open() {
-    return new Promise((resolve) => {
+    this.promise = new Promise((resolve) => {
       this.resolveFn = resolve;
-      void super.open();
     });
   }
   onOpen() {
@@ -954,7 +950,7 @@ var QuizView = class extends import_obsidian3.ItemView {
     this.isClosed = true;
     this.cancelAutoNext();
     if (this.autoSaveTimer !== null) {
-      clearInterval(this.autoSaveTimer);
+      window.clearInterval(this.autoSaveTimer);
       this.autoSaveTimer = null;
     }
     this.stateManager.cancelScheduledSave();
@@ -1056,7 +1052,7 @@ var QuizView = class extends import_obsidian3.ItemView {
       return "ok";
     } catch (e) {
       console.error("CSV Quiz: Failed to load CSV", e);
-      this.showError(`\u65E0\u6CD5\u52A0\u8F7D CSV \u6587\u4EF6: ${e.message}`);
+      this.showError(`\u65E0\u6CD5\u52A0\u8F7D CSV \u6587\u4EF6: ${e instanceof Error ? e.message : String(e)}`);
       return "error";
     }
   }
@@ -1149,7 +1145,7 @@ var QuizView = class extends import_obsidian3.ItemView {
   /** Periodic auto-save every 5s to protect against sudden app close. */
   startAutoSave() {
     if (this.autoSaveTimer !== null) {
-      clearInterval(this.autoSaveTimer);
+      window.clearInterval(this.autoSaveTimer);
     }
     this.autoSaveTimer = window.setInterval(() => {
       if (this.stateManager.getState()) {
@@ -1176,7 +1172,8 @@ var QuizView = class extends import_obsidian3.ItemView {
         }
       ]
     });
-    const res = await modal.open();
+    modal.open();
+    const res = await modal.promise;
     if (res === "current") return "current";
     if (res === "external") return "external";
     return null;
@@ -1200,7 +1197,8 @@ var QuizView = class extends import_obsidian3.ItemView {
         }
       ]
     });
-    const res = await modal.open();
+    modal.open();
+    const res = await modal.promise;
     if (res === "reset") return "reset";
     if (res === "keep") return "keep";
     return null;
@@ -1225,7 +1223,8 @@ var QuizView = class extends import_obsidian3.ItemView {
         }
       ]
     });
-    const res = await modal.open();
+    modal.open();
+    const res = await modal.promise;
     if (res === "reset") return "reset";
     if (res === "abort") return "abort";
     return null;
@@ -1236,23 +1235,18 @@ var QuizView = class extends import_obsidian3.ItemView {
       "csv-quiz-filter-toggle"
     );
     const toggleIcon = toggleHeader.createSpan("csv-quiz-filter-icon");
-    const toggleText = toggleHeader.createEl("span", { text: "\u7B5B\u9009\u6761\u4EF6" });
+    toggleHeader.createEl("span", { text: "\u7B5B\u9009\u6761\u4EF6" });
     const panelOpen = settings.filterPanelOpen;
     const filterBody = this.filterContainer.createDiv(
       "csv-quiz-filter-body"
     );
     toggleHeader.addEventListener("click", () => {
-      const isHidden = filterBody.style.display === "none";
-      filterBody.style.display = isHidden ? "block" : "none";
+      const isHidden = filterBody.classList.contains("csv-quiz-filter-body-hidden");
+      filterBody.classList.toggle("csv-quiz-filter-body-hidden");
       toggleIcon.textContent = isHidden ? "\u25BC" : "\u25B6";
     });
-    if (panelOpen) {
-      filterBody.style.display = "block";
-      toggleIcon.textContent = "\u25BC";
-    } else {
-      filterBody.style.display = "none";
-      toggleIcon.textContent = "\u25B6";
-    }
+    filterBody.classList.toggle("csv-quiz-filter-body-hidden", !panelOpen);
+    toggleIcon.textContent = panelOpen ? "\u25BC" : "\u25B6";
     const tagRow = filterBody.createDiv("csv-quiz-filter-row");
     tagRow.createEl("label", { text: "\u6807\u7B7E: ", cls: "csv-quiz-filter-label" });
     this.tagsContainer = tagRow.createDiv("csv-quiz-tags-container");
@@ -1268,20 +1262,23 @@ var QuizView = class extends import_obsidian3.ItemView {
     this.cat3Select = catSelectors.createEl("select", {
       cls: "csv-quiz-select csv-quiz-filter-select"
     });
-    this.cat1Select.addEventListener("change", async () => {
-      await this.saveCurrentEdit();
-      this.filterCat1 = this.cat1Select.value;
-      this.applyFiltersAndReset();
+    this.cat1Select.addEventListener("change", () => {
+      void this.saveCurrentEdit().then(() => {
+        this.filterCat1 = this.cat1Select.value;
+        this.applyFiltersAndReset();
+      });
     });
-    this.cat2Select.addEventListener("change", async () => {
-      await this.saveCurrentEdit();
-      this.filterCat2 = this.cat2Select.value;
-      this.applyFiltersAndReset();
+    this.cat2Select.addEventListener("change", () => {
+      void this.saveCurrentEdit().then(() => {
+        this.filterCat2 = this.cat2Select.value;
+        this.applyFiltersAndReset();
+      });
     });
-    this.cat3Select.addEventListener("change", async () => {
-      await this.saveCurrentEdit();
-      this.filterCat3 = this.cat3Select.value;
-      this.applyFiltersAndReset();
+    this.cat3Select.addEventListener("change", () => {
+      void this.saveCurrentEdit().then(() => {
+        this.filterCat3 = this.cat3Select.value;
+        this.applyFiltersAndReset();
+      });
     });
     const boolRow = filterBody.createDiv("csv-quiz-filter-row");
     boolRow.createEl("label", { text: "\u6807\u8BB0: ", cls: "csv-quiz-filter-label" });
@@ -1299,24 +1296,16 @@ var QuizView = class extends import_obsidian3.ItemView {
         cls: "csv-quiz-bool-chip" + (bf.value === "1" ? " csv-quiz-bool-chip-active" : ""),
         attr: { "data-bool-key": bf.key, "data-bool-val": "1" }
       });
-      posChip.addEventListener("click", async () => {
-        await this.saveCurrentEdit();
-        const cur = this[bf.key];
-        this[bf.key] = cur === "1" ? "" : "1";
-        this.syncBoolChips();
-        this.applyFiltersAndReset();
+      posChip.addEventListener("click", () => {
+        void this.toggleBoolFilter(bf.key, "1");
       });
       const negChip = group.createEl("span", {
         text: "\u5426",
         cls: "csv-quiz-bool-chip" + (bf.value === "0" ? " csv-quiz-bool-chip-active csv-quiz-bool-chip-inverse" : ""),
         attr: { "data-bool-key": bf.key, "data-bool-val": "0" }
       });
-      negChip.addEventListener("click", async () => {
-        await this.saveCurrentEdit();
-        const cur = this[bf.key];
-        this[bf.key] = cur === "0" ? "" : "0";
-        this.syncBoolChips();
-        this.applyFiltersAndReset();
+      negChip.addEventListener("click", () => {
+        void this.toggleBoolFilter(bf.key, "0");
       });
     }
   }
@@ -1347,6 +1336,13 @@ var QuizView = class extends import_obsidian3.ItemView {
       chip.classList.toggle("csv-quiz-bool-chip-inverse", active && val === "0");
     });
   }
+  async toggleBoolFilter(key, val) {
+    await this.saveCurrentEdit();
+    const self2 = this;
+    self2[key] = self2[key] === val ? "" : val;
+    this.syncBoolChips();
+    this.applyFiltersAndReset();
+  }
   populateTagChips() {
     if (!this.tagsContainer) return;
     this.tagsContainer.empty();
@@ -1367,24 +1363,25 @@ var QuizView = class extends import_obsidian3.ItemView {
         cls: "csv-quiz-tag-chip" + (selectedSet.has(tag) ? " csv-quiz-tag-chip-selected" : "")
       });
       chip.dataset.tag = tag;
-      chip.addEventListener("click", async () => {
-        await this.saveCurrentEdit();
-        const tagStr = chip.dataset.tag;
-        const current = this.filterTags.trim().split(/\s+/).filter((t) => t.length > 0);
-        const idx = current.indexOf(tagStr);
-        if (idx >= 0) {
-          current.splice(idx, 1);
-        } else {
-          current.push(tagStr);
-        }
-        this.filterTags = current.join(" ");
-        this.populateTagChips();
-        this.applyFiltersAndReset();
+      chip.addEventListener("click", () => {
+        void (async () => {
+          await this.saveCurrentEdit();
+          const tagStr = chip.dataset.tag;
+          const current = this.filterTags.trim().split(/\s+/).filter((t) => t.length > 0);
+          const idx = current.indexOf(tagStr);
+          if (idx >= 0) {
+            current.splice(idx, 1);
+          } else {
+            current.push(tagStr);
+          }
+          this.filterTags = current.join(" ");
+          this.populateTagChips();
+          this.applyFiltersAndReset();
+        })();
       });
     }
   }
   populateSelect(select, options, currentValue) {
-    const prevValue = select.value;
     select.empty();
     const allOpt = select.createEl("option", { text: "\u5168\u90E8" });
     allOpt.value = "";
@@ -1464,7 +1461,7 @@ var QuizView = class extends import_obsidian3.ItemView {
       this.answering = false;
     }
     const stemDiv = this.questionArea.createDiv("csv-quiz-stem");
-    import_obsidian3.MarkdownRenderer.renderMarkdown(question.stem, stemDiv, "", this).catch(
+    import_obsidian3.MarkdownRenderer.render(this.app, question.stem, stemDiv, "", this).catch(
       (e) => console.error("CSV Quiz: markdown render failed", e)
     );
     const optionsDiv = this.questionArea.createDiv("csv-quiz-options");
@@ -1509,7 +1506,7 @@ var QuizView = class extends import_obsidian3.ItemView {
       });
       if (!this.answering && !this.showingAnswer) {
         optDiv.addEventListener("click", () => {
-          this.handleAnswer(opt.key);
+          void this.handleAnswer(opt.key);
         });
       }
     }
@@ -1559,10 +1556,12 @@ var QuizView = class extends import_obsidian3.ItemView {
       });
       cb.checked = f.value === "1";
       labelEl.createSpan({ text: " " + f.label });
-      cb.addEventListener("change", async () => {
-        question[f.key] = cb.checked ? "1" : "";
-        await this.saveQuestionToCSV(question);
-        this.saveState();
+      cb.addEventListener("change", () => {
+        const q = question;
+        q[f.key] = cb.checked ? "1" : "";
+        void this.saveQuestionToCSV(question).then(() => {
+          this.saveState();
+        });
       });
     }
   }
@@ -1574,16 +1573,11 @@ var QuizView = class extends import_obsidian3.ItemView {
     toggleHeader.createEl("span", { text: "\u6807\u7B7E / \u5206\u7C7B (\u7F16\u8F91\u540E\u81EA\u52A8\u4FDD\u5B58)" });
     const editBody = this.editArea.createDiv("csv-quiz-edit-grid");
     const panelOpen = settings.editPanelOpen;
-    if (panelOpen) {
-      editBody.style.display = "block";
-      toggleIcon.textContent = "\u25BC";
-    } else {
-      editBody.style.display = "none";
-      toggleIcon.textContent = "\u25B6";
-    }
+    editBody.classList.toggle("csv-quiz-edit-grid-hidden", !panelOpen);
+    toggleIcon.textContent = panelOpen ? "\u25BC" : "\u25B6";
     toggleHeader.addEventListener("click", () => {
-      const isHidden = editBody.style.display === "none";
-      editBody.style.display = isHidden ? "block" : "none";
+      const isHidden = editBody.classList.contains("csv-quiz-edit-grid-hidden");
+      editBody.classList.toggle("csv-quiz-edit-grid-hidden");
       toggleIcon.textContent = isHidden ? "\u25BC" : "\u25B6";
     });
     const tagRow = editBody.createDiv("csv-quiz-edit-row");
@@ -1631,15 +1625,20 @@ var QuizView = class extends import_obsidian3.ItemView {
       text: "\u4FDD\u5B58\u4FEE\u6539",
       cls: "csv-quiz-btn csv-quiz-btn-primary"
     });
-    saveBtn.addEventListener("click", () => this.saveCurrentEdit());
+    saveBtn.addEventListener("click", () => {
+      void this.saveCurrentEdit();
+    });
   }
   async handleAnswer(selectedKey) {
     if (this.answering || this.showingAnswer) return;
-    await this.saveCurrentEdit();
-    const question = this.filteredQuestions[this.currentIndex];
-    if (!question) return;
     this.answering = true;
     this.selectedOption = selectedKey;
+    await this.saveCurrentEdit();
+    const question = this.filteredQuestions[this.currentIndex];
+    if (!question) {
+      this.answering = false;
+      return;
+    }
     this.showingAnswer = true;
     this.answeredQuestions[question.id] = selectedKey;
     const isCorrect = selectedKey === question.answer;
@@ -1649,7 +1648,7 @@ var QuizView = class extends import_obsidian3.ItemView {
       const settings = this.getSettings();
       if (settings.autoNextDelay > 0) {
         this.autoNextTimer = window.setTimeout(() => {
-          this.nextQuestion();
+          void this.nextQuestion();
         }, settings.autoNextDelay * 1e3);
       } else {
         this.answering = false;
@@ -1668,7 +1667,7 @@ var QuizView = class extends import_obsidian3.ItemView {
   }
   cancelAutoNext() {
     if (this.autoNextTimer !== null) {
-      clearTimeout(this.autoNextTimer);
+      window.clearTimeout(this.autoNextTimer);
       this.autoNextTimer = null;
     }
   }
@@ -1728,7 +1727,9 @@ var QuizView = class extends import_obsidian3.ItemView {
       cls: "csv-quiz-btn"
     });
     prevBtn.disabled = this.currentIndex <= 0;
-    prevBtn.addEventListener("click", async () => await this.prevQuestion());
+    prevBtn.addEventListener("click", () => {
+      void this.prevQuestion();
+    });
     const jumpGroup = navInner.createDiv("csv-quiz-nav-jump");
     jumpGroup.createEl("label", { text: "\u7B2C " });
     const jumpInput = jumpGroup.createEl("input", {
@@ -1741,27 +1742,31 @@ var QuizView = class extends import_obsidian3.ItemView {
       text: "\u8DF3\u8F6C",
       cls: "csv-quiz-btn"
     });
-    jumpBtn.addEventListener("click", async () => {
-      await this.saveCurrentEdit();
-      const targetStr = jumpInput.value.trim();
-      if (!targetStr) return;
-      const targetNum = parseInt(targetStr, 10);
-      if (isNaN(targetNum) || targetNum < 1 || targetNum > this.filteredQuestions.length) {
-        new import_obsidian3.Notice("\u9898\u53F7\u4E0D\u5B58\u5728\u6216\u5DF2\u88AB\u7B5B\u9009");
-        return;
-      }
-      this.currentIndex = targetNum - 1;
-      this.currentShuffledQId = null;
-      this.cancelAutoNext();
-      this.renderQuestion();
-      this.saveState();
+    jumpBtn.addEventListener("click", () => {
+      void (async () => {
+        await this.saveCurrentEdit();
+        const targetStr = jumpInput.value.trim();
+        if (!targetStr) return;
+        const targetNum = parseInt(targetStr, 10);
+        if (isNaN(targetNum) || targetNum < 1 || targetNum > this.filteredQuestions.length) {
+          new import_obsidian3.Notice("\u9898\u53F7\u4E0D\u5B58\u5728\u6216\u5DF2\u88AB\u7B5B\u9009");
+          return;
+        }
+        this.currentIndex = targetNum - 1;
+        this.currentShuffledQId = null;
+        this.cancelAutoNext();
+        this.renderQuestion();
+        this.saveState();
+      })();
     });
     const nextBtn = navInner.createEl("button", {
       text: "\u4E0B\u4E00\u9898 \u25B6",
       cls: "csv-quiz-btn"
     });
     nextBtn.disabled = this.currentIndex >= this.filteredQuestions.length - 1;
-    nextBtn.addEventListener("click", () => this.nextQuestion());
+    nextBtn.addEventListener("click", () => {
+      void this.nextQuestion();
+    });
     this.bottomBar.empty();
     const bottomRow = this.bottomBar.createDiv("csv-quiz-bottom-row");
     const nextUnansweredBtn = bottomRow.createEl("button", {
@@ -1808,12 +1813,13 @@ var QuizView = class extends import_obsidian3.ItemView {
       this.editArea.querySelectorAll(".csv-quiz-edit-input")
     );
     let changed = false;
+    const q = question;
     for (const input of editInputs) {
       const field = input.dataset.field;
       if (!field) continue;
       const value = input.value;
-      if (question[field] !== value) {
-        question[field] = value;
+      if (q[field] !== value) {
+        q[field] = value;
         changed = true;
       }
     }
@@ -1831,7 +1837,7 @@ var QuizView = class extends import_obsidian3.ItemView {
         this.filterWrong
       );
       const newIndex = this.filteredQuestions.findIndex(
-        (q) => q.id === previousId
+        (q2) => q2.id === previousId
       );
       if (newIndex >= 0) {
         this.currentIndex = newIndex;
@@ -1859,7 +1865,7 @@ var QuizView = class extends import_obsidian3.ItemView {
       if (e instanceof Error && e.message === "CSV \u4E2D\u672A\u627E\u5230\u5BF9\u5E94\u9898\u53F7") {
         new import_obsidian3.Notice("CSV \u4E2D\u672A\u627E\u5230\u5BF9\u5E94\u9898\u53F7\uFF0C\u4FEE\u6539\u672A\u4FDD\u5B58");
       } else {
-        new import_obsidian3.Notice(`\u4FDD\u5B58\u5230 CSV \u5931\u8D25: ${e.message}`);
+        new import_obsidian3.Notice(`\u4FDD\u5B58\u5230 CSV \u5931\u8D25: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
   }
@@ -1867,7 +1873,7 @@ var QuizView = class extends import_obsidian3.ItemView {
     await this.saveCurrentEdit();
     this.cancelAutoNext();
     if (this.autoSaveTimer !== null) {
-      clearInterval(this.autoSaveTimer);
+      window.clearInterval(this.autoSaveTimer);
       this.autoSaveTimer = null;
     }
     const settings = this.getSettings();
@@ -1915,7 +1921,7 @@ var QuizView = class extends import_obsidian3.ItemView {
       new import_obsidian3.Notice("\u5DF2\u5237\u65B0\uFF0C\u91CD\u65B0\u5F00\u59CB");
     } catch (e) {
       console.error("CSV Quiz: Refresh failed", e);
-      this.showError(`\u5237\u65B0\u5931\u8D25: ${e.message}`);
+      this.showError(`\u5237\u65B0\u5931\u8D25: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
   showError(message) {
@@ -1962,7 +1968,7 @@ var StateWriteQueue = class {
   enqueue(patch) {
     return new Promise((resolve, reject) => {
       this.queue.push({ patch, resolve, reject });
-      this.processNext();
+      void this.processNext();
     });
   }
   async processNext() {
@@ -1983,7 +1989,7 @@ var StateWriteQueue = class {
       item.reject(e);
     } finally {
       this.processing = false;
-      this.processNext();
+      void this.processNext();
     }
   }
   get pending() {
@@ -2020,7 +2026,7 @@ var StateManager = class {
   scheduleSave(state, delay = 300) {
     this.currentState = state;
     if (this.saveTimer !== null) {
-      clearTimeout(this.saveTimer);
+      window.clearTimeout(this.saveTimer);
     }
     this.saveTimer = window.setTimeout(() => {
       this.saveTimer = null;
@@ -2035,7 +2041,7 @@ var StateManager = class {
   }
   cancelScheduledSave() {
     if (this.saveTimer !== null) {
-      clearTimeout(this.saveTimer);
+      window.clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
   }
@@ -2055,46 +2061,46 @@ var CSVQuizPlugin = class extends import_obsidian4.Plugin {
       const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ);
       if (existing.length > 0 && existing[0] !== leaf) {
         leaf.detach();
-        this.app.workspace.revealLeaf(existing[0]);
+        this.app.workspace.setActiveLeaf(existing[0], false, true);
         return new QuizView(leaf, this, this.stateManager, this.app.vault, this.csvWriteQueue);
       }
       return new QuizView(leaf, this, this.stateManager, this.app.vault, this.csvWriteQueue);
     });
     this.addRibbonIcon("book-open", "\u5237\u9898\u554A", () => {
-      this.activateView();
+      void this.activateView();
     });
     this.addCommand({
-      id: "open-csv-quiz-practice",
+      id: "open-quiz-practice",
       name: "\u6253\u5F00\u5237\u9898\u9762\u677F",
       callback: () => {
-        this.activateView();
+        void this.activateView();
       }
     });
     this.addSettingTab(new CSVQuizSettingTab(this.app, this));
   }
-  async onunload() {
+  onunload() {
     const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ);
     for (const leaf of leaves) {
       const view = leaf.view;
       if (view && view.onClose) {
-        await view.onClose();
+        void view.onClose();
       }
     }
   }
-  async activateView() {
+  activateView() {
     const { workspace } = this.app;
     let leaf = workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
     if (!leaf) {
-      leaf = workspace.getLeaf("tab");
-      await leaf.setViewState({ type: VIEW_TYPE_QUIZ, active: true });
+      leaf = workspace.getLeaf(true);
+      void leaf.setViewState({ type: VIEW_TYPE_QUIZ, active: true });
     }
-    workspace.revealLeaf(leaf);
+    workspace.setActiveLeaf(leaf, false, true);
   }
-  async refreshQuiz() {
+  refreshQuiz() {
     const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
     if (leaf) {
       const view = leaf.view;
-      await view.refresh();
+      void view.refresh();
     }
   }
   async loadSettings() {
