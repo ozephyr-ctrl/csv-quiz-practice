@@ -80,14 +80,6 @@
   border-top: 1px solid var(--background-modifier-border);
 }
 
-.csv-quiz-filter-body-hidden {
-  display: none;
-}
-
-.csv-quiz-edit-grid-hidden {
-  display: none;
-}
-
 /* Tag chips */
 .csv-quiz-tags-container {
   display: flex;
@@ -637,4 +629,13 @@
 .csv-quiz-btn-danger:hover {
   background: var(--color-red, #d32f2f);
   border-color: var(--color-red, #d32f2f);
+}
+
+/* Must come after display-flex rules so display: none wins */
+.csv-quiz-filter-body-hidden {
+  display: none;
+}
+
+.csv-quiz-edit-grid-hidden {
+  display: none;
 }
