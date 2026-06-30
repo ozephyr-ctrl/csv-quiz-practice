@@ -15,7 +15,7 @@ export default class CSVQuizPlugin extends Plugin {
     this.csvWriteQueue = new CSVWriteQueue(this.app.vault);
 
     await this.loadSettings();
-    await this.stateManager.loadPluginData();
+    await this.stateManager.loadPluginData(this.settings);
 
     this.registerView(VIEW_TYPE_QUIZ, (leaf) => {
       const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ);

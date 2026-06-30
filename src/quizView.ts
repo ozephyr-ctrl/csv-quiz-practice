@@ -164,7 +164,7 @@ export class QuizView extends ItemView {
     // Capture in-memory progress BEFORE loadPluginData overwrites it with the
     // disk value. This is the "current progress" used to detect external edits.
     const inMemoryState = this.stateManager.getState();
-    const pluginData = await this.stateManager.loadPluginData();
+    const pluginData = await this.stateManager.loadPluginData(this.getSettings());
     const settings = pluginData.settings;
     const diskState = pluginData.quizState;
 

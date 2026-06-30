@@ -64,10 +64,10 @@ export class StateManager {
     this.writeQueue = new StateWriteQueue(plugin);
   }
 
-  async loadPluginData(): Promise<PluginData> {
+  async loadPluginData(currentSettings: PluginSettings): Promise<PluginData> {
     const data: Record<string, unknown> = (await this.plugin.loadData()) || {};
     const settings: PluginSettings = {
-      ...(this.plugin.settings as PluginSettings),
+      ...currentSettings,
       ...(data.settings as Partial<PluginSettings> | undefined || {}),
     };
     const quizState: QuizSessionState | null = data.quizState
