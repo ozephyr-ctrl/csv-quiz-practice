@@ -1,0 +1,14 @@
+node_modules/
+.venv/
+dist/
+*.map
+.env
+.env.local
+*.tsbuildinfo
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

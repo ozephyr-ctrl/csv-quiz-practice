@@ -1021,6 +1021,82 @@ var ChoiceModal = class extends import_obsidian2.Modal {
     this.resolveFn(value);
   }
 };
+var TagPickerModal = class extends import_obsidian2.Modal {
+  constructor(app, allTags, currentTags) {
+    super(app);
+    this.resolved = false;
+    this.allTags = allTags;
+    this.currentTags = currentTags;
+    this.promise = new Promise((resolve) => {
+      this.resolveFn = resolve;
+    });
+  }
+  onOpen() {
+    this.titleEl.setText("\u5FEB\u901F\u8BBE\u7F6E\u6807\u7B7E");
+    this.contentEl.empty();
+    if (this.allTags.length === 0) {
+      this.contentEl.createEl("p", {
+        text: "\u6682\u65E0\u6807\u7B7E",
+        cls: "csv-quiz-tag-picker-empty"
+      });
+      return;
+    }
+    this.contentEl.createEl("p", {
+      text: "\u9009\u62E9\u4F60\u8981\u5E94\u7528\u5230\u9898\u76EE\u7684\u6807\u7B7E",
+      cls: "csv-quiz-modal-message"
+    });
+    const list = this.contentEl.createDiv("csv-quiz-tag-picker-list");
+    const currentTagSet = new Set(
+      this.currentTags.split(/\s+/).filter((t) => t.length > 0)
+    );
+    const checkboxes = [];
+    for (const tag of this.allTags) {
+      const item = list.createDiv("csv-quiz-tag-picker-item");
+      const cb = item.createEl("input", {
+        cls: "csv-quiz-tag-picker-checkbox",
+        attr: { type: "checkbox" }
+      });
+      cb.checked = currentTagSet.has(tag);
+      checkboxes.push(cb);
+      item.createEl("span", {
+        text: tag,
+        cls: "csv-quiz-tag-picker-label"
+      });
+    }
+    const actions = this.contentEl.createDiv("csv-quiz-tag-picker-actions");
+    const confirmBtn = actions.createEl("button", {
+      text: "\u786E\u8BA4",
+      cls: "csv-quiz-btn csv-quiz-modal-btn csv-quiz-btn-primary"
+    });
+    confirmBtn.addEventListener("click", () => {
+      const selected = this.allTags.filter((_, i) => checkboxes[i].checked);
+      this.choose(selected.join(" "));
+    });
+    const cancelBtn = actions.createEl("button", {
+      text: "\u53D6\u6D88",
+      cls: "csv-quiz-btn csv-quiz-modal-btn"
+    });
+    cancelBtn.addEventListener("click", () => this.cancel());
+  }
+  onClose() {
+    if (!this.resolved) {
+      this.resolved = true;
+      this.resolveFn(null);
+    }
+  }
+  choose(value) {
+    if (this.resolved) return;
+    this.resolved = true;
+    this.close();
+    this.resolveFn(value);
+  }
+  cancel() {
+    if (this.resolved) return;
+    this.resolved = true;
+    this.close();
+    this.resolveFn(null);
+  }
+};
 
 // src/quizView.ts
 var QuizView = class extends import_obsidian3.ItemView {
@@ -1642,9 +1718,16 @@ var QuizView = class extends import_obsidian3.ItemView {
     const tagsChips = this.readOnlyArea.createSpan({ cls: "csv-quiz-readonly-tags" });
     tagsChips.createEl("strong", { text: "\u6807\u7B7E:  " });
     const tagText = question.tags || "\uFF08\u65E0\uFF09";
-    for (const tag of tagText.split(/\s+/).filter(Boolean)) {
-      tagsChips.createEl("span", { text: tag, cls: "csv-quiz-tag-chip csv-quiz-tag-chip-selected" });
+    if (tagText !== "\uFF08\u65E0\uFF09") {
+      for (const tag of tagText.split(/\s+/).filter(Boolean)) {
+        tagsChips.createEl("span", { text: tag, cls: "csv-quiz-tag-chip csv-quiz-tag-chip-selected" });
+      }
+    } else {
+      tagsChips.createEl("span", { text: "\uFF08\u65E0\uFF09", cls: "csv-quiz-tag-chip csv-quiz-tag-chip-empty" });
     }
+    tagsChips.addEventListener("click", () => {
+      void this.openTagPicker(question);
+    });
     const catText = `  |  \u4E00\u7EA7: ${question.category1 || "\uFF08\u65E0\uFF09"}  |  \u4E8C\u7EA7: ${question.category2 || "\uFF08\u65E0\uFF09"}  |  \u4E09\u7EA7: ${question.category3 || "\uFF08\u65E0\uFF09"}`;
     this.readOnlyArea.createSpan({ text: catText, cls: "csv-quiz-readonly-cats" });
     this.renderEditArea(question);
@@ -1689,6 +1772,45 @@ var QuizView = class extends import_obsidian3.ItemView {
           this.saveState();
         });
       });
+    }
+  }
+  async openTagPicker(question) {
+    const allTags = getUniqueTags(this.allQuestions);
+    const currentTags = question.tags || "";
+    const modal = new TagPickerModal(this.app, allTags, currentTags);
+    modal.open();
+    const result = await modal.promise;
+    if (result !== null) {
+      question.tags = result;
+      await this.saveQuestionToCSV(question);
+      this.filteredQuestions = filterQuestions(
+        this.orderedQuestions,
+        this.filterTags,
+        this.filterCat1,
+        this.filterCat2,
+        this.filterCat3,
+        this.filterFavorite,
+        this.filterMastered,
+        this.filterRepeat,
+        this.filterWrong
+      );
+      const previousId = question.id;
+      const newIndex = this.filteredQuestions.findIndex(
+        (q) => q.id === previousId
+      );
+      if (newIndex >= 0) {
+        this.currentIndex = newIndex;
+      } else if (this.filteredQuestions.length > 0) {
+        this.currentIndex = 0;
+      } else {
+        this.currentIndex = -1;
+      }
+      this.saveState();
+      this.populateTagChips();
+      if (this.filteredQuestions.length > 0) {
+        this.renderQuestion();
+      }
+      new import_obsidian3.Notice("\u6807\u7B7E\u5DF2\u4FDD\u5B58");
     }
   }
   renderEditArea(question) {

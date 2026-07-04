@@ -483,10 +483,18 @@
   align-items: center;
   gap: 4px;
   flex-wrap: wrap;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  transition: background 0.15s;
+}
+
+.csv-quiz-readonly-tags:hover {
+  background: var(--background-modifier-hover);
 }
 
 .csv-quiz-readonly-tags .csv-quiz-tag-chip {
-  cursor: default;
+  cursor: pointer;
   padding: 2px 8px;
   font-size: 11px;
 }
@@ -638,4 +646,58 @@
 
 .csv-quiz-edit-grid-hidden {
   display: none;
+}
+
+/* Tag Picker Modal */
+.csv-quiz-tag-picker-list {
+  max-height: 300px;
+  overflow-y: auto;
+  margin: 12px 0;
+  padding: 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-primary);
+}
+
+.csv-quiz-tag-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.csv-quiz-tag-picker-item:hover {
+  background: var(--background-modifier-hover);
+}
+
+.csv-quiz-tag-picker-checkbox {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--interactive-accent);
+  flex-shrink: 0;
+}
+
+.csv-quiz-tag-picker-label {
+  font-size: 13px;
+  color: var(--text-normal);
+  cursor: pointer;
+  user-select: none;
+}
+
+.csv-quiz-tag-picker-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.csv-quiz-tag-picker-empty {
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+  padding: 20px 0;
 }

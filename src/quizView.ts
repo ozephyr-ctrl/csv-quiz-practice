@@ -25,7 +25,7 @@ import {
 } from "./csvHandler";
 import { StateManager } from "./stateManager";
 import { shuffle, sortByDisplayOrder, quizStateEquals } from "./utils";
-import { ChoiceModal } from "./modals";
+import { ChoiceModal, TagPickerModal } from "./modals";
 
 export class QuizView extends ItemView {
   private plugin: Plugin;
@@ -828,9 +828,19 @@ export class QuizView extends ItemView {
     const tagsChips = this.readOnlyArea.createSpan({ cls: "csv-quiz-readonly-tags" });
     tagsChips.createEl("strong", { text: "标签:  " });
     const tagText = question.tags || "（无）";
-    for (const tag of tagText.split(/\s+/).filter(Boolean)) {
-      tagsChips.createEl("span", { text: tag, cls: "csv-quiz-tag-chip csv-quiz-tag-chip-selected" });
+    if (tagText !== "（无）") {
+      for (const tag of tagText.split(/\s+/).filter(Boolean)) {
+        tagsChips.createEl("span", { text: tag, cls: "csv-quiz-tag-chip csv-quiz-tag-chip-selected" });
+      }
+    } else {
+      tagsChips.createEl("span", { text: "（无）", cls: "csv-quiz-tag-chip csv-quiz-tag-chip-empty" });
     }
+
+    // Click handler to open tag picker modal
+    tagsChips.addEventListener("click", () => {
+      void this.openTagPicker(question);
+    });
+
     const catText = `  |  一级: ${question.category1 || "（无）"}  |  二级: ${question.category2 || "（无）"}  |  三级: ${question.category3 || "（无）"}`;
     this.readOnlyArea.createSpan({ text: catText, cls: "csv-quiz-readonly-cats" });
 
@@ -891,6 +901,62 @@ export class QuizView extends ItemView {
         q[f.key] = cb.checked ? "1" : "";
         void this.saveQuestionToCSV(question).then(() => { this.saveState(); });
       });
+    }
+  }
+
+  private async openTagPicker(question: Question): Promise<void> {
+    // Collect all unique tags from all questions
+    const allTags = getUniqueTags(this.allQuestions);
+    // Parse current question tags into a space-separated string
+    const currentTags = question.tags || "";
+
+    const modal = new TagPickerModal(this.app, allTags, currentTags);
+    modal.open();
+    const result = await modal.promise;
+
+    if (result !== null) {
+      // Save selected tags
+      question.tags = result;
+      await this.saveQuestionToCSV(question);
+
+      // Re-apply filters since tags changed
+      this.filteredQuestions = filterQuestions(
+        this.orderedQuestions,
+        this.filterTags,
+        this.filterCat1,
+        this.filterCat2,
+        this.filterCat3,
+        this.filterFavorite,
+        this.filterMastered,
+        this.filterRepeat,
+        this.filterWrong
+      );
+
+      const previousId = question.id;
+      // Re-find current question position after re-filtering
+      const newIndex = this.filteredQuestions.findIndex(
+        (q) => q.id === previousId
+      );
+
+      if (newIndex >= 0) {
+        this.currentIndex = newIndex;
+      } else if (this.filteredQuestions.length > 0) {
+        this.currentIndex = 0;
+      } else {
+        this.currentIndex = -1;
+      }
+
+      this.saveState();
+
+      // Refresh filter panel tag chips
+      this.populateTagChips();
+
+      // Re-render the current question to show updated tags
+      if (this.filteredQuestions.length > 0) {
+        this.renderQuestion();
+      }
+
+      new Notice("标签已保存");
     }
   }
 
