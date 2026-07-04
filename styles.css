@@ -486,11 +486,11 @@
   cursor: pointer;
   padding: 2px 4px;
   border-radius: 4px;
-  transition: background 0.15s;
 }
 
 .csv-quiz-readonly-tags:hover {
-  background: var(--background-modifier-hover);
+  outline: 2px solid var(--background-modifier-hover);
+  outline-offset: 2px;
 }
 
 .csv-quiz-readonly-tags .csv-quiz-tag-chip {
@@ -663,10 +663,14 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 8px;
+  padding: 8px 10px;
   border-radius: 4px;
   cursor: pointer;
-  transition: background 0.1s;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.csv-quiz-tag-picker-item:last-child {
+  border-bottom: none;
 }
 
 .csv-quiz-tag-picker-item:hover {

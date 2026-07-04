@@ -1062,6 +1062,11 @@ var TagPickerModal = class extends import_obsidian2.Modal {
         text: tag,
         cls: "csv-quiz-tag-picker-label"
       });
+      item.addEventListener("click", (e) => {
+        if (e.target !== cb) {
+          cb.checked = !cb.checked;
+        }
+      });
     }
     const actions = this.contentEl.createDiv("csv-quiz-tag-picker-actions");
     const confirmBtn = actions.createEl("button", {
@@ -1775,6 +1780,7 @@ var QuizView = class extends import_obsidian3.ItemView {
     }
   }
   async openTagPicker(question) {
+    var _a;
     const allTags = getUniqueTags(this.allQuestions);
     const currentTags = question.tags || "";
     const modal = new TagPickerModal(this.app, allTags, currentTags);
@@ -1783,6 +1789,7 @@ var QuizView = class extends import_obsidian3.ItemView {
     if (result !== null) {
       question.tags = result;
       await this.saveQuestionToCSV(question);
+      const currentDisplayedId = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id;
       this.filteredQuestions = filterQuestions(
         this.orderedQuestions,
         this.filterTags,
@@ -1794,16 +1801,19 @@ var QuizView = class extends import_obsidian3.ItemView {
         this.filterRepeat,
         this.filterWrong
       );
-      const previousId = question.id;
-      const newIndex = this.filteredQuestions.findIndex(
-        (q) => q.id === previousId
-      );
-      if (newIndex >= 0) {
-        this.currentIndex = newIndex;
-      } else if (this.filteredQuestions.length > 0) {
-        this.currentIndex = 0;
+      if (currentDisplayedId) {
+        const newIndex = this.filteredQuestions.findIndex(
+          (q) => q.id === currentDisplayedId
+        );
+        if (newIndex >= 0) {
+          this.currentIndex = newIndex;
+        } else if (this.filteredQuestions.length > 0) {
+          this.currentIndex = 0;
+        } else {
+          this.currentIndex = -1;
+        }
       } else {
-        this.currentIndex = -1;
+        this.currentIndex = this.filteredQuestions.length > 0 ? 0 : -1;
       }
       this.saveState();
       this.populateTagChips();

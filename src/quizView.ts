@@ -915,9 +915,12 @@ export class QuizView extends ItemView {
     const result = await modal.promise;
 
     if (result !== null) {
-      // Save selected tags
+      // Save selected tags to the question (always the original question, even if user navigated away)
       question.tags = result;
       await this.saveQuestionToCSV(question);
+
+      // Remember which question is currently displayed before re-filtering
+      const currentDisplayedId = this.filteredQuestions[this.currentIndex]?.id;
 
       // Re-apply filters since tags changed
       this.filteredQuestions = filterQuestions(
@@ -932,18 +935,21 @@ export class QuizView extends ItemView {
         this.filterWrong
       );
 
-      const previousId = question.id;
-      // Re-find current question position after re-filtering
-      const newIndex = this.filteredQuestions.findIndex(
-        (q) => q.id === previousId
-      );
-
-      if (newIndex >= 0) {
-        this.currentIndex = newIndex;
-      } else if (this.filteredQuestions.length > 0) {
-        this.currentIndex = 0;
+      // Restore the currently displayed question, not the saved one
+      // (the user may have auto-advanced or manually navigated while the modal was open)
+      if (currentDisplayedId) {
+        const newIndex = this.filteredQuestions.findIndex(
+          (q) => q.id === currentDisplayedId
+        );
+        if (newIndex >= 0) {
+          this.currentIndex = newIndex;
+        } else if (this.filteredQuestions.length > 0) {
+          this.currentIndex = 0;
+        } else {
+          this.currentIndex = -1;
+        }
       } else {
-        this.currentIndex = -1;
+        this.currentIndex = this.filteredQuestions.length > 0 ? 0 : -1;
       }
 
       this.saveState();
@@ -951,7 +957,7 @@ export class QuizView extends ItemView {
       // Refresh filter panel tag chips
       this.populateTagChips();
 
-      // Re-render the current question to show updated tags
+      // Re-render the current question
       if (this.filteredQuestions.length > 0) {
         this.renderQuestion();
       }

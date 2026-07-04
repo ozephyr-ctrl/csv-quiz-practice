@@ -146,6 +146,12 @@ export class TagPickerModal extends Modal {
         text: tag,
         cls: "csv-quiz-tag-picker-label",
       });
+
+      item.addEventListener("click", (e) => {
+        if (e.target !== cb) {
+          cb.checked = !cb.checked;
+        }
+      });
     }
 
     const actions = this.contentEl.createDiv("csv-quiz-tag-picker-actions");
