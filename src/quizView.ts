@@ -58,6 +58,7 @@ export class QuizView extends ItemView {
   private answering: boolean = false;
   private showingAnswer: boolean = false;
   private selectedOption: string | null = null;
+  private selectedOptions: string[] = [];
   private autoNextTimer: number | null = null;
   private autoSaveTimer: number | null = null;
   private isClosed: boolean = false;
@@ -302,6 +303,8 @@ export class QuizView extends ItemView {
     this.wrongCount = 0;
     this.answeredQuestions = {};
     this.currentShuffledQId = null;
+    this.selectedOption = null;
+    this.selectedOptions = [];
   }
 
   /** Restore a full session state whose csvPath matches the current CSV. */
@@ -708,6 +711,16 @@ export class QuizView extends ItemView {
     this.saveState();
   }
 
+  /** 正确答案列包含多个字母（如 ABCD）时视为多选题。 */
+  private isMultiChoice(question: Question): boolean {
+    return question.answer.length > 1;
+  }
+
+  /** 忽略字母顺序与重复，归一化答案字符串用于比较。 */
+  private normalizeAnswer(value: string): string {
+    return [...new Set(value)].sort().join("");
+  }
+
   private renderQuestion(): void {
     this.questionArea.empty();
     this.feedbackArea.empty();
@@ -728,17 +741,31 @@ export class QuizView extends ItemView {
     }
 
     const question = this.filteredQuestions[this.currentIndex];
+    const multi = this.isMultiChoice(question);
 
     // Restore answer state if this question was previously answered
     const prevAnswer = this.answeredQuestions[question.id];
     if (prevAnswer) {
-      this.selectedOption = prevAnswer;
+      if (multi) {
+        this.selectedOptions = prevAnswer.split("");
+      } else {
+        this.selectedOption = prevAnswer;
+      }
       this.showingAnswer = true;
       this.answering = true;
     } else {
       this.selectedOption = null;
+      this.selectedOptions = [];
       this.showingAnswer = false;
       this.answering = false;
+    }
+
+    // 多选题在题干前标注 (多选)
+    if (multi) {
+      this.questionArea.createEl("span", {
+        text: "(多选)",
+        cls: "csv-quiz-multi-badge",
+      });
     }
 
     // Stem with Markdown rendering
@@ -771,37 +798,36 @@ export class QuizView extends ItemView {
 
     // 显示字母按展示位置顺序排列（A、B、C、D…），这样打乱选项时不会泄露
     // 原始字母映射。内部判题仍使用原始 opt.key（与 question.answer 比对）。
-    const correctDisplayIdx = displayOptions.findIndex(
-      (o) => o.key === question.answer
-    );
-    const correctDisplayLetter =
-      correctDisplayIdx >= 0
-        ? String.fromCharCode(65 + correctDisplayIdx)
-        : question.answer;
+    const answerKeys = multi ? question.answer.split("") : [question.answer];
 
     for (let i = 0; i < displayOptions.length; i++) {
       const opt = displayOptions[i];
       const displayLetter = String.fromCharCode(65 + i);
+      const isSelected = multi
+        ? this.selectedOptions.includes(opt.key)
+        : this.selectedOption === opt.key;
+      const isAnswerKey = answerKeys.includes(opt.key);
 
       const optDiv = optionsDiv.createDiv(
         "csv-quiz-option" +
-          (this.selectedOption === opt.key ? " csv-quiz-option-selected" : "") +
-          (this.showingAnswer && opt.key === question.answer
+          (isSelected ? " csv-quiz-option-selected" : "") +
+          (this.showingAnswer && isAnswerKey
             ? " csv-quiz-option-correct"
             : "") +
-          (this.showingAnswer &&
-          this.selectedOption === opt.key &&
-          opt.key !== question.answer
+          (this.showingAnswer && isSelected && !isAnswerKey
             ? " csv-quiz-option-wrong"
             : "")
       );
 
-      const radio = optDiv.createEl("input", {
-        type: "radio",
-        attr: { name: "quiz-option", id: `opt-${opt.key}` },
+      const input = optDiv.createEl("input", {
+        type: multi ? "checkbox" : "radio",
+        attr: {
+          name: multi ? "quiz-option-multi" : "quiz-option",
+          id: `opt-${opt.key}`,
+        },
       });
-      radio.value = opt.key;
-      radio.checked = this.selectedOption === opt.key;
+      input.value = opt.key;
+      input.checked = isSelected;
 
       const label = optDiv.createEl("label", {
         attr: { for: `opt-${opt.key}` },
@@ -811,14 +837,21 @@ export class QuizView extends ItemView {
       });
 
       if (!this.answering && !this.showingAnswer) {
-        optDiv.addEventListener("click", () => {
-          void this.handleAnswer(opt.key);
+        optDiv.addEventListener("click", (e: MouseEvent) => {
+          // 阻止 label 默认行为：否则点击文本会派发 label + 合成 checkbox 两个
+          // click 事件，导致 toggleMultiOption 被调用两次、选中状态被抵消。
+          e.preventDefault();
+          if (multi) {
+            this.toggleMultiOption(opt.key);
+          } else {
+            void this.handleAnswer(opt.key);
+          }
         });
       }
     }
 
     // Feedback
-    this.renderFeedback(question, correctDisplayLetter);
+    this.renderFeedback(question, displayOptions);
 
     // Checkbox area
     this.renderCheckboxArea(question);
@@ -853,13 +886,18 @@ export class QuizView extends ItemView {
 
   private renderFeedback(
     question: Question,
-    correctDisplayLetter: string
+    displayOptions: Array<{ key: string; text: string }>
   ): void {
     this.feedbackArea.empty();
 
     if (!this.showingAnswer) return;
 
-    const isCorrect = this.selectedOption === question.answer;
+    const multi = this.isMultiChoice(question);
+    const answerKeys = multi ? question.answer.split("") : [question.answer];
+    const isCorrect = multi
+      ? this.normalizeAnswer(this.selectedOptions.join("")) ===
+        this.normalizeAnswer(question.answer)
+      : this.selectedOption === question.answer;
 
     const feedbackDiv = this.feedbackArea.createDiv(
       `csv-quiz-feedback-text ${
@@ -871,10 +909,117 @@ export class QuizView extends ItemView {
     });
 
     if (!isCorrect) {
+      const correctLetters = displayOptions
+        .map((o, i) => ({ o, i }))
+        .filter(({ o }) => answerKeys.includes(o.key))
+        .map(({ i }) => String.fromCharCode(65 + i))
+        .join("");
       feedbackDiv.createEl("span", {
-        text: ` 正确答案: ${correctDisplayLetter}`,
+        text: ` 正确答案: ${correctLetters}`,
       });
     }
+  }
+
+  /** 多选题：切换某个选项的勾选状态（仅本地 DOM 更新）。 */
+  private toggleMultiOption(key: string): void {
+    if (this.answering || this.showingAnswer) return;
+    const idx = this.selectedOptions.indexOf(key);
+    if (idx >= 0) {
+      this.selectedOptions.splice(idx, 1);
+    } else {
+      this.selectedOptions.push(key);
+    }
+    const input = this.questionArea.querySelector<HTMLInputElement>(
+      `input[value="${key}"]`
+    );
+    if (input) {
+      input.checked = idx < 0;
+      const optDiv = input.closest<HTMLElement>(".csv-quiz-option");
+      if (optDiv) {
+        optDiv.classList.toggle("csv-quiz-option-selected", idx < 0);
+      }
+    }
+  }
+
+  /** 多选题：点击「下一题」时判定对错。 */
+  private async evaluateMultiAnswer(): Promise<void> {
+    if (this.answering || this.showingAnswer) return;
+
+    const question = this.filteredQuestions[this.currentIndex];
+    if (!question) return;
+
+    this.answering = true;
+    await this.saveCurrentEdit();
+
+    const selectedStr = this.normalizeAnswer(this.selectedOptions.join(""));
+    const isCorrect = selectedStr === this.normalizeAnswer(question.answer);
+
+    this.showingAnswer = true;
+    this.answeredQuestions[question.id] = selectedStr;
+
+    if (isCorrect) {
+      this.correctCount++;
+      this.renderQuestion();
+
+      const settings = this.getSettings();
+      if (settings.autoNextDelay > 0) {
+        this.autoNextTimer = window.setTimeout(() => {
+          void this.nextQuestion();
+        }, settings.autoNextDelay * 1000);
+      } else {
+        this.answering = false;
+      }
+    } else {
+      this.wrongCount++;
+      if (question.wrong !== "1") {
+        question.wrong = "1";
+        await this.saveQuestionToCSV(question);
+      }
+      this.renderQuestion();
+      this.answering = false;
+    }
+
+    this.updateProgress();
+    this.saveState();
+  }
+
+  /** 「下一题」按钮：多选题未判定时先判定，否则跳转。 */
+  private async onNextClick(): Promise<void> {
+    const question = this.filteredQuestions[this.currentIndex];
+    if (question && this.isMultiChoice(question) && !this.showingAnswer) {
+      await this.evaluateMultiAnswer();
+      return;
+    }
+    await this.nextQuestion();
+  }
+
+  /** 重置答题进度：清除答题记录与统计，保留筛选条件。 */
+  private async resetProgress(): Promise<void> {
+    const modal = new ChoiceModal(this.app, {
+      title: "重置答题进度",
+      message:
+        "将清除所有答题记录、正确/错误统计，并回到第一题。筛选条件保持不变。确定重置吗？",
+      options: [
+        { label: "重置", value: "reset", cta: true },
+        { label: "取消", value: "cancel" },
+      ],
+    });
+    modal.open();
+    const res = await modal.promise;
+    if (res !== "reset") return;
+
+    await this.saveCurrentEdit();
+    this.correctCount = 0;
+    this.wrongCount = 0;
+    this.answeredQuestions = {};
+    this.currentIndex = 0;
+    this.currentShuffledQId = null;
+    this.selectedOption = null;
+    this.selectedOptions = [];
+    this.cancelAutoNext();
+    this.renderQuestion();
+    this.saveState();
+    new Notice("答题进度已重置");
   }
 
   private renderCheckboxArea(question: Question): void {
@@ -1199,9 +1344,12 @@ export class QuizView extends ItemView {
       text: "下一题 ▶",
       cls: "csv-quiz-btn",
     });
+    const curQ = this.filteredQuestions[this.currentIndex];
+    const needJudge =
+      !!curQ && this.isMultiChoice(curQ) && !this.showingAnswer;
     nextBtn.disabled =
-      this.currentIndex >= this.filteredQuestions.length - 1;
-    nextBtn.addEventListener("click", () => { void this.nextQuestion(); });
+      this.currentIndex >= this.filteredQuestions.length - 1 && !needJudge;
+    nextBtn.addEventListener("click", () => { void this.onNextClick(); });
 
     // Bottom bar: 下一个未答题 + 题号
     this.bottomBar.empty();
@@ -1212,6 +1360,12 @@ export class QuizView extends ItemView {
       cls: "csv-quiz-btn csv-quiz-btn-sm",
     });
     nextUnansweredBtn.addEventListener("click", () => this.goToNextUnanswered());
+
+    const resetBtn = bottomRow.createEl("button", {
+      text: "重置答题进度",
+      cls: "csv-quiz-btn csv-quiz-btn-sm",
+    });
+    resetBtn.addEventListener("click", () => { void this.resetProgress(); });
 
     const qId = this.filteredQuestions[this.currentIndex]?.id;
     bottomRow.createEl("span", {
@@ -1381,6 +1535,8 @@ export class QuizView extends ItemView {
       this.wrongCount = 0;
       this.answeredQuestions = {};
       this.currentShuffledQId = null;
+      this.selectedOption = null;
+      this.selectedOptions = [];
 
       // Update filter UI
       this.updateFilterUI();

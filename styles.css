@@ -285,6 +285,17 @@
   margin: 0;
 }
 
+.csv-quiz-multi-badge {
+  display: inline-block;
+  padding: 2px 12px;
+  margin-bottom: 8px;
+  border-radius: 4px;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  font-size: 13px;
+  font-weight: 600;
+}
+
 /* Options */
 .csv-quiz-options {
   display: flex;
@@ -312,7 +323,8 @@
   background: var(--background-secondary-alt);
 }
 
-.csv-quiz-option input[type="radio"] {
+.csv-quiz-option input[type="radio"],
+.csv-quiz-option input[type="checkbox"] {
   width: 20px;
   height: 20px;
   cursor: pointer;
