@@ -61,6 +61,7 @@ export class QuizView extends ItemView {
   private selectedOptions: string[] = [];
   private autoNextTimer: number | null = null;
   private autoSaveTimer: number | null = null;
+  private navigating: boolean = false;
   private isClosed: boolean = false;
 
   private filterContainer!: HTMLElement;
@@ -744,8 +745,10 @@ export class QuizView extends ItemView {
     const multi = this.isMultiChoice(question);
 
     // Restore answer state if this question was previously answered
+    // 注意：判错时 answeredQuestions[id] 可能为空字符串（空选判错），
+    // 必须用 !== undefined 判断，否则空字符串会被当作"未答"导致判错状态丢失。
     const prevAnswer = this.answeredQuestions[question.id];
-    if (prevAnswer) {
+    if (prevAnswer !== undefined) {
       if (multi) {
         this.selectedOptions = prevAnswer.split("");
       } else {
@@ -1244,24 +1247,32 @@ export class QuizView extends ItemView {
   }
 
   private async nextQuestion(): Promise<void> {
-    await this.saveCurrentEdit();
-    const origId = this.filteredQuestions[this.currentIndex]?.id;
-    this.reFilterForNavigation();
-    if (!origId) return;
-    const found = this.filteredQuestions.some((q) => q.id === origId);
-    if (found) {
-      const newIdx = this.filteredQuestions.findIndex((q) => q.id === origId);
-      if (newIdx < this.filteredQuestions.length - 1) {
-        this.currentIndex = newIdx + 1;
-      } else {
-        this.currentIndex = newIdx;
-        return;
+    // 防重入：自动跳转 timer 与用户手动点击可能并发调用（saveCurrentEdit
+    // 的 await 会让出事件循环），若不加守卫会各自前进一题导致跳过头。
+    if (this.navigating) return;
+    this.navigating = true;
+    try {
+      await this.saveCurrentEdit();
+      const origId = this.filteredQuestions[this.currentIndex]?.id;
+      this.reFilterForNavigation();
+      if (!origId) return;
+      const found = this.filteredQuestions.some((q) => q.id === origId);
+      if (found) {
+        const newIdx = this.filteredQuestions.findIndex((q) => q.id === origId);
+        if (newIdx < this.filteredQuestions.length - 1) {
+          this.currentIndex = newIdx + 1;
+        } else {
+          this.currentIndex = newIdx;
+          return;
+        }
       }
+      this.currentShuffledQId = null;
+      this.cancelAutoNext();
+      this.renderQuestion();
+      this.saveState();
+    } finally {
+      this.navigating = false;
     }
-    this.currentShuffledQId = null;
-    this.cancelAutoNext();
-    this.renderQuestion();
-    this.saveState();
   }
 
   private async prevQuestion(): Promise<void> {
@@ -1377,7 +1388,7 @@ export class QuizView extends ItemView {
   private goToNextUnanswered(): void {
     if (this.filteredQuestions.length === 0) return;
     for (let i = this.currentIndex + 1; i < this.filteredQuestions.length; i++) {
-      if (!this.answeredQuestions[this.filteredQuestions[i].id]) {
+      if (this.answeredQuestions[this.filteredQuestions[i].id] === undefined) {
         this.currentIndex = i;
         this.currentShuffledQId = null;
         this.cancelAutoNext();

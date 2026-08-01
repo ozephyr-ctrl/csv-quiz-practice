@@ -1132,6 +1132,7 @@ var QuizView = class extends import_obsidian3.ItemView {
     this.selectedOptions = [];
     this.autoNextTimer = null;
     this.autoSaveTimer = null;
+    this.navigating = false;
     this.isClosed = false;
     this.plugin = plugin;
     this.stateManager = stateManager;
@@ -1670,7 +1671,7 @@ var QuizView = class extends import_obsidian3.ItemView {
     const question = this.filteredQuestions[this.currentIndex];
     const multi = this.isMultiChoice(question);
     const prevAnswer = this.answeredQuestions[question.id];
-    if (prevAnswer) {
+    if (prevAnswer !== void 0) {
       if (multi) {
         this.selectedOptions = prevAnswer.split("");
       } else {
@@ -2053,24 +2054,30 @@ var QuizView = class extends import_obsidian3.ItemView {
   }
   async nextQuestion() {
     var _a;
-    await this.saveCurrentEdit();
-    const origId = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id;
-    this.reFilterForNavigation();
-    if (!origId) return;
-    const found = this.filteredQuestions.some((q) => q.id === origId);
-    if (found) {
-      const newIdx = this.filteredQuestions.findIndex((q) => q.id === origId);
-      if (newIdx < this.filteredQuestions.length - 1) {
-        this.currentIndex = newIdx + 1;
-      } else {
-        this.currentIndex = newIdx;
-        return;
+    if (this.navigating) return;
+    this.navigating = true;
+    try {
+      await this.saveCurrentEdit();
+      const origId = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id;
+      this.reFilterForNavigation();
+      if (!origId) return;
+      const found = this.filteredQuestions.some((q) => q.id === origId);
+      if (found) {
+        const newIdx = this.filteredQuestions.findIndex((q) => q.id === origId);
+        if (newIdx < this.filteredQuestions.length - 1) {
+          this.currentIndex = newIdx + 1;
+        } else {
+          this.currentIndex = newIdx;
+          return;
+        }
       }
+      this.currentShuffledQId = null;
+      this.cancelAutoNext();
+      this.renderQuestion();
+      this.saveState();
+    } finally {
+      this.navigating = false;
     }
-    this.currentShuffledQId = null;
-    this.cancelAutoNext();
-    this.renderQuestion();
-    this.saveState();
   }
   async prevQuestion() {
     var _a;
@@ -2172,7 +2179,7 @@ var QuizView = class extends import_obsidian3.ItemView {
   goToNextUnanswered() {
     if (this.filteredQuestions.length === 0) return;
     for (let i = this.currentIndex + 1; i < this.filteredQuestions.length; i++) {
-      if (!this.answeredQuestions[this.filteredQuestions[i].id]) {
+      if (this.answeredQuestions[this.filteredQuestions[i].id] === void 0) {
         this.currentIndex = i;
         this.currentShuffledQId = null;
         this.cancelAutoNext();
