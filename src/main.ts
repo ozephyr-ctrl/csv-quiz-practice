@@ -21,7 +21,7 @@ export default class CSVQuizPlugin extends Plugin {
       const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ);
       if (existing.length > 0 && existing[0] !== leaf) {
         leaf.detach();
-        this.app.workspace.setActiveLeaf(existing[0], false, true);
+        this.app.workspace.setActiveLeaf(existing[0], { focus: true });
         return new QuizView(leaf, this, this.stateManager, this.app.vault, this.csvWriteQueue);
       }
       return new QuizView(leaf, this, this.stateManager, this.app.vault, this.csvWriteQueue);
@@ -62,7 +62,7 @@ export default class CSVQuizPlugin extends Plugin {
       void leaf.setViewState({ type: VIEW_TYPE_QUIZ, active: true });
     }
 
-    workspace.setActiveLeaf(leaf, false, true);
+    workspace.setActiveLeaf(leaf, { focus: true });
   }
 
   refreshQuiz(): void {
@@ -74,17 +74,22 @@ export default class CSVQuizPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    const data: PluginData = (await this.loadData()) || {
-      settings: {
-        csvPath: "题库.csv",
-        randomOrder: false,
-        randomOptions: false,
-        autoNextDelay: 1,
-        filterPanelOpen: true,
-        editPanelOpen: true,
-      },
-      quizState: null,
-    };
+    const data: PluginData =
+      ((await this.loadData()) as PluginData | null) || {
+        settings: {
+          csvPath: "题库.csv",
+          randomOrder: false,
+          randomOptions: false,
+          autoNextDelay: 1,
+          filterPanelOpen: true,
+          editPanelOpen: true,
+          defaultFilterFavorite: "",
+          defaultFilterMastered: "",
+          defaultFilterRepeat: "",
+          defaultFilterWrong: "",
+        },
+        quizState: null,
+      };
 
     this.settings = {
       csvPath: data.settings.csvPath || "题库.csv",

@@ -1,5 +1,6 @@
 import {
   App,
+  Plugin,
   PluginSettingTab,
   Setting,
   Notice,
@@ -19,7 +20,7 @@ export class CSVQuizSettingTab extends PluginSettingTab {
   private plugin: PluginHandle;
 
   constructor(app: App, plugin: PluginHandle) {
-    super(app, plugin as any);
+    super(app, plugin as unknown as Plugin);
     this.plugin = plugin;
   }
 
@@ -295,8 +296,8 @@ export class CSVQuizSettingTab extends PluginSettingTab {
       .setDesc(desc)
       .addText((text) =>
         text
-          .setPlaceholder(String(DEFAULT_SETTINGS[key] as number))
-          .setValue(String(this.plugin.settings[key] as number))
+          .setPlaceholder(String(DEFAULT_SETTINGS[key]))
+          .setValue(String(this.plugin.settings[key]))
           .onChange((value) => {
             const num = parseInt(value, 10);
             if (!isNaN(num) && num >= min && num <= max) {

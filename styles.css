@@ -344,14 +344,14 @@
   background: var(--interactive-accent-hover);
 }
 
-.csv-quiz-option-correct {
-  border-color: var(--color-green, #4caf50) !important;
-  background: rgba(76, 175, 80, 0.12) !important;
+.csv-quiz-option.csv-quiz-option-correct {
+  border-color: var(--color-green, #4caf50);
+  background: rgba(76, 175, 80, 0.12);
 }
 
-.csv-quiz-option-wrong {
-  border-color: var(--color-red, #f44336) !important;
-  background: rgba(244, 67, 54, 0.12) !important;
+.csv-quiz-option.csv-quiz-option-wrong {
+  border-color: var(--color-red, #f44336);
+  background: rgba(244, 67, 54, 0.12);
 }
 
 /* Feedback */

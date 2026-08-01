@@ -31,7 +31,9 @@ class StateWriteQueue {
     this.processing = true;
     const item = this.queue.shift()!;
     try {
-      const data = (await this.plugin.loadData()) || {};
+      const data =
+        ((await this.plugin.loadData()) as Record<string, unknown> | null) ||
+        {};
       if (item.patch.settings !== undefined) {
         data.settings = item.patch.settings;
       }
@@ -65,7 +67,8 @@ export class StateManager {
   }
 
   async loadPluginData(currentSettings: PluginSettings): Promise<PluginData> {
-    const data: Record<string, unknown> = (await this.plugin.loadData()) || {};
+    const data =
+      ((await this.plugin.loadData()) as Record<string, unknown> | null) || {};
     const settings: PluginSettings = {
       ...currentSettings,
       ...(data.settings as Partial<PluginSettings> | undefined || {}),

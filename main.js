@@ -2459,7 +2459,7 @@ var CSVQuizPlugin = class extends import_obsidian4.Plugin {
       const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ);
       if (existing.length > 0 && existing[0] !== leaf) {
         leaf.detach();
-        this.app.workspace.setActiveLeaf(existing[0], false, true);
+        this.app.workspace.setActiveLeaf(existing[0], { focus: true });
         return new QuizView(leaf, this, this.stateManager, this.app.vault, this.csvWriteQueue);
       }
       return new QuizView(leaf, this, this.stateManager, this.app.vault, this.csvWriteQueue);
@@ -2492,7 +2492,7 @@ var CSVQuizPlugin = class extends import_obsidian4.Plugin {
       leaf = workspace.getLeaf(true);
       void leaf.setViewState({ type: VIEW_TYPE_QUIZ, active: true });
     }
-    workspace.setActiveLeaf(leaf, false, true);
+    workspace.setActiveLeaf(leaf, { focus: true });
   }
   refreshQuiz() {
     const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
@@ -2510,7 +2510,11 @@ var CSVQuizPlugin = class extends import_obsidian4.Plugin {
         randomOptions: false,
         autoNextDelay: 1,
         filterPanelOpen: true,
-        editPanelOpen: true
+        editPanelOpen: true,
+        defaultFilterFavorite: "",
+        defaultFilterMastered: "",
+        defaultFilterRepeat: "",
+        defaultFilterWrong: ""
       },
       quizState: null
     };

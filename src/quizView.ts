@@ -1422,8 +1422,8 @@ export class QuizView extends ItemView {
     const question = this.filteredQuestions[this.currentIndex];
     const previousId = question.id;
     const editInputs = Array.from(
-      this.editArea.querySelectorAll(".csv-quiz-edit-input")
-    ) as HTMLInputElement[];
+      this.editArea.querySelectorAll<HTMLInputElement>(".csv-quiz-edit-input")
+    );
 
     let changed = false;
     const q = question as unknown as Record<string, string>;
