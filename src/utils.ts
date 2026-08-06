@@ -40,6 +40,7 @@ export function quizStateEquals(
   if (a.currentIndex !== b.currentIndex) return false;
   if (a.correctCount !== b.correctCount) return false;
   if (a.wrongCount !== b.wrongCount) return false;
+  if (a.filterText !== b.filterText) return false;
   if (a.filterTags !== b.filterTags) return false;
   if (a.filterCat1 !== b.filterCat1) return false;
   if (a.filterCat2 !== b.filterCat2) return false;

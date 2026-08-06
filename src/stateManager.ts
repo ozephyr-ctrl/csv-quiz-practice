@@ -60,6 +60,8 @@ export class StateManager {
   private currentState: QuizSessionState | null = null;
   private saveTimer: number | null = null;
   private writeQueue: StateWriteQueue;
+  private settingsSaveTimer: number | null = null;
+  private pendingSettings: PluginSettings | null = null;
 
   constructor(plugin: Plugin) {
     this.plugin = plugin;
@@ -118,7 +120,32 @@ export class StateManager {
     }
   }
 
+  /** 设置保存防抖：设置面板每次击键都会触发，合并为最后一次变更后 400ms 写入一次。 */
   async saveSettings(settings: PluginSettings): Promise<void> {
-    await this.writeQueue.enqueue({ settings });
+    this.pendingSettings = settings;
+    if (this.settingsSaveTimer !== null) {
+      window.clearTimeout(this.settingsSaveTimer);
+    }
+    return new Promise<void>((resolve) => {
+      this.settingsSaveTimer = window.setTimeout(() => {
+        this.settingsSaveTimer = null;
+        const s = this.pendingSettings;
+        this.pendingSettings = null;
+        void this.writeQueue.enqueue({ settings: s! }).then(resolve);
+      }, 400);
+    });
+  }
+
+  /** 立即落盘挂起的设置保存（设置页关闭 / 插件卸载时调用，避免防抖窗口内丢设置）。 */
+  async flushSettingsSave(): Promise<void> {
+    if (this.settingsSaveTimer !== null) {
+      window.clearTimeout(this.settingsSaveTimer);
+      this.settingsSaveTimer = null;
+    }
+    const s = this.pendingSettings;
+    this.pendingSettings = null;
+    if (s) {
+      await this.writeQueue.enqueue({ settings: s });
+    }
   }
 }

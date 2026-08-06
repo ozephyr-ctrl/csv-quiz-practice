@@ -41,6 +41,7 @@ export class QuizView extends ItemView {
   private correctCount: number = 0;
   private wrongCount: number = 0;
 
+  private filterText: string = "";
   private filterTags: string = "";
   private filterCat1: string = "";
   private filterCat2: string = "";
@@ -63,6 +64,12 @@ export class QuizView extends ItemView {
   private autoSaveTimer: number | null = null;
   private navigating: boolean = false;
   private isClosed: boolean = false;
+  /** 题库加载成功前禁止写入状态，避免加载失败后用空进度覆盖磁盘进度。 */
+  private canPersistState: boolean = false;
+  /** 当前打开的视图实例数（模块级）：防止同一窗口内出现双实例互相覆盖进度。 */
+  private static openViewCount = 0;
+  /** 本实例是否已计入 openViewCount。 */
+  private counted = false;
 
   private filterContainer!: HTMLElement;
   private progressEl!: HTMLElement;
@@ -102,6 +109,15 @@ export class QuizView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
+    // V3: 防止同窗口双实例竞态（快速连点 ribbon 时 registerView 的守卫可能失效）。
+    // 已有一个实例在运行时，把自己 detach 掉，避免两个实例互相覆盖进度。
+    if (QuizView.openViewCount > 0) {
+      if (this.leaf.parent) this.leaf.detach();
+      return;
+    }
+    QuizView.openViewCount++;
+    this.counted = true;
+
     this.contentEl.addClass("csv-quiz-container");
     this.contentEl.empty();
     this.buildLayout();
@@ -112,13 +128,21 @@ export class QuizView extends ItemView {
   async onClose(): Promise<void> {
     if (this.isClosed) return;
     this.isClosed = true;
+    if (this.counted) {
+      QuizView.openViewCount--;
+      this.counted = false;
+    }
     this.cancelAutoNext();
     if (this.autoSaveTimer !== null) {
       window.clearInterval(this.autoSaveTimer);
       this.autoSaveTimer = null;
     }
     this.stateManager.cancelScheduledSave();
-    if (this.stateManager.getState()) {
+    if (this.textFilterTimer !== null) {
+      window.clearTimeout(this.textFilterTimer);
+      this.textFilterTimer = null;
+    }
+    if (this.stateManager.getState() && this.canPersistState) {
       await this.stateManager.saveStateImmediately(this.buildCurrentState());
     }
     await this.csvWriteQueue.drain();
@@ -167,7 +191,11 @@ export class QuizView extends ItemView {
     // disk value. This is the "current progress" used to detect external edits.
     const inMemoryState = this.stateManager.getState();
     const pluginData = await this.stateManager.loadPluginData(this.getSettings());
-    const settings = pluginData.settings;
+    // V2: 加载过程中视图被关闭 → 中止整个初始化流程，不再写盘
+    if (this.isClosed) return;
+    // M5b: 使用内存中的最新设置（设置面板修改已写入内存并排队落盘），
+    // 避免读到尚未落盘的旧磁盘设置导致竞态。
+    const settings = this.getSettings();
     const diskState = pluginData.quizState;
 
     this.csvPath = settings.csvPath;
@@ -185,6 +213,8 @@ export class QuizView extends ItemView {
     let effectiveSavedState: QuizSessionState | null = diskState;
     if (inMemoryState && !quizStateEquals(inMemoryState, diskState)) {
       const choice = await this.askExternalModificationChoice(diskState === null);
+      // V2: 弹窗期间视图被关闭 → 中止（磁盘进度保持不变）
+      if (this.isClosed) return;
       if (choice === "current") {
         effectiveSavedState = inMemoryState;
       } else if (choice === "external") {
@@ -199,6 +229,8 @@ export class QuizView extends ItemView {
     // --- 检测题库路径变更，需要重置刷题进度 ---
     if (effectiveSavedState && effectiveSavedState.csvPath !== this.csvPath) {
       const reset = await this.askResetChoice();
+      // V2: 弹窗期间视图被关闭 → 中止
+      if (this.isClosed) return;
       if (reset === null) {
         this.showError("已取消加载题库。请重新打开刷题面板。");
         return;
@@ -206,6 +238,8 @@ export class QuizView extends ItemView {
       if (reset === "keep") {
         // 保留旧进度会造成运行异常（题号属于另一个题库）→ 拒绝打开并再次询问
         const again = await this.askResetOrAbort();
+        // V2: 弹窗期间视图被关闭 → 中止
+        if (this.isClosed) return;
         if (again !== "reset") {
           this.showError(
             "题库路径已变更，未重置进度无法正常打开题库。请在设置中点击「重置刷题进度」后重试。"
@@ -215,6 +249,8 @@ export class QuizView extends ItemView {
       }
       // 执行重置：重新开始刷题，保留筛选条件
       const status = await this.loadQuestions();
+      // V2: 加载期间视图被关闭 → 中止
+      if (this.isClosed) return;
       if (status !== "ok") {
         if (status === "error") this.restoreFiltersOnly(effectiveSavedState);
         this.startAutoSave();
@@ -230,6 +266,8 @@ export class QuizView extends ItemView {
 
     // --- 正常加载：恢复进度 或 首次使用 ---
     const status = await this.loadQuestions();
+    // V2: 加载期间视图被关闭 → 中止
+    if (this.isClosed) return;
     if (status !== "ok") {
       if (status === "error") this.restoreFiltersOnly(effectiveSavedState);
       this.startAutoSave();
@@ -252,15 +290,33 @@ export class QuizView extends ItemView {
     try {
       const csvContent = await readCSVFile(this.vault, this.csvPath);
       this.allQuestions = parseCSV(csvContent);
+      this.checkDuplicateIds();
       if (this.allQuestions.length === 0) {
+        this.canPersistState = false;
         this.showError("CSV 文件中没有找到题目数据");
         return "empty";
       }
+      this.canPersistState = true;
       return "ok";
     } catch (e: unknown) {
+      this.canPersistState = false;
       console.error("CSV Quiz: Failed to load CSV", e);
       this.showError(`无法加载 CSV 文件: ${e instanceof Error ? e.message : String(e)}`);
       return "error";
+    }
+  }
+
+  /** 检测题库中重复/空题号并提示，避免答题记录与 CSV 更新错乱。 */
+  private checkDuplicateIds(): void {
+    const seen = new Set<string>();
+    const dups = new Set<string>();
+    for (const q of this.allQuestions) {
+      if (seen.has(q.id)) dups.add(q.id);
+      else seen.add(q.id);
+    }
+    if (dups.size > 0) {
+      const list = [...dups].map((d) => (d === "" ? "（空题号）" : d)).join(", ");
+      new Notice(`题库中存在重复题号: ${list}，答题记录可能不准确，请检查 CSV`);
     }
   }
 
@@ -270,6 +326,7 @@ export class QuizView extends ItemView {
     savedState: QuizSessionState | null
   ): void {
     if (savedState) {
+      this.filterText = savedState.filterText || "";
       this.filterTags = savedState.filterTags || "";
       this.filterCat1 = savedState.filterCat1 || "";
       this.filterCat2 = savedState.filterCat2 || "";
@@ -288,17 +345,7 @@ export class QuizView extends ItemView {
 
     this.displayOrder = buildDisplayOrder(this.allQuestions, settings.randomOrder);
     this.orderedQuestions = sortByDisplayOrder(this.allQuestions, this.displayOrder);
-    this.filteredQuestions = filterQuestions(
-      this.orderedQuestions,
-      this.filterTags,
-      this.filterCat1,
-      this.filterCat2,
-      this.filterCat3,
-      this.filterFavorite,
-      this.filterMastered,
-      this.filterRepeat,
-      this.filterWrong
-    );
+    this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
     this.currentIndex = 0;
     this.correctCount = 0;
     this.wrongCount = 0;
@@ -313,6 +360,7 @@ export class QuizView extends ItemView {
     settings: PluginSettings,
     savedState: QuizSessionState
   ): void {
+    this.filterText = savedState.filterText || "";
     this.filterTags = savedState.filterTags || "";
     this.filterCat1 = savedState.filterCat1 || "";
     this.filterCat2 = savedState.filterCat2 || "";
@@ -328,17 +376,7 @@ export class QuizView extends ItemView {
       savedState.displayOrder
     );
     this.orderedQuestions = sortByDisplayOrder(this.allQuestions, this.displayOrder);
-    this.filteredQuestions = filterQuestions(
-      this.orderedQuestions,
-      this.filterTags,
-      this.filterCat1,
-      this.filterCat2,
-      this.filterCat3,
-      this.filterFavorite,
-      this.filterMastered,
-      this.filterRepeat,
-      this.filterWrong
-    );
+    this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
 
     this.currentIndex = Math.min(
       savedState.currentIndex,
@@ -354,6 +392,7 @@ export class QuizView extends ItemView {
   /** On CSV load failure: keep filters from saved state so the UI is not blank. */
   private restoreFiltersOnly(savedState: QuizSessionState | null): void {
     if (!savedState) return;
+    this.filterText = savedState.filterText || "";
     this.filterTags = savedState.filterTags || "";
     this.filterCat1 = savedState.filterCat1 || "";
     this.filterCat2 = savedState.filterCat2 || "";
@@ -367,11 +406,14 @@ export class QuizView extends ItemView {
 
   /** Periodic auto-save every 5s to protect against sudden app close. */
   private startAutoSave(): void {
+    // V2: 视图已关闭时不再启动心跳（onClose 只执行一次，关闭后重启的心跳将无法被清除）
+    if (this.isClosed) return;
     if (this.autoSaveTimer !== null) {
       window.clearInterval(this.autoSaveTimer);
     }
     this.autoSaveTimer = window.setInterval(() => {
-      if (this.stateManager.getState()) {
+      // V2: 关闭后残留的心跳（若有）不得再写盘
+      if (!this.isClosed && this.canPersistState && this.stateManager.getState()) {
         this.stateManager.scheduleSave(this.buildCurrentState(), 0);
       }
     }, 5000);
@@ -484,6 +526,19 @@ export class QuizView extends ItemView {
     filterBody.classList.toggle("csv-quiz-filter-body-hidden", !panelOpen);
     toggleIcon.textContent = panelOpen ? "▼" : "▶";
 
+    // Free-text filter: 匹配题干与选项（子串包含，不区分大小写）
+    const textRow = filterBody.createDiv("csv-quiz-filter-row");
+    textRow.createEl("label", { text: "文本: ", cls: "csv-quiz-filter-label" });
+    this.filterTextInput = textRow.createEl("input", {
+      type: "text",
+      cls: "csv-quiz-input csv-quiz-filter-text-input",
+      attr: { placeholder: "匹配题干与选项" },
+    });
+    this.filterTextInput.value = this.filterText;
+    this.filterTextInput.addEventListener("input", () => {
+      this.scheduleTextFilter();
+    });
+
     // Tag filter
     const tagRow = filterBody.createDiv("csv-quiz-filter-row");
     tagRow.createEl("label", { text: "标签: ", cls: "csv-quiz-filter-label" });
@@ -560,6 +615,8 @@ export class QuizView extends ItemView {
   private cat2Select!: HTMLSelectElement;
   private cat3Select!: HTMLSelectElement;
   private tagsContainer!: HTMLElement;
+  private filterTextInput!: HTMLInputElement;
+  private textFilterTimer: number | null = null;
 
   private updateFilterUI(): void {
     if (!this.cat1Select) return;
@@ -570,9 +627,26 @@ export class QuizView extends ItemView {
     this.populateSelect(this.cat2Select, cats.cat2, this.filterCat2);
     this.populateSelect(this.cat3Select, cats.cat3, this.filterCat3);
 
+    if (this.filterTextInput) {
+      this.filterTextInput.value = this.filterText;
+    }
+
     this.populateTagChips();
 
     this.syncBoolChips();
+  }
+
+  /** 自由文本筛选：输入防抖 200ms 后应用（与其它筛选一致的 applyFiltersAndReset 行为）。 */
+  private scheduleTextFilter(): void {
+    if (this.textFilterTimer !== null) {
+      window.clearTimeout(this.textFilterTimer);
+    }
+    this.textFilterTimer = window.setTimeout(() => {
+      this.textFilterTimer = null;
+      if (this.isClosed) return;
+      this.filterText = this.filterTextInput.value;
+      this.applyFiltersAndReset();
+    }, 200);
   }
 
   private syncBoolChips(): void {
@@ -670,19 +744,25 @@ export class QuizView extends ItemView {
     }
   }
 
-  private reFilterForNavigation(): void {
-    const prevId = this.filteredQuestions[this.currentIndex]?.id;
-    this.filteredQuestions = filterQuestions(
-      this.orderedQuestions,
+  /** 按当前全部筛选条件（含自由文本）过滤题目。 */
+  private applyFiltersTo(questions: Question[]): Question[] {
+    return filterQuestions(
+      questions,
       this.filterTags,
       this.filterCat1,
       this.filterCat2,
-       this.filterCat3,
-          this.filterFavorite,
-          this.filterMastered,
-          this.filterRepeat,
-          this.filterWrong
-       );
+      this.filterCat3,
+      this.filterFavorite,
+      this.filterMastered,
+      this.filterRepeat,
+      this.filterWrong,
+      this.filterText
+    );
+  }
+
+  private reFilterForNavigation(): void {
+    const prevId = this.filteredQuestions[this.currentIndex]?.id;
+    this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
     if (prevId) {
       const newIdx = this.filteredQuestions.findIndex((q) => q.id === prevId);
       if (newIdx >= 0) {
@@ -694,17 +774,7 @@ export class QuizView extends ItemView {
   }
 
   private applyFiltersAndReset(): void {
-    this.filteredQuestions = filterQuestions(
-      this.orderedQuestions,
-      this.filterTags,
-      this.filterCat1,
-      this.filterCat2,
-       this.filterCat3,
-          this.filterFavorite,
-          this.filterMastered,
-          this.filterRepeat,
-          this.filterWrong
-       );
+    this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
     this.currentIndex = this.filteredQuestions.length > 0 ? 0 : -1;
     this.currentShuffledQId = null;
     this.cancelAutoNext();
@@ -948,23 +1018,43 @@ export class QuizView extends ItemView {
   private async evaluateMultiAnswer(): Promise<void> {
     if (this.answering || this.showingAnswer) return;
 
-    const question = this.filteredQuestions[this.currentIndex];
-    if (!question) return;
+    const origQuestion = this.filteredQuestions[this.currentIndex];
+    if (!origQuestion) return;
 
     this.answering = true;
     await this.saveCurrentEdit();
 
+    // H2: 同 handleAnswer，重新定位用户实际作答的题目
+    let question = this.filteredQuestions[this.currentIndex];
+    if (!question || question.id !== origQuestion.id) {
+      const idx = this.filteredQuestions.findIndex((q) => q.id === origQuestion.id);
+      if (idx >= 0) {
+        this.currentIndex = idx;
+        question = this.filteredQuestions[idx];
+      } else {
+        const selectedStr = this.normalizeAnswer(this.selectedOptions.join(""));
+        await this.recordAnswer(
+          origQuestion,
+          selectedStr,
+          selectedStr === this.normalizeAnswer(origQuestion.answer)
+        );
+        this.renderQuestion();
+        this.saveState();
+        new Notice("题目已因筛选条件变化被移出当前列表，答案已记录");
+        return;
+      }
+    }
+
     const selectedStr = this.normalizeAnswer(this.selectedOptions.join(""));
     const isCorrect = selectedStr === this.normalizeAnswer(question.answer);
-
     this.showingAnswer = true;
-    this.answeredQuestions[question.id] = selectedStr;
+    await this.recordAnswer(question, selectedStr, isCorrect);
 
+    this.renderQuestion();
+    this.updateProgress();
+
+    const settings = this.getSettings();
     if (isCorrect) {
-      this.correctCount++;
-      this.renderQuestion();
-
-      const settings = this.getSettings();
       if (settings.autoNextDelay > 0) {
         this.autoNextTimer = window.setTimeout(() => {
           void this.nextQuestion();
@@ -973,24 +1063,49 @@ export class QuizView extends ItemView {
         this.answering = false;
       }
     } else {
-      this.wrongCount++;
-      if (question.wrong !== "1") {
-        question.wrong = "1";
-        await this.saveQuestionToCSV(question);
-      }
-      this.renderQuestion();
       this.answering = false;
     }
-
-    this.updateProgress();
     this.saveState();
+  }
+
+  /** 记录答题结果：计数、答题记录、错题标记（答对清除、答错置位），写 CSV 失败时回滚标记。不负责渲染。 */
+  private async recordAnswer(
+    question: Question,
+    selectedStr: string,
+    isCorrect: boolean
+  ): Promise<void> {
+    this.answeredQuestions[question.id] = selectedStr;
+
+    if (isCorrect) {
+      this.correctCount++;
+      if (question.wrong === "1") {
+        const prevWrong = question.wrong;
+        question.wrong = "";
+        const ok = await this.saveQuestionToCSV(question);
+        if (!ok) question.wrong = prevWrong;
+      }
+    } else {
+      this.wrongCount++;
+      if (question.wrong !== "1") {
+        const prevWrong = question.wrong;
+        question.wrong = "1";
+        const ok = await this.saveQuestionToCSV(question);
+        if (!ok) question.wrong = prevWrong;
+      }
+    }
   }
 
   /** 「下一题」按钮：多选题未判定时先判定，否则跳转。 */
   private async onNextClick(): Promise<void> {
+    if (this.navigating) return;
     const question = this.filteredQuestions[this.currentIndex];
     if (question && this.isMultiChoice(question) && !this.showingAnswer) {
-      await this.evaluateMultiAnswer();
+      this.navigating = true;
+      try {
+        await this.evaluateMultiAnswer();
+      } finally {
+        this.navigating = false;
+      }
       return;
     }
     await this.nextQuestion();
@@ -1046,13 +1161,29 @@ export class QuizView extends ItemView {
 
       cb.addEventListener("change", () => {
         const q = question as unknown as Record<string, string>;
-        q[f.key] = cb.checked ? "1" : "";
-        void this.saveQuestionToCSV(question).then(() => { this.saveState(); });
+        const prevValue = q[f.key];
+        const newValue = cb.checked ? "1" : "";
+        q[f.key] = newValue;
+        void this.saveQuestionToCSV(question).then((ok) => {
+          if (!ok) {
+            // M2: 写失败回滚
+            q[f.key] = prevValue;
+            cb.checked = prevValue === "1";
+            return;
+          }
+          // M7: 标记变化可能影响筛选（如「错题=是」），重新筛选并定位当前题
+          this.reFilterAndLocate(question.id);
+          this.renderQuestion();
+          this.saveState();
+        });
       });
     }
   }
 
   private async openTagPicker(question: Question): Promise<void> {
+    // M6: 先把编辑区未提交的内容保存，避免被弹窗覆盖丢失
+    await this.saveCurrentEdit();
+
     // Collect all unique tags from all questions
     const allTags = getUniqueTags(this.allQuestions);
     // Parse current question tags into a space-separated string
@@ -1064,24 +1195,20 @@ export class QuizView extends ItemView {
 
     if (result !== null) {
       // Save selected tags to the question (always the original question, even if user navigated away)
+      const oldTags = question.tags;
       question.tags = result;
-      await this.saveQuestionToCSV(question);
+      const ok = await this.saveQuestionToCSV(question);
+      if (!ok) {
+        // M2: 写失败回滚
+        question.tags = oldTags;
+        return;
+      }
 
       // Remember which question is currently displayed before re-filtering
       const currentDisplayedId = this.filteredQuestions[this.currentIndex]?.id;
 
       // Re-apply filters since tags changed
-      this.filteredQuestions = filterQuestions(
-        this.orderedQuestions,
-        this.filterTags,
-        this.filterCat1,
-        this.filterCat2,
-        this.filterCat3,
-        this.filterFavorite,
-        this.filterMastered,
-        this.filterRepeat,
-        this.filterWrong
-      );
+      this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
 
       // Restore the currently displayed question, not the saved one
       // (the user may have auto-advanced or manually navigated while the modal was open)
@@ -1196,27 +1323,44 @@ export class QuizView extends ItemView {
   private async handleAnswer(selectedKey: string): Promise<void> {
     if (this.answering || this.showingAnswer) return;
 
+    const origQuestion = this.filteredQuestions[this.currentIndex];
+    if (!origQuestion) return;
+
     this.answering = true;
     this.selectedOption = selectedKey;
 
     await this.saveCurrentEdit();
 
-    const question = this.filteredQuestions[this.currentIndex];
-    if (!question) {
-      this.answering = false;
-      return;
+    // H2: saveCurrentEdit 可能重新筛选并移动 currentIndex，重新定位用户实际作答的题目
+    let question = this.filteredQuestions[this.currentIndex];
+    if (!question || question.id !== origQuestion.id) {
+      const idx = this.filteredQuestions.findIndex((q) => q.id === origQuestion.id);
+      if (idx >= 0) {
+        this.currentIndex = idx;
+        question = this.filteredQuestions[idx];
+      } else {
+        // 题目被刚保存的编辑移出当前筛选：仍按正确题目记录答案
+        await this.recordAnswer(
+          origQuestion,
+          selectedKey,
+          selectedKey === origQuestion.answer
+        );
+        this.renderQuestion();
+        this.saveState();
+        new Notice("题目已因筛选条件变化被移出当前列表，答案已记录");
+        return;
+      }
     }
 
-    this.showingAnswer = true;
-
-    this.answeredQuestions[question.id] = selectedKey;
     const isCorrect = selectedKey === question.answer;
+    this.showingAnswer = true;
+    await this.recordAnswer(question, selectedKey, isCorrect);
 
+    this.renderQuestion();
+    this.updateProgress();
+
+    const settings = this.getSettings();
     if (isCorrect) {
-      this.correctCount++;
-      this.renderQuestion();
-
-      const settings = this.getSettings();
       if (settings.autoNextDelay > 0) {
         this.autoNextTimer = window.setTimeout(() => {
           void this.nextQuestion();
@@ -1225,17 +1369,8 @@ export class QuizView extends ItemView {
         this.answering = false;
       }
     } else {
-      this.wrongCount++;
-      if (question.wrong !== "1") {
-        question.wrong = "1";
-        await this.saveQuestionToCSV(question);
-      }
-      this.renderQuestion();
       this.answering = false;
     }
-
-    // Update stats display
-    this.updateProgress();
     this.saveState();
   }
 
@@ -1249,7 +1384,7 @@ export class QuizView extends ItemView {
   private async nextQuestion(): Promise<void> {
     // 防重入：自动跳转 timer 与用户手动点击可能并发调用（saveCurrentEdit
     // 的 await 会让出事件循环），若不加守卫会各自前进一题导致跳过头。
-    if (this.navigating) return;
+    if (this.isClosed || this.navigating) return;
     this.navigating = true;
     try {
       await this.saveCurrentEdit();
@@ -1276,29 +1411,35 @@ export class QuizView extends ItemView {
   }
 
   private async prevQuestion(): Promise<void> {
-    await this.saveCurrentEdit();
-    const origId = this.filteredQuestions[this.currentIndex]?.id;
-    this.reFilterForNavigation();
-    if (!origId) return;
-    const found = this.filteredQuestions.some((q) => q.id === origId);
-    if (found) {
-      const newIdx = this.filteredQuestions.findIndex((q) => q.id === origId);
-      if (newIdx > 0) {
-        this.currentIndex = newIdx - 1;
+    if (this.navigating) return;
+    this.navigating = true;
+    try {
+      await this.saveCurrentEdit();
+      const origId = this.filteredQuestions[this.currentIndex]?.id;
+      this.reFilterForNavigation();
+      if (!origId) return;
+      const found = this.filteredQuestions.some((q) => q.id === origId);
+      if (found) {
+        const newIdx = this.filteredQuestions.findIndex((q) => q.id === origId);
+        if (newIdx > 0) {
+          this.currentIndex = newIdx - 1;
+        } else {
+          return;
+        }
       } else {
-        return;
+        if (this.currentIndex > 0) {
+          this.currentIndex--;
+        } else {
+          return;
+        }
       }
-    } else {
-      if (this.currentIndex > 0) {
-        this.currentIndex--;
-      } else {
-        return;
-      }
+      this.currentShuffledQId = null;
+      this.cancelAutoNext();
+      this.renderQuestion();
+      this.saveState();
+    } finally {
+      this.navigating = false;
     }
-    this.currentShuffledQId = null;
-    this.cancelAutoNext();
-    this.renderQuestion();
-    this.saveState();
   }
 
   private updateNavigation(): void {
@@ -1330,23 +1471,29 @@ export class QuizView extends ItemView {
 
     jumpBtn.addEventListener("click", () => {
       void (async () => {
-        await this.saveCurrentEdit();
-        const targetStr = jumpInput.value.trim();
-        if (!targetStr) return;
-        const targetNum = parseInt(targetStr, 10);
-        if (
-          isNaN(targetNum) ||
-          targetNum < 1 ||
-          targetNum > this.filteredQuestions.length
-        ) {
-          new Notice("题号不存在或已被筛选");
-          return;
+        if (this.navigating) return;
+        this.navigating = true;
+        try {
+          await this.saveCurrentEdit();
+          const targetStr = jumpInput.value.trim();
+          if (!targetStr) return;
+          const targetNum = parseInt(targetStr, 10);
+          if (
+            isNaN(targetNum) ||
+            targetNum < 1 ||
+            targetNum > this.filteredQuestions.length
+          ) {
+            new Notice("题号不存在或已被筛选");
+            return;
+          }
+          this.currentIndex = targetNum - 1;
+          this.currentShuffledQId = null;
+          this.cancelAutoNext();
+          this.renderQuestion();
+          this.saveState();
+        } finally {
+          this.navigating = false;
         }
-        this.currentIndex = targetNum - 1;
-        this.currentShuffledQId = null;
-        this.cancelAutoNext();
-        this.renderQuestion();
-        this.saveState();
       })();
     });
 
@@ -1416,6 +1563,19 @@ export class QuizView extends ItemView {
     }
   }
 
+  /** 重新计算筛选结果并定位指定题目的新位置（题目被筛掉时回退到第一题/空状态）。 */
+  private reFilterAndLocate(questionId: string): void {
+    this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
+    const idx = this.filteredQuestions.findIndex((q) => q.id === questionId);
+    if (idx >= 0) {
+      this.currentIndex = idx;
+    } else if (this.filteredQuestions.length > 0) {
+      this.currentIndex = 0;
+    } else {
+      this.currentIndex = -1;
+    }
+  }
+
   private async saveCurrentEdit(): Promise<void> {
     if (this.filteredQuestions.length === 0 || this.currentIndex < 0) return;
 
@@ -1425,8 +1585,8 @@ export class QuizView extends ItemView {
       this.editArea.querySelectorAll<HTMLInputElement>(".csv-quiz-edit-input")
     );
 
-    let changed = false;
     const q = question as unknown as Record<string, string>;
+    const changedFields: Array<{ field: string; oldValue: string }> = [];
 
     for (const input of editInputs) {
       const field = input.dataset.field;
@@ -1434,45 +1594,31 @@ export class QuizView extends ItemView {
 
       const value = input.value;
       if (q[field] !== value) {
+        changedFields.push({ field, oldValue: q[field] });
         q[field] = value;
-        changed = true;
       }
     }
 
-    if (changed) {
-      await this.saveQuestionToCSV(question);
+    if (changedFields.length === 0) return;
 
-      // Re-apply filters since tags/categories may have changed
-      this.filteredQuestions = filterQuestions(
-        this.orderedQuestions,
-        this.filterTags,
-        this.filterCat1,
-        this.filterCat2,
-        this.filterCat3,
-          this.filterFavorite,
-          this.filterMastered,
-          this.filterRepeat,
-          this.filterWrong
-      );
-
-      // Re-find current question position after re-filtering
-      const newIndex = this.filteredQuestions.findIndex(
-        (q) => q.id === previousId
-      );
-      if (newIndex >= 0) {
-        this.currentIndex = newIndex;
-      } else if (this.filteredQuestions.length > 0) {
-        this.currentIndex = 0;
-      } else {
-        this.currentIndex = -1;
+    const ok = await this.saveQuestionToCSV(question);
+    if (!ok) {
+      // M2: 写 CSV 失败时回滚内存修改，保持与磁盘一致（输入框保留用户输入以便重试）
+      for (const c of changedFields) {
+        q[c.field] = c.oldValue;
       }
-
-      this.saveState();
-      new Notice("修改已保存");
+      return;
     }
+
+    // Re-apply filters since tags/categories may have changed
+    this.reFilterAndLocate(previousId);
+
+    this.saveState();
+    new Notice("修改已保存");
   }
 
-  private async saveQuestionToCSV(question: Question): Promise<void> {
+  /** 写回 CSV；成功返回 true，失败返回 false（已提示用户）。 */
+  private async saveQuestionToCSV(question: Question): Promise<boolean> {
     const newRow = generateCSVRow(question);
     try {
       await this.csvWriteQueue.enqueue(this.csvPath, (csvContent: string) => {
@@ -1482,6 +1628,7 @@ export class QuizView extends ItemView {
         }
         return updatedContent;
       });
+      return true;
     } catch (e: unknown) {
       console.error("CSV Quiz: Failed to save question to CSV", e);
       if (e instanceof Error && e.message === "CSV 中未找到对应题号") {
@@ -1489,10 +1636,12 @@ export class QuizView extends ItemView {
       } else {
         new Notice(`保存到 CSV 失败: ${e instanceof Error ? e.message : String(e)}`);
       }
+      return false;
     }
   }
 
   async refresh(): Promise<void> {
+    this.canPersistState = false;
     await this.saveCurrentEdit();
     this.cancelAutoNext();
     if (this.autoSaveTimer !== null) {
@@ -1506,6 +1655,14 @@ export class QuizView extends ItemView {
     try {
       const csvContent = await readCSVFile(this.vault, this.csvPath);
       this.allQuestions = parseCSV(csvContent);
+      this.checkDuplicateIds();
+      if (this.allQuestions.length === 0) {
+        // V1: 题库为空时不清除已保存的进度（与 loadQuestions 的空题库路径保持一致），
+        // 避免用户误触「重置」或更换到空文件时静默清空旧进度。
+        this.showError("CSV 文件中没有找到题目数据");
+        return;
+      }
+      this.canPersistState = true;
 
       // Clear state completely
       await this.stateManager.clearState();
@@ -1520,6 +1677,7 @@ export class QuizView extends ItemView {
         this.displayOrder
       );
 
+      this.filterText = "";
       this.filterTags = "";
       this.filterCat1 = "";
       this.filterCat2 = "";
@@ -1529,17 +1687,7 @@ export class QuizView extends ItemView {
       this.filterRepeat = settings.defaultFilterRepeat;
       this.filterWrong = settings.defaultFilterWrong;
 
-      this.filteredQuestions = filterQuestions(
-        this.orderedQuestions,
-        this.filterTags,
-        this.filterCat1,
-        this.filterCat2,
-        this.filterCat3,
-          this.filterFavorite,
-          this.filterMastered,
-          this.filterRepeat,
-          this.filterWrong
-      );
+      this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
 
       this.currentIndex = 0;
       this.correctCount = 0;
@@ -1581,6 +1729,7 @@ export class QuizView extends ItemView {
       correctCount: this.correctCount,
       wrongCount: this.wrongCount,
       displayOrder: this.displayOrder,
+      filterText: this.filterText,
       filterTags: this.filterTags,
       filterCat1: this.filterCat1,
       filterCat2: this.filterCat2,
@@ -1594,6 +1743,10 @@ export class QuizView extends ItemView {
   }
 
   private saveState(): void {
+    // V2: 视图关闭后（含 in-flight 的 initializeFromState 迟到完成）禁止写盘，
+    // 避免用陈旧状态覆盖磁盘进度。onClose 走的是 saveStateImmediately，不受影响。
+    if (this.isClosed) return;
+    if (!this.canPersistState) return;
     const state = this.buildCurrentState();
     this.stateManager.scheduleSave(state, 300);
   }

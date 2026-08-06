@@ -22,6 +22,7 @@ export interface QuizSessionState {
   correctCount: number;
   wrongCount: number;
   displayOrder: string[];
+  filterText: string;
   filterTags: string;
   filterCat1: string;
   filterCat2: string;

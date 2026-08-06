@@ -7,13 +7,17 @@ import {
   SuggestModal,
   TFile,
   SettingDefinitionItem,
+  ToggleComponent,
 } from "obsidian";
 import { PluginSettings, DEFAULT_SETTINGS } from "./types";
+import { ChoiceModal } from "./modals";
 
 interface PluginHandle {
   settings: PluginSettings;
   refreshQuiz(): void;
   saveSettings(): Promise<void>;
+  flushSettingsSave(): Promise<void>;
+  resetQuizProgress(): Promise<void>;
 }
 
 export class CSVQuizSettingTab extends PluginSettingTab {
@@ -22,6 +26,10 @@ export class CSVQuizSettingTab extends PluginSettingTab {
   constructor(app: App, plugin: PluginHandle) {
     super(app, plugin as unknown as Plugin);
     this.plugin = plugin;
+  }
+
+  onClose(): void {
+    void this.plugin.flushSettingsSave();
   }
 
   /**
@@ -142,8 +150,52 @@ export class CSVQuizSettingTab extends PluginSettingTab {
    * 从而覆盖整个 data.json 并丢失 quizState。
    */
   async setControlValue(key: string, value: unknown): Promise<void> {
+    if (key === "randomOrder") {
+      await this.handleRandomOrderToggle(value === true);
+      return;
+    }
     (this.plugin.settings as unknown as Record<string, unknown>)[key] = value;
     await this.plugin.saveSettings();
+  }
+
+  /**
+   * 「随机题目顺序」开关处理：开启后会重新随机排列已有会话的显示顺序，
+   * 因此需要重置刷题进度（清除答题记录/统计）。用户取消则回滚开关。
+   * toggle 参数用于 <1.13 的命令式设置路径回滚开关 UI。
+   */
+  private async handleRandomOrderToggle(
+    newValue: boolean,
+    toggle?: ToggleComponent
+  ): Promise<void> {
+    if (newValue === this.plugin.settings.randomOrder) return;
+
+    if (newValue) {
+      const modal = new ChoiceModal(this.app, {
+        title: "开启随机题目顺序需要重置进度",
+        message:
+          "打乱题目顺序需要重置当前刷题进度：将清除所有答题记录与正确/错误统计，并重新随机排列题目顺序。是否继续？",
+        options: [
+          { label: "重置并打乱", value: "confirm", cta: true },
+          { label: "取消", value: "cancel" },
+        ],
+      });
+      modal.open();
+      const res = await modal.promise;
+      if (res !== "confirm") {
+        // 回滚开关（1.13+ 声明式设置路径下 UI 可能残留开启显示，重新打开设置页即恢复）
+        this.plugin.settings.randomOrder = false;
+        toggle?.setValue(false);
+        new Notice("已取消：未启用随机题目顺序");
+        return;
+      }
+    }
+
+    this.plugin.settings.randomOrder = newValue;
+    await this.plugin.saveSettings();
+    if (newValue) {
+      await this.plugin.resetQuizProgress();
+      new Notice("已重置进度并随机打乱题目顺序");
+    }
   }
 
   /**
@@ -273,14 +325,22 @@ export class CSVQuizSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName(name)
       .setDesc(desc)
-      .addToggle((toggle) =>
-        toggle
+      .addToggle((toggle) => {
+        if (key === "randomOrder") {
+          // 开启随机顺序需要用户确认重置进度（取消时回滚开关 UI）
+          return toggle
+            .setValue(this.plugin.settings[key] as boolean)
+            .onChange((value) => {
+              void this.handleRandomOrderToggle(value, toggle);
+            });
+        }
+        return toggle
           .setValue(this.plugin.settings[key] as boolean)
           .onChange((value) => {
             (this.plugin.settings as unknown as Record<string, boolean | string>)[key] = value;
             void this.plugin.saveSettings();
-          })
-      );
+          });
+      });
   }
 
   private addNumberSetting(

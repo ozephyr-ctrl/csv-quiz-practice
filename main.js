@@ -462,7 +462,7 @@ __export(main_exports, {
   default: () => CSVQuizPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian4 = require("obsidian");
+var import_obsidian5 = require("obsidian");
 
 // src/types.ts
 var VIEW_TYPE_QUIZ = "csv-quiz-practice-view";
@@ -480,11 +480,147 @@ var DEFAULT_SETTINGS = {
 };
 
 // src/settings.ts
+var import_obsidian2 = require("obsidian");
+
+// src/modals.ts
 var import_obsidian = require("obsidian");
-var CSVQuizSettingTab = class extends import_obsidian.PluginSettingTab {
+var ChoiceModal = class extends import_obsidian.Modal {
+  constructor(app, opts) {
+    super(app);
+    this.resolved = false;
+    this.opts = opts;
+    this.promise = new Promise((resolve) => {
+      this.resolveFn = resolve;
+    });
+  }
+  onOpen() {
+    this.titleEl.setText(this.opts.title);
+    this.contentEl.empty();
+    if (this.opts.message) {
+      this.contentEl.createEl("p", {
+        text: this.opts.message,
+        cls: "csv-quiz-modal-message"
+      });
+    }
+    const list = this.contentEl.createDiv("csv-quiz-modal-options");
+    for (const opt of this.opts.options) {
+      const item = list.createDiv("csv-quiz-modal-option");
+      const btn = item.createEl("button", {
+        text: opt.label,
+        cls: "csv-quiz-btn csv-quiz-modal-btn" + (opt.cta ? " csv-quiz-btn-primary" : "") + (opt.danger ? " csv-quiz-btn-danger" : "")
+      });
+      btn.addEventListener("click", () => this.choose(opt.value));
+      if (opt.description) {
+        item.createEl("div", {
+          text: opt.description,
+          cls: "csv-quiz-modal-option-desc"
+        });
+      }
+    }
+  }
+  onClose() {
+    if (!this.resolved) {
+      this.resolved = true;
+      this.resolveFn(null);
+    }
+  }
+  choose(value) {
+    if (this.resolved) return;
+    this.resolved = true;
+    this.close();
+    this.resolveFn(value);
+  }
+};
+var TagPickerModal = class extends import_obsidian.Modal {
+  constructor(app, allTags, currentTags) {
+    super(app);
+    this.resolved = false;
+    this.allTags = allTags;
+    this.currentTags = currentTags;
+    this.promise = new Promise((resolve) => {
+      this.resolveFn = resolve;
+    });
+  }
+  onOpen() {
+    this.titleEl.setText("\u5FEB\u901F\u8BBE\u7F6E\u6807\u7B7E");
+    this.contentEl.empty();
+    if (this.allTags.length === 0) {
+      this.contentEl.createEl("p", {
+        text: "\u6682\u65E0\u6807\u7B7E",
+        cls: "csv-quiz-tag-picker-empty"
+      });
+      return;
+    }
+    this.contentEl.createEl("p", {
+      text: "\u9009\u62E9\u4F60\u8981\u5E94\u7528\u5230\u9898\u76EE\u7684\u6807\u7B7E",
+      cls: "csv-quiz-modal-message"
+    });
+    const list = this.contentEl.createDiv("csv-quiz-tag-picker-list");
+    const currentTagSet = new Set(
+      this.currentTags.split(/\s+/).filter((t) => t.length > 0)
+    );
+    const checkboxes = [];
+    for (const tag of this.allTags) {
+      const item = list.createDiv("csv-quiz-tag-picker-item");
+      const cb = item.createEl("input", {
+        cls: "csv-quiz-tag-picker-checkbox",
+        attr: { type: "checkbox" }
+      });
+      cb.checked = currentTagSet.has(tag);
+      checkboxes.push(cb);
+      item.createEl("span", {
+        text: tag,
+        cls: "csv-quiz-tag-picker-label"
+      });
+      item.addEventListener("click", (e) => {
+        if (e.target !== cb) {
+          cb.checked = !cb.checked;
+        }
+      });
+    }
+    const actions = this.contentEl.createDiv("csv-quiz-tag-picker-actions");
+    const confirmBtn = actions.createEl("button", {
+      text: "\u786E\u8BA4",
+      cls: "csv-quiz-btn csv-quiz-modal-btn csv-quiz-btn-primary"
+    });
+    confirmBtn.addEventListener("click", () => {
+      const selected = this.allTags.filter((_, i) => checkboxes[i].checked);
+      this.choose(selected.join(" "));
+    });
+    const cancelBtn = actions.createEl("button", {
+      text: "\u53D6\u6D88",
+      cls: "csv-quiz-btn csv-quiz-modal-btn"
+    });
+    cancelBtn.addEventListener("click", () => this.cancel());
+  }
+  onClose() {
+    if (!this.resolved) {
+      this.resolved = true;
+      this.resolveFn(null);
+    }
+  }
+  choose(value) {
+    if (this.resolved) return;
+    this.resolved = true;
+    this.close();
+    this.resolveFn(value);
+  }
+  cancel() {
+    if (this.resolved) return;
+    this.resolved = true;
+    this.close();
+    this.resolveFn(null);
+  }
+};
+
+// src/settings.ts
+var CSVQuizSettingTab = class extends import_obsidian2.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
+  }
+  onClose() {
+    void this.plugin.flushSettingsSave();
   }
   /**
    * Obsidian 1.13.0+: 声明式设置。Obsidian 调用此方法并跳过 display()。
@@ -602,8 +738,44 @@ var CSVQuizSettingTab = class extends import_obsidian.PluginSettingTab {
    * 从而覆盖整个 data.json 并丢失 quizState。
    */
   async setControlValue(key, value) {
+    if (key === "randomOrder") {
+      await this.handleRandomOrderToggle(value === true);
+      return;
+    }
     this.plugin.settings[key] = value;
     await this.plugin.saveSettings();
+  }
+  /**
+   * 「随机题目顺序」开关处理：开启后会重新随机排列已有会话的显示顺序，
+   * 因此需要重置刷题进度（清除答题记录/统计）。用户取消则回滚开关。
+   * toggle 参数用于 <1.13 的命令式设置路径回滚开关 UI。
+   */
+  async handleRandomOrderToggle(newValue, toggle) {
+    if (newValue === this.plugin.settings.randomOrder) return;
+    if (newValue) {
+      const modal = new ChoiceModal(this.app, {
+        title: "\u5F00\u542F\u968F\u673A\u9898\u76EE\u987A\u5E8F\u9700\u8981\u91CD\u7F6E\u8FDB\u5EA6",
+        message: "\u6253\u4E71\u9898\u76EE\u987A\u5E8F\u9700\u8981\u91CD\u7F6E\u5F53\u524D\u5237\u9898\u8FDB\u5EA6\uFF1A\u5C06\u6E05\u9664\u6240\u6709\u7B54\u9898\u8BB0\u5F55\u4E0E\u6B63\u786E/\u9519\u8BEF\u7EDF\u8BA1\uFF0C\u5E76\u91CD\u65B0\u968F\u673A\u6392\u5217\u9898\u76EE\u987A\u5E8F\u3002\u662F\u5426\u7EE7\u7EED\uFF1F",
+        options: [
+          { label: "\u91CD\u7F6E\u5E76\u6253\u4E71", value: "confirm", cta: true },
+          { label: "\u53D6\u6D88", value: "cancel" }
+        ]
+      });
+      modal.open();
+      const res = await modal.promise;
+      if (res !== "confirm") {
+        this.plugin.settings.randomOrder = false;
+        toggle == null ? void 0 : toggle.setValue(false);
+        new import_obsidian2.Notice("\u5DF2\u53D6\u6D88\uFF1A\u672A\u542F\u7528\u968F\u673A\u9898\u76EE\u987A\u5E8F");
+        return;
+      }
+    }
+    this.plugin.settings.randomOrder = newValue;
+    await this.plugin.saveSettings();
+    if (newValue) {
+      await this.plugin.resetQuizProgress();
+      new import_obsidian2.Notice("\u5DF2\u91CD\u7F6E\u8FDB\u5EA6\u5E76\u968F\u673A\u6253\u4E71\u9898\u76EE\u987A\u5E8F");
+    }
   }
   /**
    * < 1.13.0: Obsidian 调用此方法，保持原有命令式实现不变。
@@ -612,7 +784,7 @@ var CSVQuizSettingTab = class extends import_obsidian.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    new import_obsidian.Setting(containerEl).setName("\u5237\u9898\u554A - \u8BBE\u7F6E").setHeading();
+    new import_obsidian2.Setting(containerEl).setName("\u5237\u9898\u554A - \u8BBE\u7F6E").setHeading();
     this.addCSVPathSetting(containerEl);
     this.addToggleSetting(
       containerEl,
@@ -646,7 +818,7 @@ var CSVQuizSettingTab = class extends import_obsidian.PluginSettingTab {
       "\u6253\u5F00\u5237\u9898\u9762\u677F\u65F6\u6807\u7B7E/\u5206\u7C7B\u7F16\u8F91\u680F\u9ED8\u8BA4\u662F\u5426\u5C55\u5F00",
       "editPanelOpen"
     );
-    new import_obsidian.Setting(containerEl).setName("\u6807\u8BB0\u7B5B\u9009\u9ED8\u8BA4\u503C").setHeading();
+    new import_obsidian2.Setting(containerEl).setName("\u6807\u8BB0\u7B5B\u9009\u9ED8\u8BA4\u503C").setHeading();
     this.addFilterDefaultSetting(
       containerEl,
       "\u6536\u85CF",
@@ -667,15 +839,15 @@ var CSVQuizSettingTab = class extends import_obsidian.PluginSettingTab {
       "\u9519\u9898",
       "defaultFilterWrong"
     );
-    new import_obsidian.Setting(containerEl).setName("\u7BA1\u7406").setHeading();
-    new import_obsidian.Setting(containerEl).setName("\u91CD\u7F6E\u5237\u9898\u8FDB\u5EA6").setDesc("\u6E05\u9664\u6240\u6709\u7B54\u9898\u8BB0\u5F55\u3001\u7EDF\u8BA1\u548C\u7B5B\u9009\u72B6\u6001\uFF0C\u91CD\u65B0\u52A0\u8F7D\u9898\u5E93").addButton(
+    new import_obsidian2.Setting(containerEl).setName("\u7BA1\u7406").setHeading();
+    new import_obsidian2.Setting(containerEl).setName("\u91CD\u7F6E\u5237\u9898\u8FDB\u5EA6").setDesc("\u6E05\u9664\u6240\u6709\u7B54\u9898\u8BB0\u5F55\u3001\u7EDF\u8BA1\u548C\u7B5B\u9009\u72B6\u6001\uFF0C\u91CD\u65B0\u52A0\u8F7D\u9898\u5E93").addButton(
       (btn) => btn.setButtonText("\u91CD\u7F6E").onClick(() => {
         this.plugin.refreshQuiz();
       })
     );
   }
   addCSVPathSetting(containerEl) {
-    new import_obsidian.Setting(containerEl).setName("CSV \u6587\u4EF6\u8DEF\u5F84").setDesc("\u9898\u5E93 CSV \u6587\u4EF6\u76F8\u5BF9\u4E8E\u5E93\u6839\u76EE\u5F55\u7684\u8DEF\u5F84").addText(
+    new import_obsidian2.Setting(containerEl).setName("CSV \u6587\u4EF6\u8DEF\u5F84").setDesc("\u9898\u5E93 CSV \u6587\u4EF6\u76F8\u5BF9\u4E8E\u5E93\u6839\u76EE\u5F55\u7684\u8DEF\u5F84").addText(
       (text) => text.setPlaceholder("\u9898\u5E93.csv").setValue(this.plugin.settings.csvPath).onChange((value) => {
         this.plugin.settings.csvPath = value;
         void this.plugin.saveSettings();
@@ -687,7 +859,7 @@ var CSVQuizSettingTab = class extends import_obsidian.PluginSettingTab {
   pickCSVFile() {
     const csvFiles = this.app.vault.getFiles().filter((f) => f.extension === "csv").map((f) => f.path);
     if (csvFiles.length === 0) {
-      new import_obsidian.Notice("\u5E93\u4E2D\u6CA1\u6709\u627E\u5230 CSV \u6587\u4EF6");
+      new import_obsidian2.Notice("\u5E93\u4E2D\u6CA1\u6709\u627E\u5230 CSV \u6587\u4EF6");
       return;
     }
     const modal = new FilePickerModal(
@@ -701,15 +873,20 @@ var CSVQuizSettingTab = class extends import_obsidian.PluginSettingTab {
     modal.open();
   }
   addToggleSetting(containerEl, name, desc, key) {
-    new import_obsidian.Setting(containerEl).setName(name).setDesc(desc).addToggle(
-      (toggle) => toggle.setValue(this.plugin.settings[key]).onChange((value) => {
+    new import_obsidian2.Setting(containerEl).setName(name).setDesc(desc).addToggle((toggle) => {
+      if (key === "randomOrder") {
+        return toggle.setValue(this.plugin.settings[key]).onChange((value) => {
+          void this.handleRandomOrderToggle(value, toggle);
+        });
+      }
+      return toggle.setValue(this.plugin.settings[key]).onChange((value) => {
         this.plugin.settings[key] = value;
         void this.plugin.saveSettings();
-      })
-    );
+      });
+    });
   }
   addNumberSetting(containerEl, name, desc, key, min, max) {
-    new import_obsidian.Setting(containerEl).setName(name).setDesc(desc).addText(
+    new import_obsidian2.Setting(containerEl).setName(name).setDesc(desc).addText(
       (text) => text.setPlaceholder(String(DEFAULT_SETTINGS[key])).setValue(String(this.plugin.settings[key])).onChange((value) => {
         const num = parseInt(value, 10);
         if (!isNaN(num) && num >= min && num <= max) {
@@ -720,7 +897,7 @@ var CSVQuizSettingTab = class extends import_obsidian.PluginSettingTab {
     );
   }
   addFilterDefaultSetting(containerEl, label, key) {
-    new import_obsidian.Setting(containerEl).setName(`\u9ED8\u8BA4\u7B5B\u9009: ${label}`).setDesc(`\u6253\u5F00\u5237\u9898\u9762\u677F\u65F6\u300C${label}\u300D\u7B5B\u9009\u7684\u9ED8\u8BA4\u72B6\u6001`).addDropdown(
+    new import_obsidian2.Setting(containerEl).setName(`\u9ED8\u8BA4\u7B5B\u9009: ${label}`).setDesc(`\u6253\u5F00\u5237\u9898\u9762\u677F\u65F6\u300C${label}\u300D\u7B5B\u9009\u7684\u9ED8\u8BA4\u72B6\u6001`).addDropdown(
       (dd) => dd.addOption("", "\u4E0D\u9650").addOption("1", `\u4EC5${label}`).addOption("0", `\u4E0D${label}`).setValue(this.plugin.settings[key]).onChange((value) => {
         this.plugin.settings[key] = value;
         void this.plugin.saveSettings();
@@ -728,7 +905,7 @@ var CSVQuizSettingTab = class extends import_obsidian.PluginSettingTab {
     );
   }
 };
-var FilePickerModal = class extends import_obsidian.SuggestModal {
+var FilePickerModal = class extends import_obsidian2.SuggestModal {
   constructor(app, files, onSelect) {
     super(app);
     this.files = files;
@@ -748,10 +925,11 @@ var FilePickerModal = class extends import_obsidian.SuggestModal {
 };
 
 // src/quizView.ts
-var import_obsidian3 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 
 // src/csvHandler.ts
 var import_papaparse = __toESM(require_papaparse_min());
+var import_obsidian3 = require("obsidian");
 function parseCSV(content) {
   const result = import_papaparse.default.parse(content, { header: false, skipEmptyLines: true });
   const rows = result.data;
@@ -809,7 +987,8 @@ function findAndUpdateRow(csvContent, questionId, newData) {
     (row) => String(row[0] || "").trim() === questionId
   );
   if (idx < 0) return null;
-  dataRows[idx] = newData;
+  const targetRow = dataRows[idx];
+  dataRows[idx] = newData.length >= targetRow.length ? newData : [...newData, ...targetRow.slice(newData.length)];
   return import_papaparse.default.unparse([header, ...dataRows], { delimiter: "," });
 }
 function getUniqueTags(questions) {
@@ -844,8 +1023,13 @@ async function readCSVFile(vault, path) {
 async function writeCSVFile(vault, path, content) {
   await vault.adapter.write(path, "\uFEFF" + content);
 }
-function filterQuestions(questions, filterTags, filterCat1, filterCat2, filterCat3, filterFavorite = "", filterMastered = "", filterRepeat = "", filterWrong = "") {
+function filterQuestions(questions, filterTags, filterCat1, filterCat2, filterCat3, filterFavorite = "", filterMastered = "", filterRepeat = "", filterWrong = "", filterText = "") {
   return questions.filter((q) => {
+    const text = filterText.trim().toLowerCase();
+    if (text) {
+      const haystack = (q.stem + " " + q.optionA + " " + q.optionB + " " + q.optionC + " " + q.optionD).toLowerCase();
+      if (!haystack.includes(text)) return false;
+    }
     if (filterTags && filterTags.trim() !== "") {
       const tagFilters = filterTags.trim().split(/\s+/).filter((t) => t.length > 0);
       for (const tag of tagFilters) {
@@ -888,10 +1072,11 @@ function shuffleArray(array) {
   return result;
 }
 var CSVWriteQueue = class {
-  constructor(vault) {
+  constructor(app) {
     this.queue = [];
     this.processing = false;
-    this.vault = vault;
+    this.app = app;
+    this.vault = app.vault;
   }
   enqueue(csvPath, transform) {
     return new Promise((resolve, reject) => {
@@ -904,9 +1089,14 @@ var CSVWriteQueue = class {
     this.processing = true;
     const item = this.queue.shift();
     try {
-      const currentContent = await readCSVFile(this.vault, item.csvPath);
+      const editor = this.getOpenEditor(item.csvPath);
+      const currentContent = editor ? editor.getValue() : await readCSVFile(this.vault, item.csvPath);
       const newContent = await Promise.resolve(item.transform(currentContent));
       await writeCSVFile(this.vault, item.csvPath, newContent);
+      if (editor) {
+        editor.setValue(newContent);
+        new import_obsidian3.Notice("\u9898\u5E93\u6587\u4EF6\u6B63\u5728\u7F16\u8F91\u5668\u4E2D\u6253\u5F00\uFF0C\u5DF2\u540C\u6B65\u66F4\u65B0\u7F16\u8F91\u5668\u5185\u5BB9");
+      }
       item.resolve();
     } catch (e) {
       item.reject(e);
@@ -914,6 +1104,18 @@ var CSVWriteQueue = class {
       this.processing = false;
       void this.processNext();
     }
+  }
+  /** 若 csvPath 对应的文件正打开在 Markdown 编辑器中，返回其编辑器实例，否则返回 null。 */
+  getOpenEditor(csvPath) {
+    const file = this.app.vault.getFileByPath(csvPath);
+    if (!file) return null;
+    let editor = null;
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (leaf.view instanceof import_obsidian3.MarkdownView && leaf.view.file === file) {
+        editor = leaf.view.editor;
+      }
+    });
+    return editor;
   }
   get pending() {
     return this.queue.length;
@@ -951,6 +1153,7 @@ function quizStateEquals(a, b) {
   if (a.currentIndex !== b.currentIndex) return false;
   if (a.correctCount !== b.correctCount) return false;
   if (a.wrongCount !== b.wrongCount) return false;
+  if (a.filterText !== b.filterText) return false;
   if (a.filterTags !== b.filterTags) return false;
   if (a.filterCat1 !== b.filterCat1) return false;
   if (a.filterCat2 !== b.filterCat2) return false;
@@ -972,139 +1175,8 @@ function quizStateEquals(a, b) {
   return true;
 }
 
-// src/modals.ts
-var import_obsidian2 = require("obsidian");
-var ChoiceModal = class extends import_obsidian2.Modal {
-  constructor(app, opts) {
-    super(app);
-    this.resolved = false;
-    this.opts = opts;
-    this.promise = new Promise((resolve) => {
-      this.resolveFn = resolve;
-    });
-  }
-  onOpen() {
-    this.titleEl.setText(this.opts.title);
-    this.contentEl.empty();
-    if (this.opts.message) {
-      this.contentEl.createEl("p", {
-        text: this.opts.message,
-        cls: "csv-quiz-modal-message"
-      });
-    }
-    const list = this.contentEl.createDiv("csv-quiz-modal-options");
-    for (const opt of this.opts.options) {
-      const item = list.createDiv("csv-quiz-modal-option");
-      const btn = item.createEl("button", {
-        text: opt.label,
-        cls: "csv-quiz-btn csv-quiz-modal-btn" + (opt.cta ? " csv-quiz-btn-primary" : "") + (opt.danger ? " csv-quiz-btn-danger" : "")
-      });
-      btn.addEventListener("click", () => this.choose(opt.value));
-      if (opt.description) {
-        item.createEl("div", {
-          text: opt.description,
-          cls: "csv-quiz-modal-option-desc"
-        });
-      }
-    }
-  }
-  onClose() {
-    if (!this.resolved) {
-      this.resolved = true;
-      this.resolveFn(null);
-    }
-  }
-  choose(value) {
-    if (this.resolved) return;
-    this.resolved = true;
-    this.close();
-    this.resolveFn(value);
-  }
-};
-var TagPickerModal = class extends import_obsidian2.Modal {
-  constructor(app, allTags, currentTags) {
-    super(app);
-    this.resolved = false;
-    this.allTags = allTags;
-    this.currentTags = currentTags;
-    this.promise = new Promise((resolve) => {
-      this.resolveFn = resolve;
-    });
-  }
-  onOpen() {
-    this.titleEl.setText("\u5FEB\u901F\u8BBE\u7F6E\u6807\u7B7E");
-    this.contentEl.empty();
-    if (this.allTags.length === 0) {
-      this.contentEl.createEl("p", {
-        text: "\u6682\u65E0\u6807\u7B7E",
-        cls: "csv-quiz-tag-picker-empty"
-      });
-      return;
-    }
-    this.contentEl.createEl("p", {
-      text: "\u9009\u62E9\u4F60\u8981\u5E94\u7528\u5230\u9898\u76EE\u7684\u6807\u7B7E",
-      cls: "csv-quiz-modal-message"
-    });
-    const list = this.contentEl.createDiv("csv-quiz-tag-picker-list");
-    const currentTagSet = new Set(
-      this.currentTags.split(/\s+/).filter((t) => t.length > 0)
-    );
-    const checkboxes = [];
-    for (const tag of this.allTags) {
-      const item = list.createDiv("csv-quiz-tag-picker-item");
-      const cb = item.createEl("input", {
-        cls: "csv-quiz-tag-picker-checkbox",
-        attr: { type: "checkbox" }
-      });
-      cb.checked = currentTagSet.has(tag);
-      checkboxes.push(cb);
-      item.createEl("span", {
-        text: tag,
-        cls: "csv-quiz-tag-picker-label"
-      });
-      item.addEventListener("click", (e) => {
-        if (e.target !== cb) {
-          cb.checked = !cb.checked;
-        }
-      });
-    }
-    const actions = this.contentEl.createDiv("csv-quiz-tag-picker-actions");
-    const confirmBtn = actions.createEl("button", {
-      text: "\u786E\u8BA4",
-      cls: "csv-quiz-btn csv-quiz-modal-btn csv-quiz-btn-primary"
-    });
-    confirmBtn.addEventListener("click", () => {
-      const selected = this.allTags.filter((_, i) => checkboxes[i].checked);
-      this.choose(selected.join(" "));
-    });
-    const cancelBtn = actions.createEl("button", {
-      text: "\u53D6\u6D88",
-      cls: "csv-quiz-btn csv-quiz-modal-btn"
-    });
-    cancelBtn.addEventListener("click", () => this.cancel());
-  }
-  onClose() {
-    if (!this.resolved) {
-      this.resolved = true;
-      this.resolveFn(null);
-    }
-  }
-  choose(value) {
-    if (this.resolved) return;
-    this.resolved = true;
-    this.close();
-    this.resolveFn(value);
-  }
-  cancel() {
-    if (this.resolved) return;
-    this.resolved = true;
-    this.close();
-    this.resolveFn(null);
-  }
-};
-
 // src/quizView.ts
-var QuizView = class extends import_obsidian3.ItemView {
+var _QuizView = class _QuizView extends import_obsidian4.ItemView {
   constructor(leaf, plugin, stateManager, vault, csvWriteQueue) {
     super(leaf);
     this.allQuestions = [];
@@ -1114,6 +1186,7 @@ var QuizView = class extends import_obsidian3.ItemView {
     this.currentIndex = 0;
     this.correctCount = 0;
     this.wrongCount = 0;
+    this.filterText = "";
     this.filterTags = "";
     this.filterCat1 = "";
     this.filterCat2 = "";
@@ -1134,6 +1207,11 @@ var QuizView = class extends import_obsidian3.ItemView {
     this.autoSaveTimer = null;
     this.navigating = false;
     this.isClosed = false;
+    /** 题库加载成功前禁止写入状态，避免加载失败后用空进度覆盖磁盘进度。 */
+    this.canPersistState = false;
+    /** 本实例是否已计入 openViewCount。 */
+    this.counted = false;
+    this.textFilterTimer = null;
     this.plugin = plugin;
     this.stateManager = stateManager;
     this.vault = vault;
@@ -1149,6 +1227,12 @@ var QuizView = class extends import_obsidian3.ItemView {
     return "book-open";
   }
   async onOpen() {
+    if (_QuizView.openViewCount > 0) {
+      if (this.leaf.parent) this.leaf.detach();
+      return;
+    }
+    _QuizView.openViewCount++;
+    this.counted = true;
     this.contentEl.addClass("csv-quiz-container");
     this.contentEl.empty();
     this.buildLayout();
@@ -1157,13 +1241,21 @@ var QuizView = class extends import_obsidian3.ItemView {
   async onClose() {
     if (this.isClosed) return;
     this.isClosed = true;
+    if (this.counted) {
+      _QuizView.openViewCount--;
+      this.counted = false;
+    }
     this.cancelAutoNext();
     if (this.autoSaveTimer !== null) {
       window.clearInterval(this.autoSaveTimer);
       this.autoSaveTimer = null;
     }
     this.stateManager.cancelScheduledSave();
-    if (this.stateManager.getState()) {
+    if (this.textFilterTimer !== null) {
+      window.clearTimeout(this.textFilterTimer);
+      this.textFilterTimer = null;
+    }
+    if (this.stateManager.getState() && this.canPersistState) {
       await this.stateManager.saveStateImmediately(this.buildCurrentState());
     }
     await this.csvWriteQueue.drain();
@@ -1188,7 +1280,8 @@ var QuizView = class extends import_obsidian3.ItemView {
   async initializeFromState() {
     const inMemoryState = this.stateManager.getState();
     const pluginData = await this.stateManager.loadPluginData(this.getSettings());
-    const settings = pluginData.settings;
+    if (this.isClosed) return;
+    const settings = this.getSettings();
     const diskState = pluginData.quizState;
     this.csvPath = settings.csvPath;
     this.buildFilterPanel(settings);
@@ -1196,6 +1289,7 @@ var QuizView = class extends import_obsidian3.ItemView {
     let effectiveSavedState = diskState;
     if (inMemoryState && !quizStateEquals(inMemoryState, diskState)) {
       const choice = await this.askExternalModificationChoice(diskState === null);
+      if (this.isClosed) return;
       if (choice === "current") {
         effectiveSavedState = inMemoryState;
       } else if (choice === "external") {
@@ -1207,12 +1301,14 @@ var QuizView = class extends import_obsidian3.ItemView {
     }
     if (effectiveSavedState && effectiveSavedState.csvPath !== this.csvPath) {
       const reset = await this.askResetChoice();
+      if (this.isClosed) return;
       if (reset === null) {
         this.showError("\u5DF2\u53D6\u6D88\u52A0\u8F7D\u9898\u5E93\u3002\u8BF7\u91CD\u65B0\u6253\u5F00\u5237\u9898\u9762\u677F\u3002");
         return;
       }
       if (reset === "keep") {
         const again = await this.askResetOrAbort();
+        if (this.isClosed) return;
         if (again !== "reset") {
           this.showError(
             "\u9898\u5E93\u8DEF\u5F84\u5DF2\u53D8\u66F4\uFF0C\u672A\u91CD\u7F6E\u8FDB\u5EA6\u65E0\u6CD5\u6B63\u5E38\u6253\u5F00\u9898\u5E93\u3002\u8BF7\u5728\u8BBE\u7F6E\u4E2D\u70B9\u51FB\u300C\u91CD\u7F6E\u5237\u9898\u8FDB\u5EA6\u300D\u540E\u91CD\u8BD5\u3002"
@@ -1221,6 +1317,7 @@ var QuizView = class extends import_obsidian3.ItemView {
         }
       }
       const status2 = await this.loadQuestions();
+      if (this.isClosed) return;
       if (status2 !== "ok") {
         if (status2 === "error") this.restoreFiltersOnly(effectiveSavedState);
         this.startAutoSave();
@@ -1234,6 +1331,7 @@ var QuizView = class extends import_obsidian3.ItemView {
       return;
     }
     const status = await this.loadQuestions();
+    if (this.isClosed) return;
     if (status !== "ok") {
       if (status === "error") this.restoreFiltersOnly(effectiveSavedState);
       this.startAutoSave();
@@ -1254,20 +1352,38 @@ var QuizView = class extends import_obsidian3.ItemView {
     try {
       const csvContent = await readCSVFile(this.vault, this.csvPath);
       this.allQuestions = parseCSV(csvContent);
+      this.checkDuplicateIds();
       if (this.allQuestions.length === 0) {
+        this.canPersistState = false;
         this.showError("CSV \u6587\u4EF6\u4E2D\u6CA1\u6709\u627E\u5230\u9898\u76EE\u6570\u636E");
         return "empty";
       }
+      this.canPersistState = true;
       return "ok";
     } catch (e) {
+      this.canPersistState = false;
       console.error("CSV Quiz: Failed to load CSV", e);
       this.showError(`\u65E0\u6CD5\u52A0\u8F7D CSV \u6587\u4EF6: ${e instanceof Error ? e.message : String(e)}`);
       return "error";
     }
   }
+  /** 检测题库中重复/空题号并提示，避免答题记录与 CSV 更新错乱。 */
+  checkDuplicateIds() {
+    const seen = /* @__PURE__ */ new Set();
+    const dups = /* @__PURE__ */ new Set();
+    for (const q of this.allQuestions) {
+      if (seen.has(q.id)) dups.add(q.id);
+      else seen.add(q.id);
+    }
+    if (dups.size > 0) {
+      const list = [...dups].map((d) => d === "" ? "\uFF08\u7A7A\u9898\u53F7\uFF09" : d).join(", ");
+      new import_obsidian4.Notice(`\u9898\u5E93\u4E2D\u5B58\u5728\u91CD\u590D\u9898\u53F7: ${list}\uFF0C\u7B54\u9898\u8BB0\u5F55\u53EF\u80FD\u4E0D\u51C6\u786E\uFF0C\u8BF7\u68C0\u67E5 CSV`);
+    }
+  }
   /** Fresh start: keep filters from savedState if present (else defaults), reset progress. */
   applyFreshStart(settings, savedState) {
     if (savedState) {
+      this.filterText = savedState.filterText || "";
       this.filterTags = savedState.filterTags || "";
       this.filterCat1 = savedState.filterCat1 || "";
       this.filterCat2 = savedState.filterCat2 || "";
@@ -1285,17 +1401,7 @@ var QuizView = class extends import_obsidian3.ItemView {
     }
     this.displayOrder = buildDisplayOrder(this.allQuestions, settings.randomOrder);
     this.orderedQuestions = sortByDisplayOrder(this.allQuestions, this.displayOrder);
-    this.filteredQuestions = filterQuestions(
-      this.orderedQuestions,
-      this.filterTags,
-      this.filterCat1,
-      this.filterCat2,
-      this.filterCat3,
-      this.filterFavorite,
-      this.filterMastered,
-      this.filterRepeat,
-      this.filterWrong
-    );
+    this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
     this.currentIndex = 0;
     this.correctCount = 0;
     this.wrongCount = 0;
@@ -1306,6 +1412,7 @@ var QuizView = class extends import_obsidian3.ItemView {
   }
   /** Restore a full session state whose csvPath matches the current CSV. */
   applyRestore(settings, savedState) {
+    this.filterText = savedState.filterText || "";
     this.filterTags = savedState.filterTags || "";
     this.filterCat1 = savedState.filterCat1 || "";
     this.filterCat2 = savedState.filterCat2 || "";
@@ -1320,17 +1427,7 @@ var QuizView = class extends import_obsidian3.ItemView {
       savedState.displayOrder
     );
     this.orderedQuestions = sortByDisplayOrder(this.allQuestions, this.displayOrder);
-    this.filteredQuestions = filterQuestions(
-      this.orderedQuestions,
-      this.filterTags,
-      this.filterCat1,
-      this.filterCat2,
-      this.filterCat3,
-      this.filterFavorite,
-      this.filterMastered,
-      this.filterRepeat,
-      this.filterWrong
-    );
+    this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
     this.currentIndex = Math.min(
       savedState.currentIndex,
       this.filteredQuestions.length - 1
@@ -1343,6 +1440,7 @@ var QuizView = class extends import_obsidian3.ItemView {
   /** On CSV load failure: keep filters from saved state so the UI is not blank. */
   restoreFiltersOnly(savedState) {
     if (!savedState) return;
+    this.filterText = savedState.filterText || "";
     this.filterTags = savedState.filterTags || "";
     this.filterCat1 = savedState.filterCat1 || "";
     this.filterCat2 = savedState.filterCat2 || "";
@@ -1355,11 +1453,12 @@ var QuizView = class extends import_obsidian3.ItemView {
   }
   /** Periodic auto-save every 5s to protect against sudden app close. */
   startAutoSave() {
+    if (this.isClosed) return;
     if (this.autoSaveTimer !== null) {
       window.clearInterval(this.autoSaveTimer);
     }
     this.autoSaveTimer = window.setInterval(() => {
-      if (this.stateManager.getState()) {
+      if (!this.isClosed && this.canPersistState && this.stateManager.getState()) {
         this.stateManager.scheduleSave(this.buildCurrentState(), 0);
       }
     }, 5e3);
@@ -1458,6 +1557,17 @@ var QuizView = class extends import_obsidian3.ItemView {
     });
     filterBody.classList.toggle("csv-quiz-filter-body-hidden", !panelOpen);
     toggleIcon.textContent = panelOpen ? "\u25BC" : "\u25B6";
+    const textRow = filterBody.createDiv("csv-quiz-filter-row");
+    textRow.createEl("label", { text: "\u6587\u672C: ", cls: "csv-quiz-filter-label" });
+    this.filterTextInput = textRow.createEl("input", {
+      type: "text",
+      cls: "csv-quiz-input csv-quiz-filter-text-input",
+      attr: { placeholder: "\u5339\u914D\u9898\u5E72\u4E0E\u9009\u9879" }
+    });
+    this.filterTextInput.value = this.filterText;
+    this.filterTextInput.addEventListener("input", () => {
+      this.scheduleTextFilter();
+    });
     const tagRow = filterBody.createDiv("csv-quiz-filter-row");
     tagRow.createEl("label", { text: "\u6807\u7B7E: ", cls: "csv-quiz-filter-label" });
     this.tagsContainer = tagRow.createDiv("csv-quiz-tags-container");
@@ -1526,8 +1636,23 @@ var QuizView = class extends import_obsidian3.ItemView {
     this.populateSelect(this.cat1Select, cats.cat1, this.filterCat1);
     this.populateSelect(this.cat2Select, cats.cat2, this.filterCat2);
     this.populateSelect(this.cat3Select, cats.cat3, this.filterCat3);
+    if (this.filterTextInput) {
+      this.filterTextInput.value = this.filterText;
+    }
     this.populateTagChips();
     this.syncBoolChips();
+  }
+  /** 自由文本筛选：输入防抖 200ms 后应用（与其它筛选一致的 applyFiltersAndReset 行为）。 */
+  scheduleTextFilter() {
+    if (this.textFilterTimer !== null) {
+      window.clearTimeout(this.textFilterTimer);
+    }
+    this.textFilterTimer = window.setTimeout(() => {
+      this.textFilterTimer = null;
+      if (this.isClosed) return;
+      this.filterText = this.filterTextInput.value;
+      this.applyFiltersAndReset();
+    }, 200);
   }
   syncBoolChips() {
     var _a;
@@ -1606,11 +1731,10 @@ var QuizView = class extends import_obsidian3.ItemView {
       select.value = "";
     }
   }
-  reFilterForNavigation() {
-    var _a;
-    const prevId = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id;
-    this.filteredQuestions = filterQuestions(
-      this.orderedQuestions,
+  /** 按当前全部筛选条件（含自由文本）过滤题目。 */
+  applyFiltersTo(questions) {
+    return filterQuestions(
+      questions,
       this.filterTags,
       this.filterCat1,
       this.filterCat2,
@@ -1618,8 +1742,14 @@ var QuizView = class extends import_obsidian3.ItemView {
       this.filterFavorite,
       this.filterMastered,
       this.filterRepeat,
-      this.filterWrong
+      this.filterWrong,
+      this.filterText
     );
+  }
+  reFilterForNavigation() {
+    var _a;
+    const prevId = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id;
+    this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
     if (prevId) {
       const newIdx = this.filteredQuestions.findIndex((q) => q.id === prevId);
       if (newIdx >= 0) {
@@ -1630,17 +1760,7 @@ var QuizView = class extends import_obsidian3.ItemView {
     }
   }
   applyFiltersAndReset() {
-    this.filteredQuestions = filterQuestions(
-      this.orderedQuestions,
-      this.filterTags,
-      this.filterCat1,
-      this.filterCat2,
-      this.filterCat3,
-      this.filterFavorite,
-      this.filterMastered,
-      this.filterRepeat,
-      this.filterWrong
-    );
+    this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
     this.currentIndex = this.filteredQuestions.length > 0 ? 0 : -1;
     this.currentShuffledQId = null;
     this.cancelAutoNext();
@@ -1692,7 +1812,7 @@ var QuizView = class extends import_obsidian3.ItemView {
       });
     }
     const stemDiv = this.questionArea.createDiv("csv-quiz-stem");
-    import_obsidian3.MarkdownRenderer.render(this.app, question.stem, stemDiv, "", this).catch(
+    import_obsidian4.MarkdownRenderer.render(this.app, question.stem, stemDiv, "", this).catch(
       (e) => console.error("CSV Quiz: markdown render failed", e)
     );
     const optionsDiv = this.questionArea.createDiv("csv-quiz-options");
@@ -1811,18 +1931,37 @@ var QuizView = class extends import_obsidian3.ItemView {
   /** 多选题：点击「下一题」时判定对错。 */
   async evaluateMultiAnswer() {
     if (this.answering || this.showingAnswer) return;
-    const question = this.filteredQuestions[this.currentIndex];
-    if (!question) return;
+    const origQuestion = this.filteredQuestions[this.currentIndex];
+    if (!origQuestion) return;
     this.answering = true;
     await this.saveCurrentEdit();
+    let question = this.filteredQuestions[this.currentIndex];
+    if (!question || question.id !== origQuestion.id) {
+      const idx = this.filteredQuestions.findIndex((q) => q.id === origQuestion.id);
+      if (idx >= 0) {
+        this.currentIndex = idx;
+        question = this.filteredQuestions[idx];
+      } else {
+        const selectedStr2 = this.normalizeAnswer(this.selectedOptions.join(""));
+        await this.recordAnswer(
+          origQuestion,
+          selectedStr2,
+          selectedStr2 === this.normalizeAnswer(origQuestion.answer)
+        );
+        this.renderQuestion();
+        this.saveState();
+        new import_obsidian4.Notice("\u9898\u76EE\u5DF2\u56E0\u7B5B\u9009\u6761\u4EF6\u53D8\u5316\u88AB\u79FB\u51FA\u5F53\u524D\u5217\u8868\uFF0C\u7B54\u6848\u5DF2\u8BB0\u5F55");
+        return;
+      }
+    }
     const selectedStr = this.normalizeAnswer(this.selectedOptions.join(""));
     const isCorrect = selectedStr === this.normalizeAnswer(question.answer);
     this.showingAnswer = true;
-    this.answeredQuestions[question.id] = selectedStr;
+    await this.recordAnswer(question, selectedStr, isCorrect);
+    this.renderQuestion();
+    this.updateProgress();
+    const settings = this.getSettings();
     if (isCorrect) {
-      this.correctCount++;
-      this.renderQuestion();
-      const settings = this.getSettings();
       if (settings.autoNextDelay > 0) {
         this.autoNextTimer = window.setTimeout(() => {
           void this.nextQuestion();
@@ -1831,22 +1970,42 @@ var QuizView = class extends import_obsidian3.ItemView {
         this.answering = false;
       }
     } else {
-      this.wrongCount++;
-      if (question.wrong !== "1") {
-        question.wrong = "1";
-        await this.saveQuestionToCSV(question);
-      }
-      this.renderQuestion();
       this.answering = false;
     }
-    this.updateProgress();
     this.saveState();
+  }
+  /** 记录答题结果：计数、答题记录、错题标记（答对清除、答错置位），写 CSV 失败时回滚标记。不负责渲染。 */
+  async recordAnswer(question, selectedStr, isCorrect) {
+    this.answeredQuestions[question.id] = selectedStr;
+    if (isCorrect) {
+      this.correctCount++;
+      if (question.wrong === "1") {
+        const prevWrong = question.wrong;
+        question.wrong = "";
+        const ok = await this.saveQuestionToCSV(question);
+        if (!ok) question.wrong = prevWrong;
+      }
+    } else {
+      this.wrongCount++;
+      if (question.wrong !== "1") {
+        const prevWrong = question.wrong;
+        question.wrong = "1";
+        const ok = await this.saveQuestionToCSV(question);
+        if (!ok) question.wrong = prevWrong;
+      }
+    }
   }
   /** 「下一题」按钮：多选题未判定时先判定，否则跳转。 */
   async onNextClick() {
+    if (this.navigating) return;
     const question = this.filteredQuestions[this.currentIndex];
     if (question && this.isMultiChoice(question) && !this.showingAnswer) {
-      await this.evaluateMultiAnswer();
+      this.navigating = true;
+      try {
+        await this.evaluateMultiAnswer();
+      } finally {
+        this.navigating = false;
+      }
       return;
     }
     await this.nextQuestion();
@@ -1875,7 +2034,7 @@ var QuizView = class extends import_obsidian3.ItemView {
     this.cancelAutoNext();
     this.renderQuestion();
     this.saveState();
-    new import_obsidian3.Notice("\u7B54\u9898\u8FDB\u5EA6\u5DF2\u91CD\u7F6E");
+    new import_obsidian4.Notice("\u7B54\u9898\u8FDB\u5EA6\u5DF2\u91CD\u7F6E");
   }
   renderCheckboxArea(question) {
     this.checkboxArea.empty();
@@ -1895,8 +2054,17 @@ var QuizView = class extends import_obsidian3.ItemView {
       labelEl.createSpan({ text: " " + f.label });
       cb.addEventListener("change", () => {
         const q = question;
-        q[f.key] = cb.checked ? "1" : "";
-        void this.saveQuestionToCSV(question).then(() => {
+        const prevValue = q[f.key];
+        const newValue = cb.checked ? "1" : "";
+        q[f.key] = newValue;
+        void this.saveQuestionToCSV(question).then((ok) => {
+          if (!ok) {
+            q[f.key] = prevValue;
+            cb.checked = prevValue === "1";
+            return;
+          }
+          this.reFilterAndLocate(question.id);
+          this.renderQuestion();
           this.saveState();
         });
       });
@@ -1904,26 +2072,22 @@ var QuizView = class extends import_obsidian3.ItemView {
   }
   async openTagPicker(question) {
     var _a;
+    await this.saveCurrentEdit();
     const allTags = getUniqueTags(this.allQuestions);
     const currentTags = question.tags || "";
     const modal = new TagPickerModal(this.app, allTags, currentTags);
     modal.open();
     const result = await modal.promise;
     if (result !== null) {
+      const oldTags = question.tags;
       question.tags = result;
-      await this.saveQuestionToCSV(question);
+      const ok = await this.saveQuestionToCSV(question);
+      if (!ok) {
+        question.tags = oldTags;
+        return;
+      }
       const currentDisplayedId = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id;
-      this.filteredQuestions = filterQuestions(
-        this.orderedQuestions,
-        this.filterTags,
-        this.filterCat1,
-        this.filterCat2,
-        this.filterCat3,
-        this.filterFavorite,
-        this.filterMastered,
-        this.filterRepeat,
-        this.filterWrong
-      );
+      this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
       if (currentDisplayedId) {
         const newIndex = this.filteredQuestions.findIndex(
           (q) => q.id === currentDisplayedId
@@ -1943,7 +2107,7 @@ var QuizView = class extends import_obsidian3.ItemView {
       if (this.filteredQuestions.length > 0) {
         this.renderQuestion();
       }
-      new import_obsidian3.Notice("\u6807\u7B7E\u5DF2\u4FDD\u5B58");
+      new import_obsidian4.Notice("\u6807\u7B7E\u5DF2\u4FDD\u5B58");
     }
   }
   renderEditArea(question) {
@@ -2012,21 +2176,36 @@ var QuizView = class extends import_obsidian3.ItemView {
   }
   async handleAnswer(selectedKey) {
     if (this.answering || this.showingAnswer) return;
+    const origQuestion = this.filteredQuestions[this.currentIndex];
+    if (!origQuestion) return;
     this.answering = true;
     this.selectedOption = selectedKey;
     await this.saveCurrentEdit();
-    const question = this.filteredQuestions[this.currentIndex];
-    if (!question) {
-      this.answering = false;
-      return;
+    let question = this.filteredQuestions[this.currentIndex];
+    if (!question || question.id !== origQuestion.id) {
+      const idx = this.filteredQuestions.findIndex((q) => q.id === origQuestion.id);
+      if (idx >= 0) {
+        this.currentIndex = idx;
+        question = this.filteredQuestions[idx];
+      } else {
+        await this.recordAnswer(
+          origQuestion,
+          selectedKey,
+          selectedKey === origQuestion.answer
+        );
+        this.renderQuestion();
+        this.saveState();
+        new import_obsidian4.Notice("\u9898\u76EE\u5DF2\u56E0\u7B5B\u9009\u6761\u4EF6\u53D8\u5316\u88AB\u79FB\u51FA\u5F53\u524D\u5217\u8868\uFF0C\u7B54\u6848\u5DF2\u8BB0\u5F55");
+        return;
+      }
     }
-    this.showingAnswer = true;
-    this.answeredQuestions[question.id] = selectedKey;
     const isCorrect = selectedKey === question.answer;
+    this.showingAnswer = true;
+    await this.recordAnswer(question, selectedKey, isCorrect);
+    this.renderQuestion();
+    this.updateProgress();
+    const settings = this.getSettings();
     if (isCorrect) {
-      this.correctCount++;
-      this.renderQuestion();
-      const settings = this.getSettings();
       if (settings.autoNextDelay > 0) {
         this.autoNextTimer = window.setTimeout(() => {
           void this.nextQuestion();
@@ -2035,15 +2214,8 @@ var QuizView = class extends import_obsidian3.ItemView {
         this.answering = false;
       }
     } else {
-      this.wrongCount++;
-      if (question.wrong !== "1") {
-        question.wrong = "1";
-        await this.saveQuestionToCSV(question);
-      }
-      this.renderQuestion();
       this.answering = false;
     }
-    this.updateProgress();
     this.saveState();
   }
   cancelAutoNext() {
@@ -2054,7 +2226,7 @@ var QuizView = class extends import_obsidian3.ItemView {
   }
   async nextQuestion() {
     var _a;
-    if (this.navigating) return;
+    if (this.isClosed || this.navigating) return;
     this.navigating = true;
     try {
       await this.saveCurrentEdit();
@@ -2081,29 +2253,35 @@ var QuizView = class extends import_obsidian3.ItemView {
   }
   async prevQuestion() {
     var _a;
-    await this.saveCurrentEdit();
-    const origId = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id;
-    this.reFilterForNavigation();
-    if (!origId) return;
-    const found = this.filteredQuestions.some((q) => q.id === origId);
-    if (found) {
-      const newIdx = this.filteredQuestions.findIndex((q) => q.id === origId);
-      if (newIdx > 0) {
-        this.currentIndex = newIdx - 1;
+    if (this.navigating) return;
+    this.navigating = true;
+    try {
+      await this.saveCurrentEdit();
+      const origId = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id;
+      this.reFilterForNavigation();
+      if (!origId) return;
+      const found = this.filteredQuestions.some((q) => q.id === origId);
+      if (found) {
+        const newIdx = this.filteredQuestions.findIndex((q) => q.id === origId);
+        if (newIdx > 0) {
+          this.currentIndex = newIdx - 1;
+        } else {
+          return;
+        }
       } else {
-        return;
+        if (this.currentIndex > 0) {
+          this.currentIndex--;
+        } else {
+          return;
+        }
       }
-    } else {
-      if (this.currentIndex > 0) {
-        this.currentIndex--;
-      } else {
-        return;
-      }
+      this.currentShuffledQId = null;
+      this.cancelAutoNext();
+      this.renderQuestion();
+      this.saveState();
+    } finally {
+      this.navigating = false;
     }
-    this.currentShuffledQId = null;
-    this.cancelAutoNext();
-    this.renderQuestion();
-    this.saveState();
   }
   updateNavigation() {
     var _a;
@@ -2131,19 +2309,25 @@ var QuizView = class extends import_obsidian3.ItemView {
     });
     jumpBtn.addEventListener("click", () => {
       void (async () => {
-        await this.saveCurrentEdit();
-        const targetStr = jumpInput.value.trim();
-        if (!targetStr) return;
-        const targetNum = parseInt(targetStr, 10);
-        if (isNaN(targetNum) || targetNum < 1 || targetNum > this.filteredQuestions.length) {
-          new import_obsidian3.Notice("\u9898\u53F7\u4E0D\u5B58\u5728\u6216\u5DF2\u88AB\u7B5B\u9009");
-          return;
+        if (this.navigating) return;
+        this.navigating = true;
+        try {
+          await this.saveCurrentEdit();
+          const targetStr = jumpInput.value.trim();
+          if (!targetStr) return;
+          const targetNum = parseInt(targetStr, 10);
+          if (isNaN(targetNum) || targetNum < 1 || targetNum > this.filteredQuestions.length) {
+            new import_obsidian4.Notice("\u9898\u53F7\u4E0D\u5B58\u5728\u6216\u5DF2\u88AB\u7B5B\u9009");
+            return;
+          }
+          this.currentIndex = targetNum - 1;
+          this.currentShuffledQId = null;
+          this.cancelAutoNext();
+          this.renderQuestion();
+          this.saveState();
+        } finally {
+          this.navigating = false;
         }
-        this.currentIndex = targetNum - 1;
-        this.currentShuffledQId = null;
-        this.cancelAutoNext();
-        this.renderQuestion();
-        this.saveState();
       })();
     });
     const nextBtn = navInner.createEl("button", {
@@ -2188,7 +2372,7 @@ var QuizView = class extends import_obsidian3.ItemView {
         return;
       }
     }
-    new import_obsidian3.Notice("\u6CA1\u6709\u66F4\u591A\u672A\u7B54\u9898");
+    new import_obsidian4.Notice("\u6CA1\u6709\u66F4\u591A\u672A\u7B54\u9898");
   }
   updateProgress() {
     const total = this.filteredQuestions.length;
@@ -2201,6 +2385,18 @@ var QuizView = class extends import_obsidian3.ItemView {
       this.statsEl.textContent += `  (${rate}%)`;
     }
   }
+  /** 重新计算筛选结果并定位指定题目的新位置（题目被筛掉时回退到第一题/空状态）。 */
+  reFilterAndLocate(questionId) {
+    this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
+    const idx = this.filteredQuestions.findIndex((q) => q.id === questionId);
+    if (idx >= 0) {
+      this.currentIndex = idx;
+    } else if (this.filteredQuestions.length > 0) {
+      this.currentIndex = 0;
+    } else {
+      this.currentIndex = -1;
+    }
+  }
   async saveCurrentEdit() {
     if (this.filteredQuestions.length === 0 || this.currentIndex < 0) return;
     const question = this.filteredQuestions[this.currentIndex];
@@ -2208,44 +2404,30 @@ var QuizView = class extends import_obsidian3.ItemView {
     const editInputs = Array.from(
       this.editArea.querySelectorAll(".csv-quiz-edit-input")
     );
-    let changed = false;
     const q = question;
+    const changedFields = [];
     for (const input of editInputs) {
       const field = input.dataset.field;
       if (!field) continue;
       const value = input.value;
       if (q[field] !== value) {
+        changedFields.push({ field, oldValue: q[field] });
         q[field] = value;
-        changed = true;
       }
     }
-    if (changed) {
-      await this.saveQuestionToCSV(question);
-      this.filteredQuestions = filterQuestions(
-        this.orderedQuestions,
-        this.filterTags,
-        this.filterCat1,
-        this.filterCat2,
-        this.filterCat3,
-        this.filterFavorite,
-        this.filterMastered,
-        this.filterRepeat,
-        this.filterWrong
-      );
-      const newIndex = this.filteredQuestions.findIndex(
-        (q2) => q2.id === previousId
-      );
-      if (newIndex >= 0) {
-        this.currentIndex = newIndex;
-      } else if (this.filteredQuestions.length > 0) {
-        this.currentIndex = 0;
-      } else {
-        this.currentIndex = -1;
+    if (changedFields.length === 0) return;
+    const ok = await this.saveQuestionToCSV(question);
+    if (!ok) {
+      for (const c of changedFields) {
+        q[c.field] = c.oldValue;
       }
-      this.saveState();
-      new import_obsidian3.Notice("\u4FEE\u6539\u5DF2\u4FDD\u5B58");
+      return;
     }
+    this.reFilterAndLocate(previousId);
+    this.saveState();
+    new import_obsidian4.Notice("\u4FEE\u6539\u5DF2\u4FDD\u5B58");
   }
+  /** 写回 CSV；成功返回 true，失败返回 false（已提示用户）。 */
   async saveQuestionToCSV(question) {
     const newRow = generateCSVRow(question);
     try {
@@ -2256,16 +2438,19 @@ var QuizView = class extends import_obsidian3.ItemView {
         }
         return updatedContent;
       });
+      return true;
     } catch (e) {
       console.error("CSV Quiz: Failed to save question to CSV", e);
       if (e instanceof Error && e.message === "CSV \u4E2D\u672A\u627E\u5230\u5BF9\u5E94\u9898\u53F7") {
-        new import_obsidian3.Notice("CSV \u4E2D\u672A\u627E\u5230\u5BF9\u5E94\u9898\u53F7\uFF0C\u4FEE\u6539\u672A\u4FDD\u5B58");
+        new import_obsidian4.Notice("CSV \u4E2D\u672A\u627E\u5230\u5BF9\u5E94\u9898\u53F7\uFF0C\u4FEE\u6539\u672A\u4FDD\u5B58");
       } else {
-        new import_obsidian3.Notice(`\u4FDD\u5B58\u5230 CSV \u5931\u8D25: ${e instanceof Error ? e.message : String(e)}`);
+        new import_obsidian4.Notice(`\u4FDD\u5B58\u5230 CSV \u5931\u8D25: ${e instanceof Error ? e.message : String(e)}`);
       }
+      return false;
     }
   }
   async refresh() {
+    this.canPersistState = false;
     await this.saveCurrentEdit();
     this.cancelAutoNext();
     if (this.autoSaveTimer !== null) {
@@ -2277,6 +2462,12 @@ var QuizView = class extends import_obsidian3.ItemView {
     try {
       const csvContent = await readCSVFile(this.vault, this.csvPath);
       this.allQuestions = parseCSV(csvContent);
+      this.checkDuplicateIds();
+      if (this.allQuestions.length === 0) {
+        this.showError("CSV \u6587\u4EF6\u4E2D\u6CA1\u6709\u627E\u5230\u9898\u76EE\u6570\u636E");
+        return;
+      }
+      this.canPersistState = true;
       await this.stateManager.clearState();
       this.displayOrder = buildDisplayOrder(
         this.allQuestions,
@@ -2286,6 +2477,7 @@ var QuizView = class extends import_obsidian3.ItemView {
         this.allQuestions,
         this.displayOrder
       );
+      this.filterText = "";
       this.filterTags = "";
       this.filterCat1 = "";
       this.filterCat2 = "";
@@ -2294,17 +2486,7 @@ var QuizView = class extends import_obsidian3.ItemView {
       this.filterMastered = settings.defaultFilterMastered;
       this.filterRepeat = settings.defaultFilterRepeat;
       this.filterWrong = settings.defaultFilterWrong;
-      this.filteredQuestions = filterQuestions(
-        this.orderedQuestions,
-        this.filterTags,
-        this.filterCat1,
-        this.filterCat2,
-        this.filterCat3,
-        this.filterFavorite,
-        this.filterMastered,
-        this.filterRepeat,
-        this.filterWrong
-      );
+      this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
       this.currentIndex = 0;
       this.correctCount = 0;
       this.wrongCount = 0;
@@ -2316,7 +2498,7 @@ var QuizView = class extends import_obsidian3.ItemView {
       this.renderQuestion();
       this.saveState();
       this.startAutoSave();
-      new import_obsidian3.Notice("\u5DF2\u5237\u65B0\uFF0C\u91CD\u65B0\u5F00\u59CB");
+      new import_obsidian4.Notice("\u5DF2\u5237\u65B0\uFF0C\u91CD\u65B0\u5F00\u59CB");
     } catch (e) {
       console.error("CSV Quiz: Refresh failed", e);
       this.showError(`\u5237\u65B0\u5931\u8D25: ${e instanceof Error ? e.message : String(e)}`);
@@ -2339,6 +2521,7 @@ var QuizView = class extends import_obsidian3.ItemView {
       correctCount: this.correctCount,
       wrongCount: this.wrongCount,
       displayOrder: this.displayOrder,
+      filterText: this.filterText,
       filterTags: this.filterTags,
       filterCat1: this.filterCat1,
       filterCat2: this.filterCat2,
@@ -2351,10 +2534,15 @@ var QuizView = class extends import_obsidian3.ItemView {
     };
   }
   saveState() {
+    if (this.isClosed) return;
+    if (!this.canPersistState) return;
     const state = this.buildCurrentState();
     this.stateManager.scheduleSave(state, 300);
   }
 };
+/** 当前打开的视图实例数（模块级）：防止同一窗口内出现双实例互相覆盖进度。 */
+_QuizView.openViewCount = 0;
+var QuizView = _QuizView;
 
 // src/stateManager.ts
 var StateWriteQueue = class {
@@ -2398,6 +2586,8 @@ var StateManager = class {
   constructor(plugin) {
     this.currentState = null;
     this.saveTimer = null;
+    this.settingsSaveTimer = null;
+    this.pendingSettings = null;
     this.plugin = plugin;
     this.writeQueue = new StateWriteQueue(plugin);
   }
@@ -2443,16 +2633,40 @@ var StateManager = class {
       this.saveTimer = null;
     }
   }
+  /** 设置保存防抖：设置面板每次击键都会触发，合并为最后一次变更后 400ms 写入一次。 */
   async saveSettings(settings) {
-    await this.writeQueue.enqueue({ settings });
+    this.pendingSettings = settings;
+    if (this.settingsSaveTimer !== null) {
+      window.clearTimeout(this.settingsSaveTimer);
+    }
+    return new Promise((resolve) => {
+      this.settingsSaveTimer = window.setTimeout(() => {
+        this.settingsSaveTimer = null;
+        const s = this.pendingSettings;
+        this.pendingSettings = null;
+        void this.writeQueue.enqueue({ settings: s }).then(resolve);
+      }, 400);
+    });
+  }
+  /** 立即落盘挂起的设置保存（设置页关闭 / 插件卸载时调用，避免防抖窗口内丢设置）。 */
+  async flushSettingsSave() {
+    if (this.settingsSaveTimer !== null) {
+      window.clearTimeout(this.settingsSaveTimer);
+      this.settingsSaveTimer = null;
+    }
+    const s = this.pendingSettings;
+    this.pendingSettings = null;
+    if (s) {
+      await this.writeQueue.enqueue({ settings: s });
+    }
   }
 };
 
 // src/main.ts
-var CSVQuizPlugin = class extends import_obsidian4.Plugin {
+var CSVQuizPlugin = class extends import_obsidian5.Plugin {
   async onload() {
     this.stateManager = new StateManager(this);
-    this.csvWriteQueue = new CSVWriteQueue(this.app.vault);
+    this.csvWriteQueue = new CSVWriteQueue(this.app);
     await this.loadSettings();
     await this.stateManager.loadPluginData(this.settings);
     this.registerView(VIEW_TYPE_QUIZ, (leaf) => {
@@ -2484,6 +2698,7 @@ var CSVQuizPlugin = class extends import_obsidian4.Plugin {
         void view.onClose();
       }
     }
+    void this.stateManager.flushSettingsSave();
   }
   activateView() {
     const { workspace } = this.app;
@@ -2533,6 +2748,19 @@ var CSVQuizPlugin = class extends import_obsidian4.Plugin {
   }
   async saveSettings() {
     await this.stateManager.saveSettings(this.settings);
+  }
+  async flushSettingsSave() {
+    await this.stateManager.flushSettingsSave();
+  }
+  /**
+   * 清除已保存的刷题进度；若面板已打开则立即重建会话。
+   * 用于开启「随机题目顺序」等需要重排显示顺序的场景：面板打开时 refresh()
+   * 会以新设置重新 buildDisplayOrder（shuffle）；面板未打开时仅清空磁盘进度，
+   * 下次打开走 applyFreshStart 同样会 shuffle。
+   */
+  async resetQuizProgress() {
+    await this.stateManager.clearState();
+    this.refreshQuiz();
   }
 };
 /*! Bundled license information:

@@ -1,7 +1,7 @@
 import Papa from "papaparse";
 import { Question } from "./types";
 
-import { Vault } from "obsidian";
+import { App, Editor, MarkdownView, Notice, Vault } from "obsidian";
 
 export function parseCSV(content: string): Question[] {
   const result = Papa.parse(content, { header: false, skipEmptyLines: true });
@@ -77,7 +77,12 @@ export function findAndUpdateRow(
 
   if (idx < 0) return null;
 
-  dataRows[idx] = newData;
+  // H3: 保留超过 15 列的多余列，避免编辑保存后数据丢失
+  const targetRow = dataRows[idx];
+  dataRows[idx] =
+    newData.length >= targetRow.length
+      ? newData
+      : [...newData, ...targetRow.slice(newData.length)];
 
   return Papa.unparse([header, ...dataRows], { delimiter: "," });
 }
@@ -141,9 +146,18 @@ export function filterQuestions(
   filterFavorite: string = "",
   filterMastered: string = "",
   filterRepeat: string = "",
-  filterWrong: string = ""
+  filterWrong: string = "",
+  filterText: string = ""
 ): Question[] {
   return questions.filter((q) => {
+    // 自由文本筛选：不区分大小写，匹配题干或任一选项（子串包含）
+    const text = filterText.trim().toLowerCase();
+    if (text) {
+      const haystack =
+        (q.stem + " " + q.optionA + " " + q.optionB + " " + q.optionC + " " + q.optionD).toLowerCase();
+      if (!haystack.includes(text)) return false;
+    }
+
     if (filterTags && filterTags.trim() !== "") {
       const tagFilters = filterTags
         .trim()
@@ -209,10 +223,12 @@ export class CSVWriteQueue {
     reject: (reason: unknown) => void;
   }> = [];
   private processing = false;
+  private app: App;
   private vault: Vault;
 
-  constructor(vault: Vault) {
-    this.vault = vault;
+  constructor(app: App) {
+    this.app = app;
+    this.vault = app.vault;
   }
 
   enqueue(csvPath: string, transform: CSVTransform): Promise<void> {
@@ -228,9 +244,19 @@ export class CSVWriteQueue {
 
     const item = this.queue.shift()!;
     try {
-      const currentContent = await readCSVFile(this.vault, item.csvPath);
+      // H1: 若文件正打开在编辑器中，以编辑器内容为基准读写，避免插件写盘后
+      // 编辑器 Ctrl+S 用陈旧 buffer 覆盖插件的修改。
+      const editor = this.getOpenEditor(item.csvPath);
+
+      const currentContent = editor
+        ? editor.getValue()
+        : await readCSVFile(this.vault, item.csvPath);
       const newContent = await Promise.resolve(item.transform(currentContent));
       await writeCSVFile(this.vault, item.csvPath, newContent);
+      if (editor) {
+        editor.setValue(newContent);
+        new Notice("题库文件正在编辑器中打开，已同步更新编辑器内容");
+      }
       item.resolve();
     } catch (e: unknown) {
       item.reject(e);
@@ -238,6 +264,19 @@ export class CSVWriteQueue {
       this.processing = false;
       void this.processNext();
     }
+  }
+
+  /** 若 csvPath 对应的文件正打开在 Markdown 编辑器中，返回其编辑器实例，否则返回 null。 */
+  private getOpenEditor(csvPath: string): Editor | null {
+    const file = this.app.vault.getFileByPath(csvPath);
+    if (!file) return null;
+    let editor: Editor | null = null;
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (leaf.view instanceof MarkdownView && leaf.view.file === file) {
+        editor = leaf.view.editor;
+      }
+    });
+    return editor;
   }
 
   get pending(): number {

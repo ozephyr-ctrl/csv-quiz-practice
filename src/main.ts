@@ -12,7 +12,7 @@ export default class CSVQuizPlugin extends Plugin {
 
   async onload(): Promise<void> {
     this.stateManager = new StateManager(this);
-    this.csvWriteQueue = new CSVWriteQueue(this.app.vault);
+    this.csvWriteQueue = new CSVWriteQueue(this.app);
 
     await this.loadSettings();
     await this.stateManager.loadPluginData(this.settings);
@@ -50,6 +50,7 @@ export default class CSVQuizPlugin extends Plugin {
         void view.onClose();
       }
     }
+    void this.stateManager.flushSettingsSave();
   }
 
   activateView(): void {
@@ -107,5 +108,20 @@ export default class CSVQuizPlugin extends Plugin {
 
   async saveSettings(): Promise<void> {
     await this.stateManager.saveSettings(this.settings);
+  }
+
+  async flushSettingsSave(): Promise<void> {
+    await this.stateManager.flushSettingsSave();
+  }
+
+  /**
+   * 清除已保存的刷题进度；若面板已打开则立即重建会话。
+   * 用于开启「随机题目顺序」等需要重排显示顺序的场景：面板打开时 refresh()
+   * 会以新设置重新 buildDisplayOrder（shuffle）；面板未打开时仅清空磁盘进度，
+   * 下次打开走 applyFreshStart 同样会 shuffle。
+   */
+  async resetQuizProgress(): Promise<void> {
+    await this.stateManager.clearState();
+    this.refreshQuiz();
   }
 }
