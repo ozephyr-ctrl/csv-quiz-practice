@@ -1212,6 +1212,11 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     /** 本实例是否已计入 openViewCount。 */
     this.counted = false;
     this.textFilterTimer = null;
+    /** 随机练习模式：练习集为临时会话，不持久化，重开面板回到常规模式。 */
+    this.practiceActive = false;
+    this.practiceIds = [];
+    /** 进入练习前的常规模式定位题号，退出时据此恢复位置。 */
+    this.practiceFocusId = null;
     this.plugin = plugin;
     this.stateManager = stateManager;
     this.vault = vault;
@@ -1251,6 +1256,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
       this.autoSaveTimer = null;
     }
     this.stateManager.cancelScheduledSave();
+    this.exitRandomPractice();
     if (this.textFilterTimer !== null) {
       window.clearTimeout(this.textFilterTimer);
       this.textFilterTimer = null;
@@ -1629,6 +1635,17 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
         void this.toggleBoolFilter(bf.key, "0");
       });
     }
+    const practiceRow = filterBody.createDiv("csv-quiz-filter-row");
+    this.practiceBtn = practiceRow.createEl("button", {
+      text: "\u{1F3B2} \u968F\u673A\u7EC3\u4E60\uFF08100 \u9898\uFF09",
+      cls: "csv-quiz-btn csv-quiz-btn-sm csv-quiz-practice-btn"
+    });
+    this.practiceBtn.addEventListener("click", () => {
+      this.toggleRandomPractice();
+    });
+    this.practiceCountEl = practiceRow.createSpan({
+      cls: "csv-quiz-practice-count"
+    });
   }
   updateFilterUI() {
     if (!this.cat1Select) return;
@@ -1641,6 +1658,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     }
     this.populateTagChips();
     this.syncBoolChips();
+    this.updatePracticeButton();
   }
   /** 自由文本筛选：输入防抖 200ms 后应用（与其它筛选一致的 applyFiltersAndReset 行为）。 */
   scheduleTextFilter() {
@@ -1678,6 +1696,80 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     self2[key] = self2[key] === val ? "" : val;
     this.syncBoolChips();
     this.applyFiltersAndReset();
+  }
+  /** 随机练习：按当前筛选条件筛出未答题，随机取最多 100 道作为练习集（不足自适应）。 */
+  enableRandomPractice() {
+    var _a, _b;
+    if (this.practiceActive) return;
+    const pool = this.applyFiltersTo(this.orderedQuestions);
+    const unanswered = pool.filter(
+      (q) => this.answeredQuestions[q.id] === void 0
+    );
+    if (unanswered.length === 0) {
+      new import_obsidian4.Notice("\u6CA1\u6709\u672A\u7B54\u9898\uFF0C\u65E0\u6CD5\u5F00\u59CB\u968F\u673A\u7EC3\u4E60");
+      return;
+    }
+    const picked = shuffle(unanswered).slice(0, 100);
+    this.practiceFocusId = (_b = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id) != null ? _b : null;
+    this.practiceIds = picked.map((q) => q.id);
+    this.practiceActive = true;
+    this.filteredQuestions = picked;
+    this.currentIndex = 0;
+    this.currentShuffledQId = null;
+    this.cancelAutoNext();
+    this.renderQuestion();
+    this.saveState();
+    new import_obsidian4.Notice(`\u968F\u673A\u7EC3\u4E60\u5F00\u59CB\uFF1A${picked.length} \u9898`);
+  }
+  /** 退出练习模式：恢复常规筛选结果并定位到进入前的位置。不渲染、不保存，由调用方决定。 */
+  exitRandomPractice() {
+    if (!this.practiceActive) return;
+    this.practiceActive = false;
+    this.practiceIds = [];
+    this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
+    if (this.practiceFocusId) {
+      const idx = this.filteredQuestions.findIndex(
+        (q) => q.id === this.practiceFocusId
+      );
+      if (idx >= 0) {
+        this.currentIndex = idx;
+      } else if (this.filteredQuestions.length > 0) {
+        this.currentIndex = 0;
+      } else {
+        this.currentIndex = -1;
+      }
+    } else {
+      this.currentIndex = this.filteredQuestions.length > 0 ? 0 : -1;
+    }
+    this.practiceFocusId = null;
+    this.currentShuffledQId = null;
+    this.cancelAutoNext();
+  }
+  toggleRandomPractice() {
+    if (this.practiceActive) {
+      this.exitRandomPractice();
+      this.renderQuestion();
+      this.saveState();
+      new import_obsidian4.Notice("\u5DF2\u9000\u51FA\u968F\u673A\u7EC3\u4E60");
+    } else {
+      this.enableRandomPractice();
+    }
+  }
+  /** 同步练习按钮的文案/高亮与完成计数。 */
+  updatePracticeButton() {
+    if (!this.practiceBtn) return;
+    if (this.practiceActive) {
+      this.practiceBtn.setText("\u9000\u51FA\u968F\u673A\u7EC3\u4E60");
+      this.practiceBtn.addClass("csv-quiz-practice-btn-active");
+      const answered = this.practiceIds.filter(
+        (id) => this.answeredQuestions[id] !== void 0
+      ).length;
+      this.practiceCountEl.setText(` \u5DF2\u5B8C\u6210 ${answered}/${this.practiceIds.length}`);
+    } else {
+      this.practiceBtn.setText("\u{1F3B2} \u968F\u673A\u7EC3\u4E60\uFF08100 \u9898\uFF09");
+      this.practiceBtn.removeClass("csv-quiz-practice-btn-active");
+      this.practiceCountEl.setText("");
+    }
   }
   populateTagChips() {
     if (!this.tagsContainer) return;
@@ -1760,6 +1852,9 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     }
   }
   applyFiltersAndReset() {
+    if (this.practiceActive) {
+      this.exitRandomPractice();
+    }
     this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
     this.currentIndex = this.filteredQuestions.length > 0 ? 0 : -1;
     this.currentShuffledQId = null;
@@ -1888,6 +1983,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     this.readOnlyArea.createSpan({ text: catText, cls: "csv-quiz-readonly-cats" });
     this.renderEditArea(question);
     this.updateNavigation();
+    this.updatePracticeButton();
   }
   renderFeedback(question, displayOptions) {
     this.feedbackArea.empty();
@@ -2240,6 +2336,11 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
           this.currentIndex = newIdx + 1;
         } else {
           this.currentIndex = newIdx;
+          if (this.practiceActive && this.filteredQuestions.every(
+            (q) => this.answeredQuestions[q.id] !== void 0
+          )) {
+            new import_obsidian4.Notice(`\u7EC3\u4E60\u5B8C\u6210\uFF01\u5171 ${this.filteredQuestions.length} \u9898`);
+          }
           return;
         }
       }
@@ -2372,7 +2473,13 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
         return;
       }
     }
-    new import_obsidian4.Notice("\u6CA1\u6709\u66F4\u591A\u672A\u7B54\u9898");
+    if (this.practiceActive && this.filteredQuestions.every(
+      (q) => this.answeredQuestions[q.id] !== void 0
+    )) {
+      new import_obsidian4.Notice(`\u7EC3\u4E60\u5B8C\u6210\uFF01\u5171 ${this.filteredQuestions.length} \u9898`);
+    } else {
+      new import_obsidian4.Notice("\u6CA1\u6709\u66F4\u591A\u672A\u7B54\u9898");
+    }
   }
   updateProgress() {
     const total = this.filteredQuestions.length;
@@ -2515,9 +2622,20 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     return this.plugin.settings;
   }
   buildCurrentState() {
+    let savedIndex = this.currentIndex;
+    if (this.practiceActive) {
+      if (this.practiceFocusId) {
+        const idx = this.applyFiltersTo(this.orderedQuestions).findIndex(
+          (q) => q.id === this.practiceFocusId
+        );
+        savedIndex = idx >= 0 ? idx : 0;
+      } else {
+        savedIndex = 0;
+      }
+    }
     return {
       csvPath: this.csvPath,
-      currentIndex: this.currentIndex,
+      currentIndex: savedIndex,
       correctCount: this.correctCount,
       wrongCount: this.wrongCount,
       displayOrder: this.displayOrder,

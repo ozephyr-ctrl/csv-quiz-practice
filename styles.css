@@ -46,6 +46,22 @@
   border-color: var(--interactive-accent);
 }
 
+/* 随机练习：启用中状态 */
+.csv-quiz-practice-btn-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+}
+
+.csv-quiz-practice-btn-active:hover {
+  background: var(--interactive-accent-hover);
+}
+
+.csv-quiz-practice-count {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
 .csv-quiz-btn-primary:hover {
   background: var(--interactive-accent-hover);
 }

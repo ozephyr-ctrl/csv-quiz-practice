@@ -138,6 +138,8 @@ export class QuizView extends ItemView {
       this.autoSaveTimer = null;
     }
     this.stateManager.cancelScheduledSave();
+    // 练习模式为临时会话：关闭前恢复常规位置，避免保存练习内的索引
+    this.exitRandomPractice();
     if (this.textFilterTimer !== null) {
       window.clearTimeout(this.textFilterTimer);
       this.textFilterTimer = null;
@@ -609,6 +611,19 @@ export class QuizView extends ItemView {
         void this.toggleBoolFilter(bf.key, "0");
       });
     }
+
+    // 随机练习：按当前筛选条件随机选未答题（最多 100 道，不足自适应）
+    const practiceRow = filterBody.createDiv("csv-quiz-filter-row");
+    this.practiceBtn = practiceRow.createEl("button", {
+      text: "🎲 随机练习（100 题）",
+      cls: "csv-quiz-btn csv-quiz-btn-sm csv-quiz-practice-btn",
+    });
+    this.practiceBtn.addEventListener("click", () => {
+      this.toggleRandomPractice();
+    });
+    this.practiceCountEl = practiceRow.createSpan({
+      cls: "csv-quiz-practice-count",
+    });
   }
 
   private cat1Select!: HTMLSelectElement;
@@ -617,6 +632,13 @@ export class QuizView extends ItemView {
   private tagsContainer!: HTMLElement;
   private filterTextInput!: HTMLInputElement;
   private textFilterTimer: number | null = null;
+  private practiceBtn!: HTMLButtonElement;
+  private practiceCountEl!: HTMLElement;
+  /** 随机练习模式：练习集为临时会话，不持久化，重开面板回到常规模式。 */
+  private practiceActive: boolean = false;
+  private practiceIds: string[] = [];
+  /** 进入练习前的常规模式定位题号，退出时据此恢复位置。 */
+  private practiceFocusId: string | null = null;
 
   private updateFilterUI(): void {
     if (!this.cat1Select) return;
@@ -634,6 +656,8 @@ export class QuizView extends ItemView {
     this.populateTagChips();
 
     this.syncBoolChips();
+
+    this.updatePracticeButton();
   }
 
   /** 自由文本筛选：输入防抖 200ms 后应用（与其它筛选一致的 applyFiltersAndReset 行为）。 */
@@ -673,6 +697,87 @@ export class QuizView extends ItemView {
     self[key] = self[key] === val ? "" : val;
     this.syncBoolChips();
     this.applyFiltersAndReset();
+  }
+
+  /** 随机练习：按当前筛选条件筛出未答题，随机取最多 100 道作为练习集（不足自适应）。 */
+  private enableRandomPractice(): void {
+    if (this.practiceActive) return;
+
+    const pool = this.applyFiltersTo(this.orderedQuestions);
+    const unanswered = pool.filter(
+      (q) => this.answeredQuestions[q.id] === undefined
+    );
+    if (unanswered.length === 0) {
+      new Notice("没有未答题，无法开始随机练习");
+      return;
+    }
+
+    const picked = shuffle(unanswered).slice(0, 100);
+    this.practiceFocusId = this.filteredQuestions[this.currentIndex]?.id ?? null;
+    this.practiceIds = picked.map((q) => q.id);
+    this.practiceActive = true;
+    // 练习集即当前显示列表（已随机序），常规 displayOrder/筛选/进度原样保留
+    this.filteredQuestions = picked;
+    this.currentIndex = 0;
+    this.currentShuffledQId = null;
+    this.cancelAutoNext();
+    this.renderQuestion();
+    this.saveState();
+    new Notice(`随机练习开始：${picked.length} 题`);
+  }
+
+  /** 退出练习模式：恢复常规筛选结果并定位到进入前的位置。不渲染、不保存，由调用方决定。 */
+  private exitRandomPractice(): void {
+    if (!this.practiceActive) return;
+    this.practiceActive = false;
+    this.practiceIds = [];
+
+    this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
+    if (this.practiceFocusId) {
+      const idx = this.filteredQuestions.findIndex(
+        (q) => q.id === this.practiceFocusId
+      );
+      if (idx >= 0) {
+        this.currentIndex = idx;
+      } else if (this.filteredQuestions.length > 0) {
+        this.currentIndex = 0;
+      } else {
+        this.currentIndex = -1;
+      }
+    } else {
+      this.currentIndex = this.filteredQuestions.length > 0 ? 0 : -1;
+    }
+    this.practiceFocusId = null;
+    this.currentShuffledQId = null;
+    this.cancelAutoNext();
+  }
+
+  private toggleRandomPractice(): void {
+    if (this.practiceActive) {
+      this.exitRandomPractice();
+      this.renderQuestion();
+      this.saveState();
+      new Notice("已退出随机练习");
+    } else {
+      this.enableRandomPractice();
+    }
+  }
+
+  /** 同步练习按钮的文案/高亮与完成计数。 */
+  private updatePracticeButton(): void {
+    if (!this.practiceBtn) return;
+    if (this.practiceActive) {
+      this.practiceBtn.setText("退出随机练习");
+      this.practiceBtn.addClass("csv-quiz-practice-btn-active");
+      const answered = this.practiceIds.filter(
+        (id) => this.answeredQuestions[id] !== undefined
+      ).length;
+      this.practiceCountEl.setText(` 已完成 ${answered}/${this.practiceIds.length}`);
+    } else {
+      this.practiceBtn.setText("🎲 随机练习（100 题）");
+      this.practiceBtn.removeClass("csv-quiz-practice-btn-active");
+      this.practiceCountEl.setText("");
+    }
   }
 
   private populateTagChips(): void {
@@ -774,6 +879,10 @@ export class QuizView extends ItemView {
   }
 
   private applyFiltersAndReset(): void {
+    // 练习模式下修改筛选条件 → 自动退出练习，再按新筛选正常应用
+    if (this.practiceActive) {
+      this.exitRandomPractice();
+    }
     this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
     this.currentIndex = this.filteredQuestions.length > 0 ? 0 : -1;
     this.currentShuffledQId = null;
@@ -955,6 +1064,9 @@ export class QuizView extends ItemView {
 
     // Navigation
     this.updateNavigation();
+
+    // 练习模式：同步按钮完成计数
+    this.updatePracticeButton();
   }
 
   private renderFeedback(
@@ -1398,6 +1510,15 @@ export class QuizView extends ItemView {
           this.currentIndex = newIdx + 1;
         } else {
           this.currentIndex = newIdx;
+          // 练习模式：练习集全部答完时提示完成
+          if (
+            this.practiceActive &&
+            this.filteredQuestions.every(
+              (q) => this.answeredQuestions[q.id] !== undefined
+            )
+          ) {
+            new Notice(`练习完成！共 ${this.filteredQuestions.length} 题`);
+          }
           return;
         }
       }
@@ -1544,7 +1665,16 @@ export class QuizView extends ItemView {
         return;
       }
     }
-    new Notice("没有更多未答题");
+    if (
+      this.practiceActive &&
+      this.filteredQuestions.every(
+        (q) => this.answeredQuestions[q.id] !== undefined
+      )
+    ) {
+      new Notice(`练习完成！共 ${this.filteredQuestions.length} 题`);
+    } else {
+      new Notice("没有更多未答题");
+    }
   }
 
   private updateProgress(): void {
@@ -1723,9 +1853,22 @@ export class QuizView extends ItemView {
   }
 
   private buildCurrentState(): QuizSessionState {
+    // 练习模式为临时会话：保存时把 currentIndex 换算回常规模式的位置，
+    // 重开面板后恢复到练习前的位置
+    let savedIndex = this.currentIndex;
+    if (this.practiceActive) {
+      if (this.practiceFocusId) {
+        const idx = this.applyFiltersTo(this.orderedQuestions).findIndex(
+          (q) => q.id === this.practiceFocusId
+        );
+        savedIndex = idx >= 0 ? idx : 0;
+      } else {
+        savedIndex = 0;
+      }
+    }
     return {
       csvPath: this.csvPath,
-      currentIndex: this.currentIndex,
+      currentIndex: savedIndex,
       correctCount: this.correctCount,
       wrongCount: this.wrongCount,
       displayOrder: this.displayOrder,
