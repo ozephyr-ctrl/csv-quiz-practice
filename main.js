@@ -8,6 +8,7 @@ var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
 var __commonJS = (cb, mod) => function __require() {
   try {
     return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
@@ -36,6 +37,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 
 // node_modules/papaparse/papaparse.min.js
 var require_papaparse_min = __commonJS({
@@ -476,7 +478,11 @@ var DEFAULT_SETTINGS = {
   defaultFilterFavorite: "",
   defaultFilterMastered: "",
   defaultFilterRepeat: "",
-  defaultFilterWrong: ""
+  defaultFilterWrong: "",
+  memoryEnabled: true,
+  memoryDailyNew: 20,
+  memoryReminder: true,
+  memoryMarkRating: true
 };
 
 // src/settings.ts
@@ -531,6 +537,35 @@ var ChoiceModal = class extends import_obsidian.Modal {
     this.resolveFn(value);
   }
 };
+function askResetChoice(app) {
+  const modal = new ChoiceModal(app, {
+    title: "\u91CD\u7F6E\u5237\u9898\u8FDB\u5EA6",
+    message: "\u9009\u62E9\u8981\u6E05\u7406\u7684\u5185\u5BB9\u3002\u5237\u9898\u8BB0\u5F55\uFF1A\u7B54\u9898\u8BB0\u5F55\u4E0E\u6B63\u786E/\u9519\u8BEF\u7EDF\u8BA1\uFF1B\u8BB0\u5FC6\u5361\u7247\uFF1AFSRS \u95F4\u9694\u91CD\u590D\u6570\u636E\uFF08\u5230\u671F\u5B89\u6392\u3001\u7A33\u5B9A\u6027\u3001\u96BE\u5EA6\u7B49\uFF09\u3002",
+    options: [
+      {
+        label: "\u4EC5\u6E05\u7406\u5237\u9898\u8BB0\u5F55",
+        value: "records",
+        description: "\u6E05\u9664\u7B54\u9898\u8BB0\u5F55\u4E0E\u7EDF\u8BA1\uFF0C\u4FDD\u7559\u8BB0\u5FC6\u5361\u7247"
+      },
+      {
+        label: "\u4EC5\u5220\u9664\u8BB0\u5FC6\u5361\u7247",
+        value: "cards",
+        description: "\u6E05\u9664 FSRS \u95F4\u9694\u91CD\u590D\u6570\u636E\uFF0C\u4FDD\u7559\u7B54\u9898\u8BB0\u5F55"
+      },
+      {
+        label: "\u5168\u90E8\u91CD\u7F6E",
+        value: "all",
+        description: "\u540C\u65F6\u6E05\u7406\u5237\u9898\u8BB0\u5F55\u4E0E\u8BB0\u5FC6\u5361\u7247",
+        cta: true
+      },
+      { label: "\u53D6\u6D88", value: "cancel" }
+    ]
+  });
+  modal.open();
+  return modal.promise.then(
+    (res) => res === null || res === "cancel" ? null : res
+  );
+}
 var TagPickerModal = class extends import_obsidian.Modal {
   constructor(app, allTags, currentTags) {
     super(app);
@@ -650,6 +685,38 @@ var CSVQuizSettingTab = class extends import_obsidian2.PluginSettingTab {
         control: { type: "toggle", key: "randomOptions" }
       },
       {
+        type: "group",
+        heading: "\u8BB0\u5FC6\u7EC3\u4E60",
+        items: [
+          {
+            name: "\u8BB0\u5FC6\u7EC3\u4E60",
+            desc: "\u542F\u7528\u57FA\u4E8E\u8BB0\u5FC6\u66F2\u7EBF\u7684\u7EC3\u4E60\uFF08FSRS \u95F4\u9694\u91CD\u590D\u8C03\u5EA6\uFF09",
+            control: { type: "toggle", key: "memoryEnabled" }
+          },
+          {
+            name: "\u6BCF\u65E5\u65B0\u9898\u6570",
+            desc: "\u8BB0\u5FC6\u7EC3\u4E60\u6BCF\u5929\u5F15\u5165\u7684\u65B0\u9898\u6570\u91CF\u4E0A\u9650",
+            control: {
+              type: "number",
+              key: "memoryDailyNew",
+              min: 1,
+              max: 100,
+              defaultValue: DEFAULT_SETTINGS.memoryDailyNew
+            }
+          },
+          {
+            name: "\u5230\u671F\u63D0\u9192",
+            desc: "\u5728\u72B6\u6001\u680F\u663E\u793A\u4ECA\u65E5\u5F85\u590D\u4E60\u9898\u6570\u63D0\u9192",
+            control: { type: "toggle", key: "memoryReminder" }
+          },
+          {
+            name: "\u6536\u85CF/\u638C\u63E1\u53C2\u4E0E\u8BC4\u5206",
+            desc: "\u8BB0\u5FC6\u7EC3\u4E60\u7B54\u5BF9\u65F6\u6309\u6807\u8BB0\u8BC4\u5206\uFF1A\u638C\u63E1=Easy\uFF08\u95F4\u9694\u62C9\u957F\u66F4\u5FEB\uFF09\u3001\u6536\u85CF=Hard\uFF08\u590D\u4E60\u66F4\u4FDD\u5B88\uFF09\uFF0C\u540C\u9898\u638C\u63E1\u4F18\u5148\uFF1B\u7B54\u9519\u4E00\u5F8B Again\u3002",
+            control: { type: "toggle", key: "memoryMarkRating" }
+          }
+        ]
+      },
+      {
         name: "\u7B54\u5BF9\u81EA\u52A8\u8DF3\u8F6C\u5EF6\u8FDF\uFF08\u79D2\uFF09",
         desc: "\u7B54\u5BF9\u540E\u81EA\u52A8\u8DF3\u8F6C\u5230\u4E0B\u4E00\u9898\u7684\u7B49\u5F85\u65F6\u95F4\uFF0C0 \u8868\u793A\u4E0D\u81EA\u52A8\u8DF3\u8F6C",
         control: {
@@ -718,8 +785,10 @@ var CSVQuizSettingTab = class extends import_obsidian2.PluginSettingTab {
         items: [
           {
             name: "\u91CD\u7F6E\u5237\u9898\u8FDB\u5EA6",
-            desc: "\u6E05\u9664\u6240\u6709\u7B54\u9898\u8BB0\u5F55\u3001\u7EDF\u8BA1\u548C\u7B5B\u9009\u72B6\u6001\uFF0C\u91CD\u65B0\u52A0\u8F7D\u9898\u5E93",
-            action: () => this.plugin.refreshQuiz()
+            desc: "\u6309\u9009\u62E9\u6E05\u7406\u7B54\u9898\u8BB0\u5F55\u548C/\u6216\u8BB0\u5FC6\u5361\u7247\uFF1B\u5168\u90E8\u91CD\u7F6E\u4F1A\u91CD\u65B0\u52A0\u8F7D\u9898\u5E93",
+            action: () => {
+              void this.handleResetProgress();
+            }
           }
         ]
       }
@@ -744,6 +813,14 @@ var CSVQuizSettingTab = class extends import_obsidian2.PluginSettingTab {
     }
     this.plugin.settings[key] = value;
     await this.plugin.saveSettings();
+  }
+  /**
+   * 「重置刷题进度」按钮：弹分项选择框后按选择清理。
+   */
+  async handleResetProgress() {
+    const res = await askResetChoice(this.app);
+    if (!res) return;
+    await this.plugin.resetQuizProgress(res);
   }
   /**
    * 「随机题目顺序」开关处理：开启后会重新随机排列已有会话的显示顺序，
@@ -798,6 +875,33 @@ var CSVQuizSettingTab = class extends import_obsidian2.PluginSettingTab {
       "\u5F00\u542F\u540E\u6BCF\u4E2A\u9898\u76EE\u7684\u9009\u9879\u987A\u5E8F\u968F\u673A\u6392\u5217",
       "randomOptions"
     );
+    new import_obsidian2.Setting(containerEl).setName("\u8BB0\u5FC6\u7EC3\u4E60").setHeading();
+    this.addToggleSetting(
+      containerEl,
+      "\u8BB0\u5FC6\u7EC3\u4E60",
+      "\u542F\u7528\u57FA\u4E8E\u8BB0\u5FC6\u66F2\u7EBF\u7684\u7EC3\u4E60\uFF08FSRS \u95F4\u9694\u91CD\u590D\u8C03\u5EA6\uFF09",
+      "memoryEnabled"
+    );
+    this.addNumberSetting(
+      containerEl,
+      "\u6BCF\u65E5\u65B0\u9898\u6570",
+      "\u8BB0\u5FC6\u7EC3\u4E60\u6BCF\u5929\u5F15\u5165\u7684\u65B0\u9898\u6570\u91CF\u4E0A\u9650",
+      "memoryDailyNew",
+      1,
+      100
+    );
+    this.addToggleSetting(
+      containerEl,
+      "\u5230\u671F\u63D0\u9192",
+      "\u5728\u72B6\u6001\u680F\u663E\u793A\u4ECA\u65E5\u5F85\u590D\u4E60\u9898\u6570\u63D0\u9192",
+      "memoryReminder"
+    );
+    this.addToggleSetting(
+      containerEl,
+      "\u6536\u85CF/\u638C\u63E1\u53C2\u4E0E\u8BC4\u5206",
+      "\u8BB0\u5FC6\u7EC3\u4E60\u7B54\u5BF9\u65F6\u6309\u6807\u8BB0\u8BC4\u5206\uFF1A\u638C\u63E1=Easy\uFF08\u95F4\u9694\u62C9\u957F\u66F4\u5FEB\uFF09\u3001\u6536\u85CF=Hard\uFF08\u590D\u4E60\u66F4\u4FDD\u5B88\uFF09\uFF0C\u540C\u9898\u638C\u63E1\u4F18\u5148\uFF1B\u7B54\u9519\u4E00\u5F8B Again\u3002",
+      "memoryMarkRating"
+    );
     this.addNumberSetting(
       containerEl,
       "\u7B54\u5BF9\u81EA\u52A8\u8DF3\u8F6C\u5EF6\u8FDF\uFF08\u79D2\uFF09",
@@ -840,9 +944,9 @@ var CSVQuizSettingTab = class extends import_obsidian2.PluginSettingTab {
       "defaultFilterWrong"
     );
     new import_obsidian2.Setting(containerEl).setName("\u7BA1\u7406").setHeading();
-    new import_obsidian2.Setting(containerEl).setName("\u91CD\u7F6E\u5237\u9898\u8FDB\u5EA6").setDesc("\u6E05\u9664\u6240\u6709\u7B54\u9898\u8BB0\u5F55\u3001\u7EDF\u8BA1\u548C\u7B5B\u9009\u72B6\u6001\uFF0C\u91CD\u65B0\u52A0\u8F7D\u9898\u5E93").addButton(
+    new import_obsidian2.Setting(containerEl).setName("\u91CD\u7F6E\u5237\u9898\u8FDB\u5EA6").setDesc("\u6309\u9009\u62E9\u6E05\u7406\u7B54\u9898\u8BB0\u5F55\u548C/\u6216\u8BB0\u5FC6\u5361\u7247\uFF1B\u5168\u90E8\u91CD\u7F6E\u4F1A\u91CD\u65B0\u52A0\u8F7D\u9898\u5E93").addButton(
       (btn) => btn.setButtonText("\u91CD\u7F6E").onClick(() => {
-        this.plugin.refreshQuiz();
+        void this.handleResetProgress();
       })
     );
   }
@@ -1172,10 +1276,1866 @@ function quizStateEquals(a, b) {
   for (const k of ak) {
     if (a.answeredQuestions[k] !== b.answeredQuestions[k]) return false;
   }
+  const am = a.memoryCards || {};
+  const bm = b.memoryCards || {};
+  const amk = Object.keys(am);
+  const bmk = Object.keys(bm);
+  if (amk.length !== bmk.length) return false;
+  for (const k of amk) {
+    const ac = am[k];
+    const bc = bm[k];
+    if (!ac || !bc) return false;
+    if (ac.state !== bc.state) return false;
+    if (ac.stability !== bc.stability) return false;
+    if (ac.difficulty !== bc.difficulty) return false;
+    if (ac.due !== bc.due) return false;
+    if (ac.reps !== bc.reps) return false;
+    if (ac.lapses !== bc.lapses) return false;
+    if (ac.learningSteps !== bc.learningSteps) return false;
+    if ((ac.lastReview || "") !== (bc.lastReview || "")) return false;
+  }
+  if ((a.memoryNewDate || "") !== (b.memoryNewDate || "")) return false;
+  if ((a.memoryNewCountToday || 0) !== (b.memoryNewCountToday || 0)) return false;
+  const ap = a.memoryPendingNew || [];
+  const bp = b.memoryPendingNew || [];
+  if (ap.length !== bp.length) return false;
+  for (let i = 0; i < ap.length; i++) {
+    if (ap[i] !== bp[i]) return false;
+  }
+  if (!!a.memoryInitialized !== !!b.memoryInitialized) return false;
   return true;
 }
+function countDueCards(cards, now = /* @__PURE__ */ new Date()) {
+  if (!cards) return 0;
+  let n = 0;
+  for (const c of Object.values(cards)) {
+    const t = new Date(c.due).getTime();
+    if (!Number.isNaN(t) && t <= now.getTime()) n++;
+  }
+  return n;
+}
+
+// node_modules/ts-fsrs/dist/index.mjs
+var FSRSError = class _FSRSError extends Error {
+  constructor(message = "FSRS Error") {
+    var _a;
+    super(message);
+    this.name = "FSRSError";
+    (_a = Error.captureStackTrace) == null ? void 0 : _a.call(Error, this, _FSRSError);
+  }
+};
+var FSRSValidationError = class _FSRSValidationError extends FSRSError {
+  constructor(message) {
+    var _a;
+    super(message);
+    this.name = "FSRSValidationError";
+    (_a = Error.captureStackTrace) == null ? void 0 : _a.call(Error, this, _FSRSValidationError);
+  }
+};
+var State = /* @__PURE__ */ ((State22) => {
+  State22[State22["New"] = 0] = "New";
+  State22[State22["Learning"] = 1] = "Learning";
+  State22[State22["Review"] = 2] = "Review";
+  State22[State22["Relearning"] = 3] = "Relearning";
+  return State22;
+})(State || {});
+var Rating = /* @__PURE__ */ ((Rating2) => {
+  Rating2[Rating2["Manual"] = 0] = "Manual";
+  Rating2[Rating2["Again"] = 1] = "Again";
+  Rating2[Rating2["Hard"] = 2] = "Hard";
+  Rating2[Rating2["Good"] = 3] = "Good";
+  Rating2[Rating2["Easy"] = 4] = "Easy";
+  return Rating2;
+})(Rating || {});
+var TypeConvert = class _TypeConvert {
+  static card(card) {
+    return {
+      ...card,
+      state: _TypeConvert.state(card.state),
+      due: _TypeConvert.time(card.due),
+      last_review: card.last_review ? _TypeConvert.time(card.last_review) : void 0
+    };
+  }
+  static rating(value) {
+    if (typeof value === "string") {
+      const firstLetter = value.charAt(0).toUpperCase();
+      const restOfString = value.slice(1).toLowerCase();
+      const ret = Rating[`${firstLetter}${restOfString}`];
+      if (ret === void 0) {
+        throw new FSRSValidationError(`Invalid rating:[${value}]`);
+      }
+      return ret;
+    } else if (typeof value === "number") {
+      return value;
+    }
+    throw new FSRSValidationError(`Invalid rating:[${value}]`);
+  }
+  static state(value) {
+    if (typeof value === "string") {
+      const firstLetter = value.charAt(0).toUpperCase();
+      const restOfString = value.slice(1).toLowerCase();
+      const ret = State[`${firstLetter}${restOfString}`];
+      if (ret === void 0) {
+        throw new FSRSValidationError(`Invalid state:[${value}]`);
+      }
+      return ret;
+    } else if (typeof value === "number") {
+      return value;
+    }
+    throw new FSRSValidationError(`Invalid state:[${value}]`);
+  }
+  static time(value) {
+    if (value instanceof Date) {
+      return value;
+    }
+    const date = new Date(value);
+    if (typeof value === "object" && value !== null && !Number.isNaN(Date.parse(value) || +date)) {
+      return date;
+    } else if (typeof value === "string") {
+      const timestamp = Date.parse(value);
+      if (!Number.isNaN(timestamp)) {
+        return new Date(timestamp);
+      } else {
+        throw new FSRSValidationError(`Invalid date:[${value}]`);
+      }
+    } else if (typeof value === "number") {
+      return new Date(value);
+    }
+    throw new FSRSValidationError(`Invalid date:[${value}]`);
+  }
+  static review_log(log) {
+    return {
+      ...log,
+      due: _TypeConvert.time(log.due),
+      rating: _TypeConvert.rating(log.rating),
+      state: _TypeConvert.state(log.state),
+      review: _TypeConvert.time(log.review)
+    };
+  }
+};
+Date.prototype.scheduler = function(t, isDay) {
+  return date_scheduler(this, t, isDay);
+};
+Date.prototype.diff = function(pre, unit) {
+  return date_diff(this, pre, unit);
+};
+Date.prototype.format = function() {
+  return formatDate(this);
+};
+Date.prototype.dueFormat = function(last_review, unit, timeUnit) {
+  return show_diff_message(this, last_review, unit, timeUnit);
+};
+function date_scheduler(now, t, isDay) {
+  return new Date(
+    isDay ? TypeConvert.time(now).getTime() + t * 24 * 60 * 60 * 1e3 : TypeConvert.time(now).getTime() + t * 60 * 1e3
+  );
+}
+function date_diff(now, pre, unit) {
+  if (!now || !pre) {
+    throw new FSRSValidationError("Invalid date");
+  }
+  const diff = TypeConvert.time(now).getTime() - TypeConvert.time(pre).getTime();
+  let r = 0;
+  switch (unit) {
+    case "days":
+      r = Math.floor(diff / (24 * 60 * 60 * 1e3));
+      break;
+    case "minutes":
+      r = Math.floor(diff / (60 * 1e3));
+      break;
+  }
+  return r;
+}
+function formatDate(dateInput) {
+  const date = TypeConvert.time(dateInput);
+  const year = date.getFullYear();
+  const month = date.getMonth() + 1;
+  const day = date.getDate();
+  const hours = date.getHours();
+  const minutes = date.getMinutes();
+  const seconds = date.getSeconds();
+  return `${year}-${padZero(month)}-${padZero(day)} ${padZero(hours)}:${padZero(
+    minutes
+  )}:${padZero(seconds)}`;
+}
+function padZero(num) {
+  return num < 10 ? `0${num}` : `${num}`;
+}
+var TIMEUNIT = [60, 60, 24, 31, 12];
+var TIMEUNITFORMAT = ["second", "min", "hour", "day", "month", "year"];
+function show_diff_message(due, last_review, unit, timeUnit = TIMEUNITFORMAT) {
+  due = TypeConvert.time(due);
+  last_review = TypeConvert.time(last_review);
+  if (timeUnit.length !== TIMEUNITFORMAT.length) {
+    timeUnit = TIMEUNITFORMAT;
+  }
+  let diff = due.getTime() - last_review.getTime();
+  let i = 0;
+  diff /= 1e3;
+  for (i = 0; i < TIMEUNIT.length; i++) {
+    if (diff < TIMEUNIT[i]) {
+      break;
+    } else {
+      diff /= TIMEUNIT[i];
+    }
+  }
+  return `${Math.floor(diff)}${unit ? timeUnit[i] : ""}`;
+}
+var Grades = Object.freeze([
+  Rating.Again,
+  Rating.Hard,
+  Rating.Good,
+  Rating.Easy
+]);
+var FUZZ_RANGES = [
+  {
+    start: 2.5,
+    end: 7,
+    factor: 0.15
+  },
+  {
+    start: 7,
+    end: 20,
+    factor: 0.1
+  },
+  {
+    start: 20,
+    end: Infinity,
+    factor: 0.05
+  }
+];
+function get_fuzz_range(interval, elapsed_days, maximum_interval) {
+  let delta = 1;
+  for (const range of FUZZ_RANGES) {
+    delta += range.factor * Math.max(Math.min(interval, range.end) - range.start, 0);
+  }
+  interval = Math.min(interval, maximum_interval);
+  let min_ivl = Math.max(2, Math.round(interval - delta));
+  const max_ivl = Math.min(Math.round(interval + delta), maximum_interval);
+  if (interval > elapsed_days) {
+    min_ivl = Math.max(min_ivl, elapsed_days + 1);
+  }
+  min_ivl = Math.min(min_ivl, max_ivl);
+  return { min_ivl, max_ivl };
+}
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+function roundTo(num, decimals) {
+  const factor = 10 ** decimals;
+  return Math.round(num * factor) / factor;
+}
+function dateDiffInDays(last, cur) {
+  const utc1 = Date.UTC(
+    last.getUTCFullYear(),
+    last.getUTCMonth(),
+    last.getUTCDate()
+  );
+  const utc2 = Date.UTC(
+    cur.getUTCFullYear(),
+    cur.getUTCMonth(),
+    cur.getUTCDate()
+  );
+  return Math.floor(
+    (utc2 - utc1) / 864e5
+    /** 1000 * 60 * 60 * 24*/
+  );
+}
+var ConvertStepUnitToMinutes = (step) => {
+  const unit = step.slice(-1);
+  const value = parseInt(step.slice(0, -1), 10);
+  if (Number.isNaN(value) || !Number.isFinite(value) || value < 0) {
+    throw new FSRSValidationError(`Invalid step value: ${step}`);
+  }
+  switch (unit) {
+    case "m":
+      return value;
+    case "h":
+      return value * 60;
+    case "d":
+      return value * 1440;
+    default:
+      throw new FSRSValidationError(
+        `Invalid step unit: ${step}, expected m/h/d`
+      );
+  }
+};
+var BasicLearningStepsStrategy = (params, state, cur_step) => {
+  const learning_steps = state === State.Relearning || state === State.Review ? params.relearning_steps : params.learning_steps;
+  const steps_length = learning_steps.length;
+  if (steps_length === 0 || cur_step >= steps_length) return {};
+  const firstStep = learning_steps[0];
+  const toMinutes = ConvertStepUnitToMinutes;
+  const getAgainInterval = () => {
+    return toMinutes(firstStep);
+  };
+  const getHardInterval = () => {
+    if (steps_length === 1) return Math.round(toMinutes(firstStep) * 1.5);
+    const nextStep = learning_steps[1];
+    return Math.round((toMinutes(firstStep) + toMinutes(nextStep)) / 2);
+  };
+  const getStepInfo = (index) => {
+    if (index < 0 || index >= steps_length) {
+      return null;
+    } else {
+      return learning_steps[index];
+    }
+  };
+  const getGoodMinutes = (step) => {
+    return toMinutes(step);
+  };
+  const result = {};
+  const step_info = getStepInfo(Math.max(0, cur_step));
+  if (state === State.Review) {
+    result[Rating.Again] = {
+      scheduled_minutes: toMinutes(step_info),
+      next_step: 0
+    };
+    return result;
+  } else {
+    result[Rating.Again] = {
+      scheduled_minutes: getAgainInterval(),
+      next_step: 0
+    };
+    result[Rating.Hard] = {
+      scheduled_minutes: getHardInterval(),
+      next_step: cur_step
+    };
+    const next_info = getStepInfo(cur_step + 1);
+    if (next_info) {
+      const nextMin = getGoodMinutes(next_info);
+      if (nextMin) {
+        result[Rating.Good] = {
+          scheduled_minutes: Math.round(nextMin),
+          next_step: cur_step + 1
+        };
+      }
+    }
+  }
+  return result;
+};
+function DefaultInitSeedStrategy() {
+  const time = this.review_time.getTime();
+  const reps = this.current.reps;
+  const mul = this.current.difficulty * this.current.stability;
+  return `${time}_${reps}_${mul}`;
+}
+var StrategyMode = /* @__PURE__ */ ((StrategyMode2) => {
+  StrategyMode2["SCHEDULER"] = "Scheduler";
+  StrategyMode2["LEARNING_STEPS"] = "LearningSteps";
+  StrategyMode2["SEED"] = "Seed";
+  return StrategyMode2;
+})(StrategyMode || {});
+var AbstractScheduler = class {
+  // init
+  constructor(card, now, algorithm, strategies) {
+    __publicField(this, "last");
+    __publicField(this, "current");
+    __publicField(this, "review_time");
+    __publicField(this, "next", /* @__PURE__ */ new Map());
+    __publicField(this, "algorithm");
+    __publicField(this, "strategies");
+    __publicField(this, "elapsed_days", 0);
+    this.algorithm = algorithm;
+    this.last = TypeConvert.card(card);
+    this.current = TypeConvert.card(card);
+    this.review_time = TypeConvert.time(now);
+    this.strategies = strategies;
+    this.init();
+  }
+  checkGrade(grade) {
+    if (!Number.isFinite(grade) || grade < 1 || grade > 4) {
+      throw new FSRSValidationError(`Invalid grade "${grade}",expected 1-4`);
+    }
+  }
+  init() {
+    const { state, last_review } = this.current;
+    let interval = 0;
+    if (state !== State.New && last_review) {
+      interval = dateDiffInDays(last_review, this.review_time);
+    }
+    this.current.last_review = this.review_time;
+    this.elapsed_days = interval;
+    this.current.elapsed_days = interval;
+    this.current.reps += 1;
+    let seed_strategy = DefaultInitSeedStrategy;
+    if (this.strategies) {
+      const custom_strategy = this.strategies.get(StrategyMode.SEED);
+      if (custom_strategy) {
+        seed_strategy = custom_strategy;
+      }
+    }
+    this.algorithm.seed = seed_strategy.call(this);
+  }
+  preview() {
+    return {
+      [Rating.Again]: this.review(Rating.Again),
+      [Rating.Hard]: this.review(Rating.Hard),
+      [Rating.Good]: this.review(Rating.Good),
+      [Rating.Easy]: this.review(Rating.Easy),
+      [Symbol.iterator]: this.previewIterator.bind(this)
+    };
+  }
+  *previewIterator() {
+    for (const grade of Grades) {
+      yield this.review(grade);
+    }
+  }
+  review(grade) {
+    const { state } = this.last;
+    let item;
+    this.checkGrade(grade);
+    switch (state) {
+      case State.New:
+        item = this.newState(grade);
+        break;
+      case State.Learning:
+      case State.Relearning:
+        item = this.learningState(grade);
+        break;
+      case State.Review:
+        item = this.reviewState(grade);
+        break;
+    }
+    return item;
+  }
+  buildLog(rating) {
+    const { last_review, due, elapsed_days } = this.last;
+    return {
+      rating,
+      state: this.current.state,
+      due: last_review || due,
+      stability: this.current.stability,
+      difficulty: this.current.difficulty,
+      elapsed_days: this.elapsed_days,
+      last_elapsed_days: elapsed_days,
+      scheduled_days: this.current.scheduled_days,
+      learning_steps: this.current.learning_steps,
+      review: this.review_time
+    };
+  }
+};
+var Alea = class {
+  constructor(seed) {
+    __publicField(this, "c");
+    __publicField(this, "s0");
+    __publicField(this, "s1");
+    __publicField(this, "s2");
+    const mash = Mash();
+    this.c = 1;
+    this.s0 = mash(" ");
+    this.s1 = mash(" ");
+    this.s2 = mash(" ");
+    if (seed == null) seed = Date.now();
+    this.s0 -= mash(seed);
+    if (this.s0 < 0) this.s0 += 1;
+    this.s1 -= mash(seed);
+    if (this.s1 < 0) this.s1 += 1;
+    this.s2 -= mash(seed);
+    if (this.s2 < 0) this.s2 += 1;
+  }
+  next() {
+    const t = 2091639 * this.s0 + this.c * 23283064365386963e-26;
+    this.s0 = this.s1;
+    this.s1 = this.s2;
+    this.c = t | 0;
+    this.s2 = t - this.c;
+    return this.s2;
+  }
+  set state(state) {
+    this.c = state.c;
+    this.s0 = state.s0;
+    this.s1 = state.s1;
+    this.s2 = state.s2;
+  }
+  get state() {
+    return {
+      c: this.c,
+      s0: this.s0,
+      s1: this.s1,
+      s2: this.s2
+    };
+  }
+};
+function Mash() {
+  let n = 4022871197;
+  return function mash(data) {
+    data = String(data);
+    for (let i = 0; i < data.length; i++) {
+      n += data.charCodeAt(i);
+      let h = 0.02519603282416938 * n;
+      n = h >>> 0;
+      h -= n;
+      h *= n;
+      n = h >>> 0;
+      h -= n;
+      n += h * 4294967296;
+    }
+    return (n >>> 0) * 23283064365386963e-26;
+  };
+}
+function alea(seed) {
+  const xg = new Alea(seed);
+  const prng = () => xg.next();
+  prng.int32 = () => xg.next() * 4294967296 | 0;
+  prng.double = () => prng() + (prng() * 2097152 | 0) * 11102230246251565e-32;
+  prng.state = () => xg.state;
+  prng.importState = (state) => {
+    xg.state = state;
+    return prng;
+  };
+  return prng;
+}
+var version = "5.4.1";
+var default_request_retention = 0.9;
+var default_maximum_interval = 36500;
+var default_enable_fuzz = false;
+var default_enable_short_term = true;
+var default_learning_steps = Object.freeze([
+  "1m",
+  "10m"
+]);
+var default_relearning_steps = Object.freeze([
+  "10m"
+]);
+var FSRSVersion = `v${version} using FSRS-6.0`;
+var S_MIN = 1e-3;
+var INIT_S_MAX = 100;
+var FSRS5_DEFAULT_DECAY = 0.5;
+var FSRS6_DEFAULT_DECAY = 0.1542;
+var default_w = Object.freeze([
+  0.212,
+  1.2931,
+  2.3065,
+  8.2956,
+  6.4133,
+  0.8334,
+  3.0194,
+  1e-3,
+  1.8722,
+  0.1666,
+  0.796,
+  1.4835,
+  0.0614,
+  0.2629,
+  1.6483,
+  0.6014,
+  1.8729,
+  0.5425,
+  0.0912,
+  0.0658,
+  FSRS6_DEFAULT_DECAY
+]);
+var W17_W18_Ceiling = 2;
+var CLAMP_PARAMETERS = (w17_w18_ceiling, enable_short_term = default_enable_short_term) => [
+  [S_MIN, INIT_S_MAX],
+  [S_MIN, INIT_S_MAX],
+  [S_MIN, INIT_S_MAX],
+  [S_MIN, INIT_S_MAX],
+  [1, 10],
+  [1e-3, 4],
+  [1e-3, 4],
+  [1e-3, 0.75],
+  [0, 4.5],
+  [0, 0.8],
+  [1e-3, 3.5],
+  [1e-3, 5],
+  [1e-3, 0.25],
+  [1e-3, 0.9],
+  [0, 4],
+  [0, 1],
+  [1, 6],
+  [0, w17_w18_ceiling],
+  [0, w17_w18_ceiling],
+  [
+    enable_short_term ? 0.01 : 0,
+    0.8
+  ],
+  [0.1, 0.8]
+];
+var clipParameters = (parameters, numRelearningSteps, enableShortTerm = default_enable_short_term) => {
+  const clip = CLAMP_PARAMETERS(W17_W18_Ceiling, enableShortTerm).slice(
+    0,
+    parameters.length
+  );
+  if (Math.max(0, numRelearningSteps) > 1) {
+    const w11 = clamp(parameters[11] || 0, clip[11][0], clip[11][1]);
+    const w13 = clamp(parameters[13] || 0, clip[13][0], clip[13][1]);
+    const w14 = clamp(parameters[14] || 0, clip[14][0], clip[14][1]);
+    const value = -(Math.log(w11) + Math.log(Math.pow(2, w13) - 1) + w14 * 0.3) / numRelearningSteps;
+    const w17_w18_ceiling = clamp(
+      roundTo(Math.sqrt(Math.max(value, 0)), 8),
+      0.01,
+      W17_W18_Ceiling
+    );
+    if (clip[17]) clip[17] = [clip[17][0], w17_w18_ceiling];
+    if (clip[18]) clip[18] = [clip[18][0], w17_w18_ceiling];
+  }
+  return clip.map(
+    ([min, max], index) => clamp(parameters[index] || 0, min, max)
+  );
+};
+var migrateParameters = (parameters, numRelearningSteps = 0, enableShortTerm = default_enable_short_term) => {
+  if (parameters === void 0) {
+    return [...default_w];
+  }
+  switch (parameters.length) {
+    case 21:
+      return clipParameters(
+        Array.from(parameters),
+        numRelearningSteps,
+        enableShortTerm
+      );
+    case 19:
+      console.debug("[FSRS-6]auto fill w from 19 to 21 length");
+      return clipParameters(
+        Array.from(parameters),
+        numRelearningSteps,
+        enableShortTerm
+      ).concat([0, FSRS5_DEFAULT_DECAY]);
+    case 17: {
+      const w = clipParameters(
+        Array.from(parameters),
+        numRelearningSteps,
+        enableShortTerm
+      );
+      w[4] = +(w[5] * 2 + w[4]).toFixed(8);
+      w[5] = +(Math.log(w[5] * 3 + 1) / 3).toFixed(8);
+      w[6] = +(w[6] + 0.5).toFixed(8);
+      console.debug("[FSRS-6]auto fill w from 17 to 21 length");
+      return w.concat([0, 0, 0, FSRS5_DEFAULT_DECAY]);
+    }
+    default:
+      console.warn("[FSRS]Invalid parameters length, using default parameters");
+      return [...default_w];
+  }
+};
+var generatorParameters = (props) => {
+  var _a, _b;
+  const learning_steps = Array.isArray(props == null ? void 0 : props.learning_steps) ? props.learning_steps : default_learning_steps;
+  const relearning_steps = Array.isArray(props == null ? void 0 : props.relearning_steps) ? props.relearning_steps : default_relearning_steps;
+  const enable_short_term = (_a = props == null ? void 0 : props.enable_short_term) != null ? _a : default_enable_short_term;
+  const w = migrateParameters(
+    props == null ? void 0 : props.w,
+    relearning_steps.length,
+    enable_short_term
+  );
+  return {
+    request_retention: (props == null ? void 0 : props.request_retention) || default_request_retention,
+    maximum_interval: (props == null ? void 0 : props.maximum_interval) || default_maximum_interval,
+    w,
+    enable_fuzz: (_b = props == null ? void 0 : props.enable_fuzz) != null ? _b : default_enable_fuzz,
+    enable_short_term,
+    learning_steps,
+    relearning_steps
+  };
+};
+function createEmptyCard(now, afterHandler) {
+  const emptyCard = {
+    due: now ? TypeConvert.time(now) : /* @__PURE__ */ new Date(),
+    stability: 0,
+    difficulty: 0,
+    elapsed_days: 0,
+    scheduled_days: 0,
+    reps: 0,
+    lapses: 0,
+    learning_steps: 0,
+    state: State.New,
+    last_review: void 0
+  };
+  if (afterHandler && typeof afterHandler === "function") {
+    return afterHandler(emptyCard);
+  } else {
+    return emptyCard;
+  }
+}
+var computeDecayFactor = (decayOrParams) => {
+  const decay = typeof decayOrParams === "number" ? -decayOrParams : -decayOrParams[20];
+  const factor = Math.exp(Math.pow(decay, -1) * Math.log(0.9)) - 1;
+  return { decay, factor: roundTo(factor, 8) };
+};
+function forgetting_curve(decayOrParams, elapsed_days, stability) {
+  const { decay, factor } = computeDecayFactor(decayOrParams);
+  return roundTo(Math.pow(1 + factor * elapsed_days / stability, decay), 8);
+}
+var FSRSAlgorithm = class {
+  constructor(params) {
+    __publicField(this, "param");
+    __publicField(this, "intervalModifier");
+    __publicField(this, "_seed");
+    /**
+     * The formula used is :
+     * $$R(t,S) = (1 + \text{FACTOR} \times \frac{t}{9 \cdot S})^{\text{DECAY}}$$
+     * @param {number} elapsed_days t days since the last review
+     * @param {number} stability Stability (interval when R=90%)
+     * @return {number} r Retrievability (probability of recall)
+     */
+    __publicField(this, "forgetting_curve");
+    this.param = new Proxy(
+      generatorParameters(params),
+      this.params_handler_proxy()
+    );
+    this.intervalModifier = this.calculate_interval_modifier(
+      this.param.request_retention
+    );
+    this.forgetting_curve = forgetting_curve.bind(this, this.param.w);
+  }
+  get interval_modifier() {
+    return this.intervalModifier;
+  }
+  set seed(seed) {
+    this._seed = seed;
+  }
+  /**
+   * @see https://github.com/open-spaced-repetition/fsrs4anki/wiki/The-Algorithm#fsrs-5
+   *
+   * The formula used is: $$I(r,s) = (r^{\frac{1}{DECAY}} - 1) / FACTOR \times s$$
+   * @param request_retention 0<request_retention<=1,Requested retention rate
+   * @throws {Error} Requested retention rate should be in the range (0,1]
+   */
+  calculate_interval_modifier(request_retention) {
+    if (request_retention <= 0 || request_retention > 1) {
+      throw new FSRSValidationError(
+        "Requested retention rate should be in the range (0,1]"
+      );
+    }
+    const { decay, factor } = computeDecayFactor(this.param.w);
+    return roundTo((Math.pow(request_retention, 1 / decay) - 1) / factor, 8);
+  }
+  /**
+   * Get the parameters of the algorithm.
+   */
+  get parameters() {
+    return this.param;
+  }
+  /**
+   * Set the parameters of the algorithm.
+   * @param params Partial<FSRSParameters>
+   */
+  set parameters(params) {
+    this.update_parameters(params);
+  }
+  params_handler_proxy() {
+    const _this = this;
+    return {
+      set: function(target, prop, value) {
+        if (prop === "request_retention" && Number.isFinite(value)) {
+          _this.intervalModifier = _this.calculate_interval_modifier(
+            Number(value)
+          );
+        } else if (prop === "w") {
+          value = migrateParameters(
+            value,
+            target.relearning_steps.length,
+            target.enable_short_term
+          );
+          _this.forgetting_curve = forgetting_curve.bind(this, value);
+          _this.intervalModifier = _this.calculate_interval_modifier(
+            Number(target.request_retention)
+          );
+        }
+        Reflect.set(target, prop, value);
+        return true;
+      }
+    };
+  }
+  update_parameters(params) {
+    const _params = generatorParameters(params);
+    for (const key in _params) {
+      const paramKey = key;
+      this.param[paramKey] = _params[paramKey];
+    }
+  }
+  /**
+     * The formula used is :
+     * $$ S_0(G) = w_{G-1}$$
+     * $$S_0 = \max \lbrace S_0,0.1\rbrace $$
+  
+     * @param g Grade (rating at Anki) [1.again,2.hard,3.good,4.easy]
+     * @return Stability (interval when R=90%)
+     */
+  init_stability(g) {
+    return Math.max(this.param.w[g - 1], 0.1);
+  }
+  /**
+   * The formula used is :
+   * $$D_0(G) = w_4 - e^{(G-1) \cdot w_5} + 1 $$
+   * $$D_0 = \min \lbrace \max \lbrace D_0(G),1 \rbrace,10 \rbrace$$
+   * where the $$D_0(1)=w_4$$ when the first rating is good.
+   *
+   * @param {Grade} g Grade (rating at Anki) [1.again,2.hard,3.good,4.easy]
+   * @return {number} Difficulty $$D \in [1,10]$$
+   */
+  init_difficulty(g) {
+    const w = this.param.w;
+    const d = w[4] - Math.exp((g - 1) * w[5]) + 1;
+    return roundTo(d, 8);
+  }
+  /**
+   * If fuzzing is disabled or ivl is less than 2.5, it returns the original interval.
+   * @param {number} ivl - The interval to be fuzzed.
+   * @param {number} elapsed_days t days since the last review
+   * @return {number} - The fuzzed interval.
+   **/
+  apply_fuzz(ivl, elapsed_days) {
+    if (!this.param.enable_fuzz || ivl < 2.5) return Math.round(ivl);
+    const generator = alea(this._seed);
+    const fuzz_factor = generator();
+    const { min_ivl, max_ivl } = get_fuzz_range(
+      ivl,
+      elapsed_days,
+      this.param.maximum_interval
+    );
+    return Math.floor(fuzz_factor * (max_ivl - min_ivl + 1) + min_ivl);
+  }
+  /**
+   *   @see The formula used is : {@link FSRSAlgorithm.calculate_interval_modifier}
+   *   @param {number} s - Stability (interval when R=90%)
+   *   @param {number} elapsed_days t days since the last review
+   */
+  next_interval(s, elapsed_days) {
+    const newInterval = Math.min(
+      Math.max(1, Math.round(s * this.intervalModifier)),
+      this.param.maximum_interval
+    );
+    return this.apply_fuzz(newInterval, elapsed_days);
+  }
+  /**
+   * @see https://github.com/open-spaced-repetition/fsrs4anki/issues/697
+   */
+  linear_damping(delta_d, old_d) {
+    return roundTo(delta_d * (10 - old_d) / 9, 8);
+  }
+  /**
+   * The formula used is :
+   * $$\text{delta}_d = -w_6 \cdot (g - 3)$$
+   * $$\text{next}_d = D + \text{linear damping}(\text{delta}_d , D)$$
+   * $$D^\prime(D,R) = w_7 \cdot D_0(4) +(1 - w_7) \cdot \text{next}_d$$
+   * @param {number} d Difficulty $$D \in [1,10]$$
+   * @param {Grade} g Grade (rating at Anki) [1.again,2.hard,3.good,4.easy]
+   * @return {number} $$\text{next}_D$$
+   */
+  next_difficulty(d, g) {
+    const delta_d = -this.param.w[6] * (g - 3);
+    const next_d = d + this.linear_damping(delta_d, d);
+    return clamp(
+      this.mean_reversion(this.init_difficulty(Rating.Easy), next_d),
+      1,
+      10
+    );
+  }
+  /**
+   * The formula used is :
+   * $$w_7 \cdot \text{init} +(1 - w_7) \cdot \text{current}$$
+   * @param {number} init $$w_2 : D_0(3) = w_2 + (R-2) \cdot w_3= w_2$$
+   * @param {number} current $$D - w_6 \cdot (R - 2)$$
+   * @return {number} difficulty
+   */
+  mean_reversion(init, current) {
+    const w = this.param.w;
+    return roundTo(w[7] * init + (1 - w[7]) * current, 8);
+  }
+  /**
+   * The formula used is :
+   * $$S^\prime_r(D,S,R,G) = S\cdot(e^{w_8}\cdot (11-D)\cdot S^{-w_9}\cdot(e^{w_{10}\cdot(1-R)}-1)\cdot w_{15}(\text{if} G=2) \cdot w_{16}(\text{if} G=4)+1)$$
+   * @param {number} d Difficulty D \in [1,10]
+   * @param {number} s Stability (interval when R=90%)
+   * @param {number} r Retrievability (probability of recall)
+   * @param {Grade} g Grade (Rating[0.again,1.hard,2.good,3.easy])
+   * @return {number} S^\prime_r new stability after recall
+   */
+  next_recall_stability(d, s, r, g) {
+    const w = this.param.w;
+    const hard_penalty = Rating.Hard === g ? w[15] : 1;
+    const easy_bound = Rating.Easy === g ? w[16] : 1;
+    return roundTo(
+      clamp(
+        s * (1 + Math.exp(w[8]) * (11 - d) * Math.pow(s, -w[9]) * (Math.exp((1 - r) * w[10]) - 1) * hard_penalty * easy_bound),
+        S_MIN,
+        36500
+      ),
+      8
+    );
+  }
+  /**
+   * The formula used is :
+   * $$S^\prime_f(D,S,R) = w_{11}\cdot D^{-w_{12}}\cdot ((S+1)^{w_{13}}-1) \cdot e^{w_{14}\cdot(1-R)}$$
+   * enable_short_term = true : $$S^\prime_f \in \min \lbrace \max \lbrace S^\prime_f,0.01\rbrace, \frac{S}{e^{w_{17} \cdot w_{18}}} \rbrace$$
+   * enable_short_term = false : $$S^\prime_f \in \min \lbrace \max \lbrace S^\prime_f,0.01\rbrace, S \rbrace$$
+   * @param {number} d Difficulty D \in [1,10]
+   * @param {number} s Stability (interval when R=90%)
+   * @param {number} r Retrievability (probability of recall)
+   * @return {number} S^\prime_f new stability after forgetting
+   */
+  next_forget_stability(d, s, r) {
+    const w = this.param.w;
+    return roundTo(
+      clamp(
+        w[11] * Math.pow(d, -w[12]) * (Math.pow(s + 1, w[13]) - 1) * Math.exp((1 - r) * w[14]),
+        S_MIN,
+        36500
+      ),
+      8
+    );
+  }
+  /**
+   * The formula used is :
+   * $$S^\prime_s(S,G) = S \cdot e^{w_{17} \cdot (G-3+w_{18})}$$
+   * @param {number} s Stability (interval when R=90%)
+   * @param {Grade} g Grade (Rating[0.again,1.hard,2.good,3.easy])
+   */
+  next_short_term_stability(s, g) {
+    const w = this.param.w;
+    const sinc = Math.pow(s, -w[19]) * Math.exp(w[17] * (g - 3 + w[18]));
+    const maskedSinc = g >= Rating.Hard ? Math.max(sinc, 1) : sinc;
+    return roundTo(clamp(s * maskedSinc, S_MIN, 36500), 8);
+  }
+  /**
+   * Calculates the next state of memory based on the current state, time elapsed, and grade.
+   *
+   * @param memory_state - The current state of memory, which can be null.
+   * @param t - The time elapsed since the last review.
+   * @param {Rating} g Grade (Rating[0.Manual,1.Again,2.Hard,3.Good,4.Easy])
+   * @param r - Optional retrievability value. If not provided, it will be calculated.
+   * @returns The next state of memory with updated difficulty and stability.
+   */
+  next_state(memory_state, t, g, r) {
+    const { difficulty: d, stability: s } = memory_state != null ? memory_state : {
+      difficulty: 0,
+      stability: 0
+    };
+    if (t < 0) {
+      throw new FSRSValidationError(`Invalid delta_t "${t}"`);
+    }
+    if (g < 0 || g > 4) {
+      throw new FSRSValidationError(`Invalid grade "${g}"`);
+    }
+    if (d === 0 && s === 0) {
+      return {
+        difficulty: clamp(this.init_difficulty(g), 1, 10),
+        stability: this.init_stability(g)
+      };
+    }
+    if (g === 0) {
+      return {
+        difficulty: d,
+        stability: s
+      };
+    }
+    if (d < 1 || s < S_MIN) {
+      throw new FSRSValidationError(
+        `Invalid memory state { difficulty: ${d}, stability: ${s} }`
+      );
+    }
+    const w = this.param.w;
+    r = typeof r === "number" ? r : this.forgetting_curve(t, s);
+    let new_s;
+    if (t === 0 && this.param.enable_short_term) {
+      new_s = this.next_short_term_stability(s, g);
+    } else if (g === 1) {
+      const s_after_fail = this.next_forget_stability(d, s, r);
+      let [w_17, w_18] = [0, 0];
+      if (this.param.enable_short_term) {
+        w_17 = w[17];
+        w_18 = w[18];
+      }
+      const next_s_min = s / Math.exp(w_17 * w_18);
+      new_s = clamp(roundTo(next_s_min, 8), S_MIN, s_after_fail);
+    } else {
+      new_s = this.next_recall_stability(d, s, r, g);
+    }
+    const new_d = this.next_difficulty(d, g);
+    return { difficulty: new_d, stability: new_s };
+  }
+};
+var BasicScheduler = class extends AbstractScheduler {
+  constructor(card, now, algorithm, strategies) {
+    super(card, now, algorithm, strategies);
+    __publicField(this, "learningStepsStrategy");
+    let learningStepStrategy = BasicLearningStepsStrategy;
+    if (this.strategies) {
+      const custom_strategy = this.strategies.get(StrategyMode.LEARNING_STEPS);
+      if (custom_strategy) {
+        learningStepStrategy = custom_strategy;
+      }
+    }
+    this.learningStepsStrategy = learningStepStrategy;
+  }
+  getLearningInfo(card, grade) {
+    var _a, _b, _c, _d;
+    const parameters = this.algorithm.parameters;
+    card.learning_steps = card.learning_steps || 0;
+    const steps_strategy = this.learningStepsStrategy(
+      parameters,
+      card.state,
+      card.learning_steps
+    );
+    const scheduled_minutes = Math.max(
+      0,
+      (_b = (_a = steps_strategy[grade]) == null ? void 0 : _a.scheduled_minutes) != null ? _b : 0
+    );
+    const next_steps = Math.max(0, (_d = (_c = steps_strategy[grade]) == null ? void 0 : _c.next_step) != null ? _d : 0);
+    return {
+      scheduled_minutes,
+      next_steps
+    };
+  }
+  /**
+   * @description This function applies the learning steps based on the current card's state and grade.
+   */
+  applyLearningSteps(nextCard, grade, to_state) {
+    const { scheduled_minutes, next_steps } = this.getLearningInfo(
+      this.current,
+      grade
+    );
+    if (scheduled_minutes > 0 && scheduled_minutes < 1440) {
+      nextCard.learning_steps = next_steps;
+      nextCard.scheduled_days = 0;
+      nextCard.state = to_state;
+      nextCard.due = date_scheduler(
+        this.review_time,
+        Math.round(scheduled_minutes),
+        false
+        /** true:days false: minute */
+      );
+    } else {
+      nextCard.state = State.Review;
+      if (scheduled_minutes >= 1440) {
+        nextCard.learning_steps = next_steps;
+        nextCard.due = date_scheduler(
+          this.review_time,
+          Math.round(scheduled_minutes),
+          false
+          /** true:days false: minute */
+        );
+        nextCard.scheduled_days = Math.floor(scheduled_minutes / 1440);
+      } else {
+        nextCard.learning_steps = 0;
+        const interval = this.algorithm.next_interval(
+          nextCard.stability,
+          this.elapsed_days
+        );
+        nextCard.scheduled_days = interval;
+        nextCard.due = date_scheduler(this.review_time, interval, true);
+      }
+    }
+  }
+  newState(grade) {
+    const exist = this.next.get(grade);
+    if (exist) {
+      return exist;
+    }
+    const next = this.next_ds(this.elapsed_days, grade);
+    this.applyLearningSteps(next, grade, State.Learning);
+    const item = {
+      card: next,
+      log: this.buildLog(grade)
+    };
+    this.next.set(grade, item);
+    return item;
+  }
+  learningState(grade) {
+    const exist = this.next.get(grade);
+    if (exist) {
+      return exist;
+    }
+    const next = this.next_ds(this.elapsed_days, grade);
+    this.applyLearningSteps(
+      next,
+      grade,
+      this.last.state
+      /** Learning or Relearning */
+    );
+    const item = {
+      card: next,
+      log: this.buildLog(grade)
+    };
+    this.next.set(grade, item);
+    return item;
+  }
+  reviewState(grade) {
+    const exist = this.next.get(grade);
+    if (exist) {
+      return exist;
+    }
+    const interval = this.elapsed_days;
+    const retrievability = this.algorithm.forgetting_curve(
+      interval,
+      this.current.stability
+    );
+    const next_again = this.next_ds(interval, Rating.Again, retrievability);
+    const next_hard = this.next_ds(interval, Rating.Hard, retrievability);
+    const next_good = this.next_ds(interval, Rating.Good, retrievability);
+    const next_easy = this.next_ds(interval, Rating.Easy, retrievability);
+    this.next_interval(next_hard, next_good, next_easy, interval);
+    this.next_state(next_hard, next_good, next_easy);
+    this.applyLearningSteps(next_again, Rating.Again, State.Relearning);
+    next_again.lapses += 1;
+    const item_again = {
+      card: next_again,
+      log: this.buildLog(Rating.Again)
+    };
+    const item_hard = {
+      card: next_hard,
+      log: super.buildLog(Rating.Hard)
+    };
+    const item_good = {
+      card: next_good,
+      log: super.buildLog(Rating.Good)
+    };
+    const item_easy = {
+      card: next_easy,
+      log: super.buildLog(Rating.Easy)
+    };
+    this.next.set(Rating.Again, item_again);
+    this.next.set(Rating.Hard, item_hard);
+    this.next.set(Rating.Good, item_good);
+    this.next.set(Rating.Easy, item_easy);
+    return this.next.get(grade);
+  }
+  /**
+   * Review next_ds
+   */
+  next_ds(t, g, r) {
+    const next_state = this.algorithm.next_state(
+      {
+        difficulty: this.current.difficulty,
+        stability: this.current.stability
+      },
+      t,
+      g,
+      r
+    );
+    const card = TypeConvert.card(this.current);
+    card.difficulty = next_state.difficulty;
+    card.stability = next_state.stability;
+    return card;
+  }
+  /**
+   * Review next_interval
+   */
+  next_interval(next_hard, next_good, next_easy, interval) {
+    let hard_interval, good_interval;
+    hard_interval = this.algorithm.next_interval(next_hard.stability, interval);
+    good_interval = this.algorithm.next_interval(next_good.stability, interval);
+    hard_interval = Math.min(hard_interval, good_interval);
+    good_interval = Math.max(good_interval, hard_interval + 1);
+    const easy_interval = Math.max(
+      this.algorithm.next_interval(next_easy.stability, interval),
+      good_interval + 1
+    );
+    next_hard.scheduled_days = hard_interval;
+    next_hard.due = date_scheduler(this.review_time, hard_interval, true);
+    next_good.scheduled_days = good_interval;
+    next_good.due = date_scheduler(this.review_time, good_interval, true);
+    next_easy.scheduled_days = easy_interval;
+    next_easy.due = date_scheduler(this.review_time, easy_interval, true);
+  }
+  /**
+   * Review next_state
+   */
+  next_state(next_hard, next_good, next_easy) {
+    next_hard.state = State.Review;
+    next_hard.learning_steps = 0;
+    next_good.state = State.Review;
+    next_good.learning_steps = 0;
+    next_easy.state = State.Review;
+    next_easy.learning_steps = 0;
+  }
+};
+var LongTermScheduler = class extends AbstractScheduler {
+  newState(grade) {
+    const exist = this.next.get(grade);
+    if (exist) {
+      return exist;
+    }
+    this.current.scheduled_days = 0;
+    this.current.elapsed_days = 0;
+    const first_interval = 0;
+    const next_again = this.next_ds(first_interval, Rating.Again);
+    const next_hard = this.next_ds(first_interval, Rating.Hard);
+    const next_good = this.next_ds(first_interval, Rating.Good);
+    const next_easy = this.next_ds(first_interval, Rating.Easy);
+    this.next_interval(
+      next_again,
+      next_hard,
+      next_good,
+      next_easy,
+      first_interval
+    );
+    this.next_state(next_again, next_hard, next_good, next_easy);
+    this.update_next(next_again, next_hard, next_good, next_easy);
+    return this.next.get(grade);
+  }
+  next_ds(t, g, r) {
+    const next_state = this.algorithm.next_state(
+      {
+        difficulty: this.current.difficulty,
+        stability: this.current.stability
+      },
+      t,
+      g,
+      r
+    );
+    const card = TypeConvert.card(this.current);
+    card.difficulty = next_state.difficulty;
+    card.stability = next_state.stability;
+    return card;
+  }
+  /**
+   * @see https://github.com/open-spaced-repetition/ts-fsrs/issues/98#issuecomment-2241923194
+   */
+  learningState(grade) {
+    return this.reviewState(grade);
+  }
+  reviewState(grade) {
+    const exist = this.next.get(grade);
+    if (exist) {
+      return exist;
+    }
+    const interval = this.elapsed_days;
+    const retrievability = this.algorithm.forgetting_curve(
+      interval,
+      this.current.stability
+    );
+    const next_again = this.next_ds(interval, Rating.Again, retrievability);
+    const next_hard = this.next_ds(interval, Rating.Hard, retrievability);
+    const next_good = this.next_ds(interval, Rating.Good, retrievability);
+    const next_easy = this.next_ds(interval, Rating.Easy, retrievability);
+    this.next_interval(next_again, next_hard, next_good, next_easy, interval);
+    this.next_state(next_again, next_hard, next_good, next_easy);
+    next_again.lapses += 1;
+    this.update_next(next_again, next_hard, next_good, next_easy);
+    return this.next.get(grade);
+  }
+  /**
+   * Review/New next_interval
+   */
+  next_interval(next_again, next_hard, next_good, next_easy, interval) {
+    let again_interval, hard_interval, good_interval, easy_interval;
+    again_interval = this.algorithm.next_interval(
+      next_again.stability,
+      interval
+    );
+    hard_interval = this.algorithm.next_interval(next_hard.stability, interval);
+    good_interval = this.algorithm.next_interval(next_good.stability, interval);
+    easy_interval = this.algorithm.next_interval(next_easy.stability, interval);
+    again_interval = Math.min(again_interval, hard_interval);
+    hard_interval = Math.max(hard_interval, again_interval + 1);
+    good_interval = Math.max(good_interval, hard_interval + 1);
+    easy_interval = Math.max(easy_interval, good_interval + 1);
+    next_again.scheduled_days = again_interval;
+    next_again.due = date_scheduler(this.review_time, again_interval, true);
+    next_hard.scheduled_days = hard_interval;
+    next_hard.due = date_scheduler(this.review_time, hard_interval, true);
+    next_good.scheduled_days = good_interval;
+    next_good.due = date_scheduler(this.review_time, good_interval, true);
+    next_easy.scheduled_days = easy_interval;
+    next_easy.due = date_scheduler(this.review_time, easy_interval, true);
+  }
+  /**
+   * Review/New next_state
+   */
+  next_state(next_again, next_hard, next_good, next_easy) {
+    next_again.state = State.Review;
+    next_again.learning_steps = 0;
+    next_hard.state = State.Review;
+    next_hard.learning_steps = 0;
+    next_good.state = State.Review;
+    next_good.learning_steps = 0;
+    next_easy.state = State.Review;
+    next_easy.learning_steps = 0;
+  }
+  update_next(next_again, next_hard, next_good, next_easy) {
+    const item_again = {
+      card: next_again,
+      log: this.buildLog(Rating.Again)
+    };
+    const item_hard = {
+      card: next_hard,
+      log: super.buildLog(Rating.Hard)
+    };
+    const item_good = {
+      card: next_good,
+      log: super.buildLog(Rating.Good)
+    };
+    const item_easy = {
+      card: next_easy,
+      log: super.buildLog(Rating.Easy)
+    };
+    this.next.set(Rating.Again, item_again);
+    this.next.set(Rating.Hard, item_hard);
+    this.next.set(Rating.Good, item_good);
+    this.next.set(Rating.Easy, item_easy);
+  }
+};
+var Reschedule = class {
+  /**
+   * Creates an instance of the `Reschedule` class.
+   * @param fsrs - An instance of the FSRS class used for scheduling.
+   */
+  constructor(fsrs2) {
+    __publicField(this, "fsrs");
+    this.fsrs = fsrs2;
+  }
+  /**
+   * Replays a review for a card and determines the next review date based on the given rating.
+   * @param card - The card being reviewed.
+   * @param reviewed - The date the card was reviewed.
+   * @param rating - The grade given to the card during the review.
+   * @returns A `RecordLogItem` containing the updated card and review log.
+   */
+  replay(card, reviewed, rating) {
+    return this.fsrs.next(card, reviewed, rating);
+  }
+  /**
+   * Processes a manual review for a card, allowing for custom state, stability, difficulty, and due date.
+   * @param card - The card being reviewed.
+   * @param state - The state of the card after the review.
+   * @param reviewed - The date the card was reviewed.
+   * @param elapsed_days - The number of days since the last review.
+   * @param stability - (Optional) The stability of the card.
+   * @param difficulty - (Optional) The difficulty of the card.
+   * @param due - (Optional) The due date for the next review.
+   * @returns A `RecordLogItem` containing the updated card and review log.
+   * @throws Will throw an error if the state or due date is not provided when required.
+   */
+  handleManualRating(card, state, reviewed, elapsed_days, stability, difficulty, due) {
+    if (typeof state === "undefined") {
+      throw new FSRSValidationError(
+        "reschedule: state is required for manual rating"
+      );
+    }
+    let log;
+    let next_card;
+    if (state === State.New) {
+      log = {
+        rating: Rating.Manual,
+        state,
+        due: due != null ? due : reviewed,
+        stability: card.stability,
+        difficulty: card.difficulty,
+        elapsed_days,
+        last_elapsed_days: card.elapsed_days,
+        scheduled_days: card.scheduled_days,
+        learning_steps: card.learning_steps,
+        review: reviewed
+      };
+      next_card = createEmptyCard(reviewed);
+      next_card.last_review = reviewed;
+    } else {
+      if (typeof due === "undefined") {
+        throw new FSRSValidationError(
+          "reschedule: due is required for manual rating"
+        );
+      }
+      const scheduled_days = date_diff(due, reviewed, "days");
+      log = {
+        rating: Rating.Manual,
+        state: card.state,
+        due: card.last_review || card.due,
+        stability: card.stability,
+        difficulty: card.difficulty,
+        elapsed_days,
+        last_elapsed_days: card.elapsed_days,
+        scheduled_days: card.scheduled_days,
+        learning_steps: card.learning_steps,
+        review: reviewed
+      };
+      next_card = {
+        ...card,
+        state,
+        due,
+        last_review: reviewed,
+        stability: stability || card.stability,
+        difficulty: difficulty || card.difficulty,
+        elapsed_days,
+        scheduled_days,
+        reps: card.reps + 1
+      };
+    }
+    return { card: next_card, log };
+  }
+  /**
+   * Reschedules a card based on its review history.
+   *
+   * @param current_card - The card to be rescheduled.
+   * @param reviews - An array of review history objects.
+   * @returns An array of record log items representing the rescheduling process.
+   */
+  reschedule(current_card, reviews) {
+    const collections = [];
+    let cur_card = createEmptyCard(current_card.due);
+    for (const review of reviews) {
+      let item;
+      review.review = TypeConvert.time(review.review);
+      if (review.rating === Rating.Manual) {
+        let interval = 0;
+        if (cur_card.state !== State.New && cur_card.last_review) {
+          interval = date_diff(review.review, cur_card.last_review, "days");
+        }
+        item = this.handleManualRating(
+          cur_card,
+          review.state,
+          review.review,
+          interval,
+          review.stability,
+          review.difficulty,
+          review.due ? TypeConvert.time(review.due) : void 0
+        );
+      } else {
+        item = this.replay(cur_card, review.review, review.rating);
+      }
+      collections.push(item);
+      cur_card = item.card;
+    }
+    return collections;
+  }
+  calculateManualRecord(current_card, now, record_log_item, update_memory) {
+    if (!record_log_item) {
+      return null;
+    }
+    const { card: reschedule_card, log } = record_log_item;
+    const cur_card = TypeConvert.card(current_card);
+    if (cur_card.due.getTime() === reschedule_card.due.getTime()) {
+      return null;
+    }
+    cur_card.scheduled_days = date_diff(
+      reschedule_card.due,
+      cur_card.due,
+      "days"
+    );
+    return this.handleManualRating(
+      cur_card,
+      reschedule_card.state,
+      TypeConvert.time(now),
+      log.elapsed_days,
+      update_memory ? reschedule_card.stability : void 0,
+      update_memory ? reschedule_card.difficulty : void 0,
+      reschedule_card.due
+    );
+  }
+};
+function applyAfterHandler(value, afterHandler) {
+  return typeof afterHandler === "function" ? afterHandler(value) : value;
+}
+var FSRS = class extends FSRSAlgorithm {
+  constructor(param) {
+    super(param);
+    __publicField(this, "strategyHandler", /* @__PURE__ */ new Map());
+    __publicField(this, "Scheduler");
+    const { enable_short_term } = this.parameters;
+    this.Scheduler = enable_short_term ? BasicScheduler : LongTermScheduler;
+  }
+  params_handler_proxy() {
+    const _this = this;
+    return {
+      set: function(target, prop, value) {
+        if (prop === "request_retention" && Number.isFinite(value)) {
+          _this.intervalModifier = _this.calculate_interval_modifier(
+            Number(value)
+          );
+        } else if (prop === "enable_short_term") {
+          _this.Scheduler = value === true ? BasicScheduler : LongTermScheduler;
+        } else if (prop === "w") {
+          value = migrateParameters(
+            value,
+            target.relearning_steps.length,
+            target.enable_short_term
+          );
+          _this.forgetting_curve = forgetting_curve.bind(this, value);
+          _this.intervalModifier = _this.calculate_interval_modifier(
+            Number(target.request_retention)
+          );
+        }
+        Reflect.set(target, prop, value);
+        return true;
+      }
+    };
+  }
+  useStrategy(mode, handler) {
+    this.strategyHandler.set(mode, handler);
+    return this;
+  }
+  clearStrategy(mode) {
+    if (mode) {
+      this.strategyHandler.delete(mode);
+    } else {
+      this.strategyHandler.clear();
+    }
+    return this;
+  }
+  getScheduler(card, now) {
+    const schedulerStrategy = this.strategyHandler.get(
+      StrategyMode.SCHEDULER
+    );
+    const Scheduler = schedulerStrategy || this.Scheduler;
+    const instance = new Scheduler(card, now, this, this.strategyHandler);
+    return instance;
+  }
+  /**
+   * Display the collection of cards and logs for the four scenarios after scheduling the card at the current time.
+   * @param card Card to be processed
+   * @param now Current time or scheduled time
+   * @param afterHandler Convert the result to another type. (Optional)
+   * @example
+   * ```typescript
+   * const card: Card = createEmptyCard(new Date());
+   * const f = fsrs();
+   * const recordLog = f.repeat(card, new Date());
+   * ```
+   * @example
+   * ```typescript
+   * interface RevLogUnchecked
+   *   extends Omit<ReviewLog, "due" | "review" | "state" | "rating"> {
+   *   cid: string;
+   *   due: Date | number;
+   *   state: StateType;
+   *   review: Date | number;
+   *   rating: RatingType;
+   * }
+   *
+   * interface RepeatRecordLog {
+   *   card: CardUnChecked; //see method: createEmptyCard
+   *   log: RevLogUnchecked;
+   * }
+   *
+   * function repeatAfterHandler(recordLog: RecordLog) {
+   *     const record: { [key in Grade]: RepeatRecordLog } = {} as {
+   *       [key in Grade]: RepeatRecordLog;
+   *     };
+   *     for (const grade of Grades) {
+   *       record[grade] = {
+   *         card: {
+   *           ...(recordLog[grade].card as Card & { cid: string }),
+   *           due: recordLog[grade].card.due.getTime(),
+   *           state: State[recordLog[grade].card.state] as StateType,
+   *           last_review: recordLog[grade].card.last_review
+   *             ? recordLog[grade].card.last_review!.getTime()
+   *             : null,
+   *         },
+   *         log: {
+   *           ...recordLog[grade].log,
+   *           cid: (recordLog[grade].card as Card & { cid: string }).cid,
+   *           due: recordLog[grade].log.due.getTime(),
+   *           review: recordLog[grade].log.review.getTime(),
+   *           state: State[recordLog[grade].log.state] as StateType,
+   *           rating: Rating[recordLog[grade].log.rating] as RatingType,
+   *         },
+   *       };
+   *     }
+   *     return record;
+   * }
+   * const card: Card = createEmptyCard(new Date(), cardAfterHandler); //see method:  createEmptyCard
+   * const f = fsrs();
+   * const recordLog = f.repeat(card, new Date(), repeatAfterHandler);
+   * ```
+   */
+  repeat(card, now, afterHandler) {
+    const instance = this.getScheduler(card, now);
+    const recordLog = instance.preview();
+    return applyAfterHandler(recordLog, afterHandler);
+  }
+  /**
+   * Display the collection of cards and logs for the card scheduled at the current time, after applying a specific grade rating.
+   * @param card Card to be processed
+   * @param now Current time or scheduled time
+   * @param grade Rating of the review (Again, Hard, Good, Easy)
+   * @param afterHandler Convert the result to another type. (Optional)
+   * @example
+   * ```typescript
+   * const card: Card = createEmptyCard(new Date());
+   * const f = fsrs();
+   * const recordLogItem = f.next(card, new Date(), Rating.Again);
+   * ```
+   * @example
+   * ```typescript
+   * interface RevLogUnchecked
+   *   extends Omit<ReviewLog, "due" | "review" | "state" | "rating"> {
+   *   cid: string;
+   *   due: Date | number;
+   *   state: StateType;
+   *   review: Date | number;
+   *   rating: RatingType;
+   * }
+   *
+   * interface NextRecordLog {
+   *   card: CardUnChecked; //see method: createEmptyCard
+   *   log: RevLogUnchecked;
+   * }
+   *
+  function nextAfterHandler(recordLogItem: RecordLogItem) {
+    const recordItem = {
+      card: {
+        ...(recordLogItem.card as Card & { cid: string }),
+        due: recordLogItem.card.due.getTime(),
+        state: State[recordLogItem.card.state] as StateType,
+        last_review: recordLogItem.card.last_review
+          ? recordLogItem.card.last_review!.getTime()
+          : null,
+      },
+      log: {
+        ...recordLogItem.log,
+        cid: (recordLogItem.card as Card & { cid: string }).cid,
+        due: recordLogItem.log.due.getTime(),
+        review: recordLogItem.log.review.getTime(),
+        state: State[recordLogItem.log.state] as StateType,
+        rating: Rating[recordLogItem.log.rating] as RatingType,
+      },
+    };
+    return recordItem
+  }
+   * const card: Card = createEmptyCard(new Date(), cardAfterHandler); //see method:  createEmptyCard
+   * const f = fsrs();
+   * const recordLogItem = f.repeat(card, new Date(), Rating.Again, nextAfterHandler);
+   * ```
+   */
+  next(card, now, grade, afterHandler) {
+    const instance = this.getScheduler(card, now);
+    const g = TypeConvert.rating(grade);
+    if (g === Rating.Manual) {
+      throw new FSRSValidationError("Cannot review a manual rating");
+    }
+    const recordLogItem = instance.review(g);
+    return applyAfterHandler(recordLogItem, afterHandler);
+  }
+  /**
+   * Get the retrievability of the card
+   * @param card  Card to be processed
+   * @param now  Current time or scheduled time
+   * @param format  default:true , Convert the result to another type. (Optional)
+   * @returns  The retrievability of the card,if format is true, the result is a string, otherwise it is a number
+   */
+  get_retrievability(card, now, format = true) {
+    const processedCard = TypeConvert.card(card);
+    now = now ? TypeConvert.time(now) : /* @__PURE__ */ new Date();
+    const t = processedCard.state !== State.New ? Math.max(date_diff(now, processedCard.last_review, "days"), 0) : 0;
+    const r = processedCard.state !== State.New ? this.forgetting_curve(t, +processedCard.stability.toFixed(8)) : 0;
+    return format ? `${(r * 100).toFixed(2)}%` : r;
+  }
+  /**
+   *
+   * @param card Card to be processed
+   * @param log last review log
+   * @param afterHandler Convert the result to another type. (Optional)
+   * @example
+   * ```typescript
+   * const now = new Date();
+   * const f = fsrs();
+   * const emptyCardFormAfterHandler = createEmptyCard(now);
+   * const repeatFormAfterHandler = f.repeat(emptyCardFormAfterHandler, now);
+   * const { card, log } = repeatFormAfterHandler[Rating.Hard];
+   * const rollbackFromAfterHandler = f.rollback(card, log);
+   * ```
+   *
+   * @example
+   * ```typescript
+   * const now = new Date();
+   * const f = fsrs();
+   * const emptyCardFormAfterHandler = createEmptyCard(now, cardAfterHandler);  //see method: createEmptyCard
+   * const repeatFormAfterHandler = f.repeat(emptyCardFormAfterHandler, now, repeatAfterHandler); //see method: fsrs.repeat()
+   * const { card, log } = repeatFormAfterHandler[Rating.Hard];
+   * const rollbackFromAfterHandler = f.rollback(card, log, cardAfterHandler);
+   * ```
+   */
+  rollback(card, log, afterHandler) {
+    const processedCard = TypeConvert.card(card);
+    const processedLog = TypeConvert.review_log(log);
+    if (processedLog.rating === Rating.Manual) {
+      throw new FSRSValidationError("Cannot rollback a manual rating");
+    }
+    let last_due;
+    let last_review;
+    let last_lapses;
+    switch (processedLog.state) {
+      case State.New:
+        last_due = processedLog.due;
+        last_review = void 0;
+        last_lapses = 0;
+        break;
+      case State.Learning:
+      case State.Relearning:
+      case State.Review:
+        last_due = processedLog.review;
+        last_review = processedLog.due;
+        last_lapses = processedCard.lapses - (processedLog.rating === Rating.Again && processedLog.state === State.Review ? 1 : 0);
+        break;
+    }
+    const prevCard = {
+      ...processedCard,
+      due: last_due,
+      stability: processedLog.stability,
+      difficulty: processedLog.difficulty,
+      elapsed_days: processedLog.last_elapsed_days,
+      scheduled_days: processedLog.scheduled_days,
+      reps: Math.max(0, processedCard.reps - 1),
+      lapses: Math.max(0, last_lapses),
+      learning_steps: processedLog.learning_steps,
+      state: processedLog.state,
+      last_review
+    };
+    return applyAfterHandler(prevCard, afterHandler);
+  }
+  /**
+   *
+   * @param card Card to be processed
+   * @param now Current time or scheduled time
+   * @param reset_count Should the review count information(reps,lapses) be reset. (Optional)
+   * @param afterHandler Convert the result to another type. (Optional)
+   * @example
+   * ```typescript
+   * const now = new Date();
+   * const f = fsrs();
+   * const emptyCard = createEmptyCard(now);
+   * const scheduling_cards = f.repeat(emptyCard, now);
+   * const { card, log } = scheduling_cards[Rating.Hard];
+   * const forgetCard = f.forget(card, new Date(), true);
+   * ```
+   *
+   * @example
+   * ```typescript
+   * interface RepeatRecordLog {
+   *   card: CardUnChecked; //see method: createEmptyCard
+   *   log: RevLogUnchecked; //see method: fsrs.repeat()
+   * }
+   *
+   * function forgetAfterHandler(recordLogItem: RecordLogItem): RepeatRecordLog {
+   *     return {
+   *       card: {
+   *         ...(recordLogItem.card as Card & { cid: string }),
+   *         due: recordLogItem.card.due.getTime(),
+   *         state: State[recordLogItem.card.state] as StateType,
+   *         last_review: recordLogItem.card.last_review
+   *           ? recordLogItem.card.last_review!.getTime()
+   *           : null,
+   *       },
+   *       log: {
+   *         ...recordLogItem.log,
+   *         cid: (recordLogItem.card as Card & { cid: string }).cid,
+   *         due: recordLogItem.log.due.getTime(),
+   *         review: recordLogItem.log.review.getTime(),
+   *         state: State[recordLogItem.log.state] as StateType,
+   *         rating: Rating[recordLogItem.log.rating] as RatingType,
+   *       },
+   *     };
+   * }
+   * const now = new Date();
+   * const f = fsrs();
+   * const emptyCardFormAfterHandler = createEmptyCard(now, cardAfterHandler); //see method:  createEmptyCard
+   * const repeatFormAfterHandler = f.repeat(emptyCardFormAfterHandler, now, repeatAfterHandler); //see method: fsrs.repeat()
+   * const { card } = repeatFormAfterHandler[Rating.Hard];
+   * const forgetFromAfterHandler = f.forget(card, date_scheduler(now, 1, true), false, forgetAfterHandler);
+   * ```
+   */
+  forget(card, now, reset_count = false, afterHandler) {
+    const processedCard = TypeConvert.card(card);
+    now = TypeConvert.time(now);
+    const scheduled_days = processedCard.state === State.New ? 0 : date_diff(now, processedCard.due, "days");
+    const forget_log = {
+      rating: Rating.Manual,
+      state: processedCard.state,
+      due: processedCard.due,
+      stability: processedCard.stability,
+      difficulty: processedCard.difficulty,
+      elapsed_days: 0,
+      last_elapsed_days: processedCard.elapsed_days,
+      scheduled_days,
+      learning_steps: processedCard.learning_steps,
+      review: now
+    };
+    const forget_card = {
+      ...processedCard,
+      due: now,
+      stability: 0,
+      difficulty: 0,
+      elapsed_days: 0,
+      scheduled_days: 0,
+      reps: reset_count ? 0 : processedCard.reps,
+      lapses: reset_count ? 0 : processedCard.lapses,
+      learning_steps: 0,
+      state: State.New,
+      last_review: processedCard.last_review
+    };
+    const recordLogItem = { card: forget_card, log: forget_log };
+    return applyAfterHandler(recordLogItem, afterHandler);
+  }
+  /**
+   * Reschedules the current card and returns the rescheduled collections and reschedule item.
+   *
+   * @template T - The type of the record log item.
+   * @param {CardInput | Card} current_card - The current card to be rescheduled.
+   * @param {Array<FSRSHistory>} reviews - The array of FSRSHistory objects representing the reviews.
+   * @param {Partial<RescheduleOptions<T>>} options - The optional reschedule options.
+   * @returns {IReschedule<T>} - The rescheduled collections and reschedule item.
+   *
+   * @example
+   * ```typescript
+   * const f = fsrs()
+   * const grades: Grade[] = [Rating.Good, Rating.Good, Rating.Good, Rating.Good]
+   * const reviews_at = [
+   *   new Date(2024, 8, 13),
+   *   new Date(2024, 8, 13),
+   *   new Date(2024, 8, 17),
+   *   new Date(2024, 8, 28),
+   * ]
+   *
+   * const reviews: FSRSHistory[] = []
+   * for (let i = 0; i < grades.length; i++) {
+   *   reviews.push({
+   *     rating: grades[i],
+   *     review: reviews_at[i],
+   *   })
+   * }
+   *
+   * const results_short = scheduler.reschedule(
+   *   createEmptyCard(),
+   *   reviews,
+   *   {
+   *     skipManual: false,
+   *   }
+   * )
+   * console.log(results_short)
+   * ```
+   */
+  reschedule(current_card, reviews = [], options = {}) {
+    const {
+      recordLogHandler,
+      reviewsOrderBy,
+      skipManual = true,
+      now = /* @__PURE__ */ new Date(),
+      update_memory_state: updateMemoryState = false
+    } = options;
+    if (reviewsOrderBy && typeof reviewsOrderBy === "function") {
+      reviews.sort(reviewsOrderBy);
+    }
+    if (skipManual) {
+      reviews = reviews.filter((review) => review.rating !== Rating.Manual);
+    }
+    const rescheduleSvc = new Reschedule(this);
+    const collections = rescheduleSvc.reschedule(
+      options.first_card || createEmptyCard(),
+      reviews
+    );
+    const len = collections.length;
+    const cur_card = TypeConvert.card(current_card);
+    const manual_item = rescheduleSvc.calculateManualRecord(
+      cur_card,
+      now,
+      len ? collections[len - 1] : void 0,
+      updateMemoryState
+    );
+    return {
+      collections: typeof recordLogHandler === "function" ? collections.map(recordLogHandler) : collections,
+      reschedule_item: manual_item ? applyAfterHandler(manual_item, recordLogHandler) : null
+    };
+  }
+};
+var fsrs = (params) => {
+  return new FSRS(params || {});
+};
 
 // src/quizView.ts
+var memoryScheduler = fsrs();
 var _QuizView = class _QuizView extends import_obsidian4.ItemView {
   constructor(leaf, plugin, stateManager, vault, csvWriteQueue) {
     super(leaf);
@@ -1217,6 +3177,30 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     this.practiceIds = [];
     /** 进入练习前的常规模式定位题号，退出时据此恢复位置。 */
     this.practiceFocusId = null;
+    /** 记忆练习模式：练习集为临时会话，不持久化，重开面板回到常规模式。 */
+    this.memoryActive = false;
+    this.memoryIds = [];
+    /** 记忆练习的记忆卡片（题 id → 卡片），随答题进度一起持久化。 */
+    this.memoryCards = {};
+    /** 防双开：首次重置确认框 await 期间禁止重复进入（M2）。 */
+    this.memoryEnabling = false;
+    /** 每日新题配额：最近一次启用记忆练习的自然日（本地日期 "YYYY-MM-DD"）。 */
+    this.memoryNewDate = "";
+    /** 每日新题配额：当日已取的新题数量。 */
+    this.memoryNewCountToday = 0;
+    /** 当日已选取但尚未作答的新题 id（退出再进仍保留，不重复扣配额）。 */
+    this.memoryPendingNew = [];
+    /** 记忆练习是否已初始化过（至少判分一次）；仅删除记忆卡片时保留，避免重复触发首次启用重置提示。 */
+    this.memoryInitialized = false;
+    /** 练习模式内本次会话已答的题 id 集合（练习内已答判断/渲染/计数均基于它）。 */
+    this.practiceAnswered = /* @__PURE__ */ new Set();
+    /** 练习模式本次会话的答题统计（不累加全局统计） */
+    this.practiceCorrect = 0;
+    this.practiceWrong = 0;
+    /** 记忆练习集中每题的来源（复习/新题），用于题目页眉显著标注。 */
+    this.practiceSource = {};
+    /** 记忆卡片信息栏折叠状态（默认收起，仅影响本栏显示，不重渲染题目）。 */
+    this.cardPanelOpen = false;
     this.plugin = plugin;
     this.stateManager = stateManager;
     this.vault = vault;
@@ -1257,6 +3241,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     }
     this.stateManager.cancelScheduledSave();
     this.exitRandomPractice();
+    this.exitMemoryPractice();
     if (this.textFilterTimer !== null) {
       window.clearTimeout(this.textFilterTimer);
       this.textFilterTimer = null;
@@ -1412,6 +3397,11 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     this.correctCount = 0;
     this.wrongCount = 0;
     this.answeredQuestions = {};
+    this.memoryCards = {};
+    this.memoryNewDate = "";
+    this.memoryNewCountToday = 0;
+    this.memoryPendingNew = [];
+    this.memoryInitialized = false;
     this.currentShuffledQId = null;
     this.selectedOption = null;
     this.selectedOptions = [];
@@ -1442,6 +3432,28 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     this.correctCount = savedState.correctCount;
     this.wrongCount = savedState.wrongCount;
     this.answeredQuestions = savedState.answeredQuestions || {};
+    this.memoryCards = savedState.memoryCards || {};
+    this.memoryNewDate = savedState.memoryNewDate || "";
+    this.memoryNewCountToday = savedState.memoryNewCountToday || 0;
+    this.memoryPendingNew = savedState.memoryPendingNew || [];
+    this.memoryInitialized = !!savedState.memoryInitialized;
+    this.pruneMemoryCards();
+  }
+  /** 清理题库中已不存在的僵尸记忆卡片（CSV 删题后保持计数一致）。 */
+  pruneMemoryCards() {
+    var _a, _b;
+    const ids = new Set(this.allQuestions.map((q) => q.id));
+    let changed = false;
+    for (const k of Object.keys(this.memoryCards)) {
+      if (!ids.has(k)) {
+        delete this.memoryCards[k];
+        changed = true;
+      }
+    }
+    if (changed) {
+      void this.stateManager.saveStateImmediately(this.buildCurrentState());
+      (_b = (_a = this.plugin).refreshMemoryReminder) == null ? void 0 : _b.call(_a);
+    }
   }
   /** On CSV load failure: keep filters from saved state so the UI is not blank. */
   restoreFiltersOnly(savedState) {
@@ -1646,6 +3658,18 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     this.practiceCountEl = practiceRow.createSpan({
       cls: "csv-quiz-practice-count"
     });
+    if (settings.memoryEnabled) {
+      this.memoryBtn = practiceRow.createEl("button", {
+        text: "\u{1F9E0} \u8BB0\u5FC6\u7EC3\u4E60",
+        cls: "csv-quiz-btn csv-quiz-btn-sm csv-quiz-practice-btn"
+      });
+      this.memoryBtn.addEventListener("click", () => {
+        this.toggleMemoryPractice();
+      });
+      this.memoryCountEl = practiceRow.createSpan({
+        cls: "csv-quiz-practice-count"
+      });
+    }
   }
   updateFilterUI() {
     if (!this.cat1Select) return;
@@ -1701,6 +3725,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
   enableRandomPractice() {
     var _a, _b;
     if (this.practiceActive) return;
+    if (this.memoryActive) this.exitMemoryPractice();
     const pool = this.applyFiltersTo(this.orderedQuestions);
     const unanswered = pool.filter(
       (q) => this.answeredQuestions[q.id] === void 0
@@ -1713,6 +3738,9 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     this.practiceFocusId = (_b = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id) != null ? _b : null;
     this.practiceIds = picked.map((q) => q.id);
     this.practiceActive = true;
+    this.practiceAnswered = /* @__PURE__ */ new Set();
+    this.practiceCorrect = 0;
+    this.practiceWrong = 0;
     this.filteredQuestions = picked;
     this.currentIndex = 0;
     this.currentShuffledQId = null;
@@ -1726,6 +3754,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     if (!this.practiceActive) return;
     this.practiceActive = false;
     this.practiceIds = [];
+    this.practiceAnswered.clear();
     this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
     if (this.practiceFocusId) {
       const idx = this.filteredQuestions.findIndex(
@@ -1755,20 +3784,169 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
       this.enableRandomPractice();
     }
   }
-  /** 同步练习按钮的文案/高亮与完成计数。 */
+  /**
+   * 记忆练习：到期题（FSRS due 已到）按紧迫度优先 + 每日新题（随机取），
+   * 均受当前筛选条件影响。练习集为临时会话，不持久化。
+   */
+  async enableMemoryPractice() {
+    var _a, _b;
+    if (!this.getSettings().memoryEnabled) {
+      new import_obsidian4.Notice("\u8BB0\u5FC6\u7EC3\u4E60\u5DF2\u5173\u95ED\uFF0C\u8BF7\u5728\u8BBE\u7F6E\u4E2D\u5F00\u542F");
+      return;
+    }
+    if (this.memoryActive || this.memoryEnabling) return;
+    this.memoryEnabling = true;
+    try {
+      if (this.practiceActive) this.exitRandomPractice();
+      if (!this.memoryInitialized && Object.keys(this.memoryCards).length === 0 && Object.keys(this.answeredQuestions).length > 0) {
+        const modal = new ChoiceModal(this.app, {
+          title: "\u542F\u7528\u8BB0\u5FC6\u7EC3\u4E60\u9700\u8981\u91CD\u7F6E\u8FDB\u5EA6",
+          message: "\u68C0\u6D4B\u5230\u5DF2\u6709\u7B54\u9898\u8BB0\u5F55\u4F46\u6CA1\u6709\u8BB0\u5FC6\u6570\u636E\uFF0C\u8BB0\u5FC6\u7EC3\u4E60\u9700\u8981\u91CD\u7F6E\u8FDB\u5EA6\uFF08\u6E05\u9664\u7B54\u9898\u8BB0\u5F55/\u7EDF\u8BA1/\u8BB0\u5FC6\u5361\u7247\uFF09\u540E\u91CD\u65B0\u5F00\u59CB\u3002\u662F\u5426\u91CD\u7F6E\u5E76\u5F00\u59CB\uFF1F",
+          options: [
+            { label: "\u91CD\u7F6E\u5E76\u5F00\u59CB", value: "reset", cta: true },
+            { label: "\u53D6\u6D88", value: "cancel" }
+          ]
+        });
+        modal.open();
+        const res = await modal.promise;
+        if (this.isClosed) return;
+        if (res !== "reset") return;
+        this.correctCount = 0;
+        this.wrongCount = 0;
+        this.answeredQuestions = {};
+        this.memoryCards = {};
+        this.memoryNewDate = "";
+        this.memoryNewCountToday = 0;
+        this.memoryPendingNew = [];
+        this.memoryInitialized = false;
+        this.currentIndex = 0;
+        this.currentShuffledQId = null;
+        this.selectedOption = null;
+        this.selectedOptions = [];
+        this.cancelAutoNext();
+      }
+      const pool = this.applyFiltersTo(this.orderedQuestions);
+      const now = /* @__PURE__ */ new Date();
+      const due = pool.filter((q) => {
+        const card = this.memoryCards[q.id];
+        const t = card ? this.parseDueTime(card) : null;
+        return t !== null && t <= now.getTime();
+      }).sort(
+        (a, b) => {
+          var _a2, _b2;
+          return ((_a2 = this.parseDueTime(this.memoryCards[a.id])) != null ? _a2 : 0) - ((_b2 = this.parseDueTime(this.memoryCards[b.id])) != null ? _b2 : 0);
+        }
+      );
+      const today = (() => {
+        const d = /* @__PURE__ */ new Date();
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      })();
+      if (this.memoryNewDate !== today) {
+        this.memoryNewDate = today;
+        this.memoryNewCountToday = 0;
+        this.memoryPendingNew = [];
+      }
+      const noCard = pool.filter((q) => this.memoryCards[q.id] === void 0);
+      const pendingSet = new Set(this.memoryPendingNew);
+      const pendingFresh = noCard.filter((q) => pendingSet.has(q.id));
+      const quota = Math.max(
+        0,
+        this.getSettings().memoryDailyNew - (this.memoryNewCountToday || 0)
+      );
+      const freshNew = shuffle(
+        noCard.filter((q) => !pendingSet.has(q.id))
+      ).slice(0, quota);
+      const fresh = [...pendingFresh, ...freshNew];
+      this.memoryNewCountToday = (this.memoryNewCountToday || 0) + freshNew.length;
+      this.memoryPendingNew = fresh.map((q) => q.id);
+      if (due.length === 0 && fresh.length === 0) {
+        new import_obsidian4.Notice("\u4ECA\u65E5\u6CA1\u6709\u5F85\u590D\u4E60\u6216\u53EF\u5B66\u4E60\u7684\u65B0\u9898");
+        return;
+      }
+      this.practiceFocusId = (_b = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id) != null ? _b : null;
+      this.memoryIds = [...due.map((q) => q.id), ...fresh.map((q) => q.id)];
+      this.filteredQuestions = [...due, ...fresh];
+      this.currentIndex = 0;
+      this.memoryActive = true;
+      this.practiceAnswered = /* @__PURE__ */ new Set();
+      this.practiceCorrect = 0;
+      this.practiceWrong = 0;
+      this.practiceSource = {};
+      for (const q of due) this.practiceSource[q.id] = "review";
+      for (const q of fresh) this.practiceSource[q.id] = "new";
+      this.currentShuffledQId = null;
+      this.cancelAutoNext();
+      this.renderQuestion();
+      this.saveState();
+      new import_obsidian4.Notice(`\u8BB0\u5FC6\u7EC3\u4E60\uFF1A\u5230\u671F ${due.length} \u9898 + \u65B0\u9898 ${fresh.length} \u9898`);
+    } finally {
+      this.memoryEnabling = false;
+    }
+  }
+  /** 退出记忆练习模式：恢复常规筛选结果并定位到进入前的位置。不渲染、不保存，由调用方决定。 */
+  exitMemoryPractice() {
+    if (!this.memoryActive) return;
+    this.memoryActive = false;
+    this.memoryIds = [];
+    this.practiceAnswered.clear();
+    this.practiceSource = {};
+    this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
+    if (this.practiceFocusId) {
+      const idx = this.filteredQuestions.findIndex(
+        (q) => q.id === this.practiceFocusId
+      );
+      if (idx >= 0) {
+        this.currentIndex = idx;
+      } else if (this.filteredQuestions.length > 0) {
+        this.currentIndex = 0;
+      } else {
+        this.currentIndex = -1;
+      }
+    } else {
+      this.currentIndex = this.filteredQuestions.length > 0 ? 0 : -1;
+    }
+    this.practiceFocusId = null;
+    this.currentShuffledQId = null;
+    this.cancelAutoNext();
+  }
+  toggleMemoryPractice() {
+    if (this.memoryActive) {
+      this.exitMemoryPractice();
+      this.renderQuestion();
+      this.saveState();
+      new import_obsidian4.Notice("\u5DF2\u9000\u51FA\u8BB0\u5FC6\u7EC3\u4E60");
+    } else {
+      void this.enableMemoryPractice();
+    }
+  }
+  /** 同步练习按钮（随机/记忆）的文案/高亮与完成计数。 */
   updatePracticeButton() {
     if (!this.practiceBtn) return;
     if (this.practiceActive) {
       this.practiceBtn.setText("\u9000\u51FA\u968F\u673A\u7EC3\u4E60");
       this.practiceBtn.addClass("csv-quiz-practice-btn-active");
       const answered = this.practiceIds.filter(
-        (id) => this.answeredQuestions[id] !== void 0
+        (id) => this.practiceAnswered.has(id)
       ).length;
       this.practiceCountEl.setText(` \u5DF2\u5B8C\u6210 ${answered}/${this.practiceIds.length}`);
     } else {
       this.practiceBtn.setText("\u{1F3B2} \u968F\u673A\u7EC3\u4E60\uFF08100 \u9898\uFF09");
       this.practiceBtn.removeClass("csv-quiz-practice-btn-active");
       this.practiceCountEl.setText("");
+    }
+    if (!this.memoryBtn) return;
+    if (this.memoryActive) {
+      this.memoryBtn.setText("\u9000\u51FA\u8BB0\u5FC6\u7EC3\u4E60");
+      this.memoryBtn.addClass("csv-quiz-practice-btn-active");
+      const answered = this.memoryIds.filter(
+        (id) => this.practiceAnswered.has(id)
+      ).length;
+      this.memoryCountEl.setText(` \u5DF2\u5B8C\u6210 ${answered}/${this.memoryIds.length}`);
+    } else {
+      this.memoryBtn.setText("\u{1F9E0} \u8BB0\u5FC6\u7EC3\u4E60");
+      this.memoryBtn.removeClass("csv-quiz-practice-btn-active");
+      const dueCount = countDueCards(this.memoryCards);
+      this.memoryCountEl.setText(dueCount > 0 ? ` \u4ECA\u65E5\u5F85\u590D\u4E60 ${dueCount} \u9898` : "");
     }
   }
   populateTagChips() {
@@ -1840,6 +4018,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
   }
   reFilterForNavigation() {
     var _a;
+    if (this.practiceActive || this.memoryActive) return;
     const prevId = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id;
     this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
     if (prevId) {
@@ -1854,6 +4033,9 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
   applyFiltersAndReset() {
     if (this.practiceActive) {
       this.exitRandomPractice();
+    }
+    if (this.memoryActive) {
+      this.exitMemoryPractice();
     }
     this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
     this.currentIndex = this.filteredQuestions.length > 0 ? 0 : -1;
@@ -1885,7 +4067,8 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     }
     const question = this.filteredQuestions[this.currentIndex];
     const multi = this.isMultiChoice(question);
-    const prevAnswer = this.answeredQuestions[question.id];
+    const inPractice = this.practiceActive || this.memoryActive;
+    const prevAnswer = inPractice ? this.practiceAnswered.has(question.id) ? this.answeredQuestions[question.id] : void 0 : this.answeredQuestions[question.id];
     if (prevAnswer !== void 0) {
       if (multi) {
         this.selectedOptions = prevAnswer.split("");
@@ -1906,10 +4089,18 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
         cls: "csv-quiz-multi-badge"
       });
     }
+    if (this.memoryActive && this.practiceSource[question.id]) {
+      const srcNew = this.practiceSource[question.id] === "new";
+      this.questionArea.createEl("span", {
+        text: srcNew ? "\u{1F195} \u65B0\u9898" : "\u{1F501} \u590D\u4E60",
+        cls: "csv-quiz-source-badge" + (srcNew ? " csv-quiz-source-badge-new" : " csv-quiz-source-badge-review")
+      });
+    }
     const stemDiv = this.questionArea.createDiv("csv-quiz-stem");
     import_obsidian4.MarkdownRenderer.render(this.app, question.stem, stemDiv, "", this).catch(
       (e) => console.error("CSV Quiz: markdown render failed", e)
     );
+    this.renderCardPanel(question);
     const optionsDiv = this.questionArea.createDiv("csv-quiz-options");
     const optionKeys = [
       { key: "A", text: question.optionA },
@@ -1985,6 +4176,53 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     this.updateNavigation();
     this.updatePracticeButton();
   }
+  /** 题目页眉底部：可折叠的记忆卡片信息栏（仅展示，不编辑）。 */
+  renderCardPanel(question) {
+    var _a;
+    const panel = this.questionArea.createDiv("csv-quiz-card-panel");
+    const header = panel.createDiv("csv-quiz-card-toggle");
+    header.createEl("span", { text: this.cardPanelOpen ? "\u25BC" : "\u25B6" });
+    header.createEl("span", { text: "\u8BB0\u5FC6\u5361\u7247" });
+    const body = panel.createDiv("csv-quiz-card-body");
+    body.classList.toggle("csv-quiz-card-body-hidden", !this.cardPanelOpen);
+    header.addEventListener("click", () => {
+      this.cardPanelOpen = !this.cardPanelOpen;
+      body.classList.toggle("csv-quiz-card-body-hidden", !this.cardPanelOpen);
+    });
+    const card = this.memoryCards[question.id];
+    if (!card) {
+      body.createEl("span", {
+        text: "\u8BE5\u9898\u6682\u65E0\u8BB0\u5FC6\u5361\u7247",
+        cls: "csv-quiz-card-empty"
+      });
+      return;
+    }
+    const stateNames = {
+      0: "\u65B0\u9898",
+      1: "\u5B66\u4E60\u4E2D",
+      2: "\u590D\u4E60",
+      3: "\u518D\u5B66\u4E60"
+    };
+    const fmtDate = (iso) => {
+      if (!iso) return "\u2014";
+      const t = new Date(iso).getTime();
+      return Number.isNaN(t) ? "\u2014" : new Date(iso).toLocaleString();
+    };
+    const rows = [
+      ["\u72B6\u6001", (_a = stateNames[card.state]) != null ? _a : String(card.state)],
+      ["\u7A33\u5B9A\u6027", `${card.stability.toFixed(2)} \u5929`],
+      ["\u96BE\u5EA6", card.difficulty.toFixed(2)],
+      ["\u4E0B\u6B21\u590D\u4E60", fmtDate(card.due)],
+      ["\u590D\u4E60\u6B21\u6570", String(card.reps)],
+      ["\u9057\u5FD8\u6B21\u6570", String(card.lapses)],
+      ["\u4E0A\u6B21\u590D\u4E60", fmtDate(card.lastReview)]
+    ];
+    for (const [label, value] of rows) {
+      const row = body.createDiv("csv-quiz-card-row");
+      row.createEl("span", { text: label, cls: "csv-quiz-card-label" });
+      row.createEl("span", { text: value, cls: "csv-quiz-card-value" });
+    }
+  }
   renderFeedback(question, displayOptions) {
     this.feedbackArea.empty();
     if (!this.showingAnswer) return;
@@ -2054,6 +4292,9 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     const isCorrect = selectedStr === this.normalizeAnswer(question.answer);
     this.showingAnswer = true;
     await this.recordAnswer(question, selectedStr, isCorrect);
+    if (this.memoryActive) {
+      this.applyMemoryReview(question.id, isCorrect);
+    }
     this.renderQuestion();
     this.updateProgress();
     const settings = this.getSettings();
@@ -2073,8 +4314,15 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
   /** 记录答题结果：计数、答题记录、错题标记（答对清除、答错置位），写 CSV 失败时回滚标记。不负责渲染。 */
   async recordAnswer(question, selectedStr, isCorrect) {
     this.answeredQuestions[question.id] = selectedStr;
+    if (this.practiceActive || this.memoryActive) {
+      this.practiceAnswered.add(question.id);
+    }
     if (isCorrect) {
-      this.correctCount++;
+      if (this.practiceActive || this.memoryActive) {
+        this.practiceCorrect++;
+      } else {
+        this.correctCount++;
+      }
       if (question.wrong === "1") {
         const prevWrong = question.wrong;
         question.wrong = "";
@@ -2082,7 +4330,11 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
         if (!ok) question.wrong = prevWrong;
       }
     } else {
-      this.wrongCount++;
+      if (this.practiceActive || this.memoryActive) {
+        this.practiceWrong++;
+      } else {
+        this.wrongCount++;
+      }
       if (question.wrong !== "1") {
         const prevWrong = question.wrong;
         question.wrong = "1";
@@ -2090,6 +4342,77 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
         if (!ok) question.wrong = prevWrong;
       }
     }
+  }
+  /** 解析卡片的 due 时间戳；非法字符串返回 null（视为未到期，不计入复习/计数）。 */
+  parseDueTime(card) {
+    const t = new Date(card.due).getTime();
+    return Number.isNaN(t) ? null : t;
+  }
+  /** 记忆练习判分：用 FSRS 更新卡片；答错时把 wrong 标记置 "1" 并写回 CSV（写失败回滚并提示）。 */
+  applyMemoryReview(id, correct) {
+    var _a, _b, _c;
+    this.memoryInitialized = true;
+    const now = /* @__PURE__ */ new Date();
+    const saved = this.memoryCards[id];
+    if (saved && (![0, 1, 2, 3].includes(saved.state) || saved.lastReview !== "" && Number.isNaN(new Date(saved.lastReview).getTime()))) {
+      new import_obsidian4.Notice("\u8BB0\u5FC6\u7EC3\u4E60\uFF1A\u5361\u7247\u6570\u636E\u5F02\u5E38\uFF0C\u5DF2\u8DF3\u8FC7\u8BE5\u9898");
+      return;
+    }
+    const q = (_a = this.filteredQuestions.find((x) => x.id === id)) != null ? _a : null;
+    let card;
+    if (saved) {
+      card = {
+        due: new Date(saved.due),
+        stability: saved.stability,
+        difficulty: saved.difficulty,
+        reps: saved.reps,
+        lapses: saved.lapses,
+        learning_steps: saved.learningSteps,
+        state: saved.state,
+        elapsed_days: 0,
+        scheduled_days: 0,
+        // B1: 必须 round-trip last_review，否则 FSRS 认为从未复习，间隔不会增长
+        last_review: saved.lastReview ? new Date(saved.lastReview) : void 0
+      };
+    } else {
+      card = createEmptyCard();
+    }
+    let rating;
+    if (!correct) {
+      rating = Rating.Again;
+    } else if (this.getSettings().memoryMarkRating && q && q.mastered === "1") {
+      rating = Rating.Easy;
+    } else if (this.getSettings().memoryMarkRating && q && q.favorite === "1") {
+      rating = Rating.Hard;
+    } else {
+      rating = Rating.Good;
+    }
+    const result = memoryScheduler.next(card, now, rating);
+    const c = result.card;
+    this.memoryCards[id] = {
+      state: c.state,
+      stability: c.stability,
+      difficulty: c.difficulty,
+      due: c.due.toISOString(),
+      reps: c.reps,
+      lapses: c.lapses,
+      learningSteps: c.learning_steps,
+      lastReview: c.last_review ? c.last_review.toISOString() : ""
+    };
+    if (!correct) {
+      if (q && q.wrong !== "1") {
+        const old = q.wrong;
+        q.wrong = "1";
+        void this.saveQuestionToCSV(q).then((ok) => {
+          if (!ok) {
+            q.wrong = old;
+            new import_obsidian4.Notice("\u8BB0\u5FC6\u7EC3\u4E60\uFF1A\u9519\u9898\u6807\u8BB0\u4FDD\u5B58\u5931\u8D25");
+          }
+        });
+      }
+    }
+    this.saveState();
+    (_c = (_b = this.plugin).refreshMemoryReminder) == null ? void 0 : _c.call(_b);
   }
   /** 「下一题」按钮：多选题未判定时先判定，否则跳转。 */
   async onNextClick() {
@@ -2106,23 +4429,47 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     }
     await this.nextQuestion();
   }
-  /** 重置答题进度：清除答题记录与统计，保留筛选条件。 */
-  async resetProgress() {
-    const modal = new ChoiceModal(this.app, {
-      title: "\u91CD\u7F6E\u7B54\u9898\u8FDB\u5EA6",
-      message: "\u5C06\u6E05\u9664\u6240\u6709\u7B54\u9898\u8BB0\u5F55\u3001\u6B63\u786E/\u9519\u8BEF\u7EDF\u8BA1\uFF0C\u5E76\u56DE\u5230\u7B2C\u4E00\u9898\u3002\u7B5B\u9009\u6761\u4EF6\u4FDD\u6301\u4E0D\u53D8\u3002\u786E\u5B9A\u91CD\u7F6E\u5417\uFF1F",
-      options: [
-        { label: "\u91CD\u7F6E", value: "reset", cta: true },
-        { label: "\u53D6\u6D88", value: "cancel" }
-      ]
-    });
-    modal.open();
-    const res = await modal.promise;
-    if (res !== "reset") return;
+  /** 按用户选择清理进度：records=刷题记录，cards=记忆卡片，all=全部。保留筛选条件。 */
+  async applyResetChoice(choice) {
+    var _a, _b;
+    if (this.isClosed || !this.canPersistState) {
+      const state = this.stateManager.getState();
+      if (state) {
+        if (choice !== "cards") {
+          state.correctCount = 0;
+          state.wrongCount = 0;
+          state.answeredQuestions = {};
+        }
+        if (choice !== "records") {
+          state.memoryCards = {};
+          state.memoryNewDate = "";
+          state.memoryNewCountToday = 0;
+          state.memoryPendingNew = [];
+        }
+        await this.stateManager.saveStateImmediately(state);
+      }
+      new import_obsidian4.Notice(
+        choice === "all" ? "\u8FDB\u5EA6\u5DF2\u91CD\u7F6E" : choice === "records" ? "\u5237\u9898\u8BB0\u5F55\u5DF2\u6E05\u7406" : "\u8BB0\u5FC6\u5361\u7247\u5DF2\u5220\u9664"
+      );
+      return;
+    }
     await this.saveCurrentEdit();
-    this.correctCount = 0;
-    this.wrongCount = 0;
-    this.answeredQuestions = {};
+    if (this.practiceActive) this.exitRandomPractice();
+    if (this.memoryActive) this.exitMemoryPractice();
+    if (choice !== "cards") {
+      this.correctCount = 0;
+      this.wrongCount = 0;
+      this.answeredQuestions = {};
+    }
+    if (choice !== "records") {
+      this.memoryCards = {};
+      this.memoryNewDate = "";
+      this.memoryNewCountToday = 0;
+      this.memoryPendingNew = [];
+    }
+    if (choice === "all") {
+      this.memoryInitialized = false;
+    }
     this.currentIndex = 0;
     this.currentShuffledQId = null;
     this.selectedOption = null;
@@ -2130,7 +4477,17 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     this.cancelAutoNext();
     this.renderQuestion();
     this.saveState();
-    new import_obsidian4.Notice("\u7B54\u9898\u8FDB\u5EA6\u5DF2\u91CD\u7F6E");
+    (_b = (_a = this.plugin).refreshMemoryReminder) == null ? void 0 : _b.call(_a);
+    new import_obsidian4.Notice(
+      choice === "all" ? "\u8FDB\u5EA6\u5DF2\u91CD\u7F6E" : choice === "records" ? "\u5237\u9898\u8BB0\u5F55\u5DF2\u6E05\u7406" : "\u8BB0\u5FC6\u5361\u7247\u5DF2\u5220\u9664"
+    );
+  }
+  /** 重置答题进度：让用户选择清理刷题记录/记忆卡片，保留筛选条件。 */
+  async resetProgress() {
+    const res = await askResetChoice(this.app);
+    if (this.isClosed) return;
+    if (!res) return;
+    await this.applyResetChoice(res);
   }
   renderCheckboxArea(question) {
     this.checkboxArea.empty();
@@ -2298,6 +4655,9 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     const isCorrect = selectedKey === question.answer;
     this.showingAnswer = true;
     await this.recordAnswer(question, selectedKey, isCorrect);
+    if (this.memoryActive) {
+      this.applyMemoryReview(question.id, isCorrect);
+    }
     this.renderQuestion();
     this.updateProgress();
     const settings = this.getSettings();
@@ -2336,9 +4696,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
           this.currentIndex = newIdx + 1;
         } else {
           this.currentIndex = newIdx;
-          if (this.practiceActive && this.filteredQuestions.every(
-            (q) => this.answeredQuestions[q.id] !== void 0
-          )) {
+          if ((this.practiceActive || this.memoryActive) && this.filteredQuestions.every((q) => this.practiceAnswered.has(q.id))) {
             new import_obsidian4.Notice(`\u7EC3\u4E60\u5B8C\u6210\uFF01\u5171 ${this.filteredQuestions.length} \u9898`);
           }
           return;
@@ -2464,7 +4822,9 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
   goToNextUnanswered() {
     if (this.filteredQuestions.length === 0) return;
     for (let i = this.currentIndex + 1; i < this.filteredQuestions.length; i++) {
-      if (this.answeredQuestions[this.filteredQuestions[i].id] === void 0) {
+      const id = this.filteredQuestions[i].id;
+      const unanswered = this.practiceActive || this.memoryActive ? !this.practiceAnswered.has(id) : this.answeredQuestions[id] === void 0;
+      if (unanswered) {
         this.currentIndex = i;
         this.currentShuffledQId = null;
         this.cancelAutoNext();
@@ -2473,9 +4833,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
         return;
       }
     }
-    if (this.practiceActive && this.filteredQuestions.every(
-      (q) => this.answeredQuestions[q.id] !== void 0
-    )) {
+    if ((this.practiceActive || this.memoryActive) && this.filteredQuestions.every((q) => this.practiceAnswered.has(q.id))) {
       new import_obsidian4.Notice(`\u7EC3\u4E60\u5B8C\u6210\uFF01\u5171 ${this.filteredQuestions.length} \u9898`);
     } else {
       new import_obsidian4.Notice("\u6CA1\u6709\u66F4\u591A\u672A\u7B54\u9898");
@@ -2485,6 +4843,15 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     const total = this.filteredQuestions.length;
     const current = total > 0 && this.currentIndex >= 0 ? this.currentIndex + 1 : 0;
     this.progressEl.textContent = `\u8FDB\u5EA6: ${current}/${total}`;
+    if (this.practiceActive || this.memoryActive) {
+      this.statsEl.textContent = `\u2705 ${this.practiceCorrect}  \u274C ${this.practiceWrong}`;
+      const answered = this.practiceCorrect + this.practiceWrong;
+      if (answered > 0) {
+        const rate = (this.practiceCorrect / answered * 100).toFixed(1);
+        this.statsEl.textContent += `  (${rate}%)`;
+      }
+      return;
+    }
     this.statsEl.textContent = `\u2705 ${this.correctCount}  \u274C ${this.wrongCount}`;
     const totalAnswered = this.correctCount + this.wrongCount;
     if (totalAnswered > 0) {
@@ -2494,6 +4861,11 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
   }
   /** 重新计算筛选结果并定位指定题目的新位置（题目被筛掉时回退到第一题/空状态）。 */
   reFilterAndLocate(questionId) {
+    if (this.practiceActive || this.memoryActive) {
+      const idx2 = this.filteredQuestions.findIndex((q) => q.id === questionId);
+      this.currentIndex = idx2 >= 0 ? idx2 : 0;
+      return;
+    }
     this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
     const idx = this.filteredQuestions.findIndex((q) => q.id === questionId);
     if (idx >= 0) {
@@ -2594,10 +4966,17 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
       this.filterRepeat = settings.defaultFilterRepeat;
       this.filterWrong = settings.defaultFilterWrong;
       this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
+      this.exitRandomPractice();
+      this.exitMemoryPractice();
       this.currentIndex = 0;
       this.correctCount = 0;
       this.wrongCount = 0;
       this.answeredQuestions = {};
+      this.memoryCards = {};
+      this.memoryNewDate = "";
+      this.memoryNewCountToday = 0;
+      this.memoryPendingNew = [];
+      this.memoryInitialized = false;
       this.currentShuffledQId = null;
       this.selectedOption = null;
       this.selectedOptions = [];
@@ -2623,7 +5002,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
   }
   buildCurrentState() {
     let savedIndex = this.currentIndex;
-    if (this.practiceActive) {
+    if (this.practiceActive || this.memoryActive) {
       if (this.practiceFocusId) {
         const idx = this.applyFiltersTo(this.orderedQuestions).findIndex(
           (q) => q.id === this.practiceFocusId
@@ -2648,7 +5027,15 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
       filterMastered: this.filterMastered,
       filterRepeat: this.filterRepeat,
       filterWrong: this.filterWrong,
-      answeredQuestions: this.answeredQuestions
+      answeredQuestions: this.answeredQuestions,
+      memoryCards: this.memoryCards,
+      // M1: 每日新题配额随进度持久化（跨会话/跨天保持一致）
+      memoryNewDate: this.memoryNewDate,
+      memoryNewCountToday: this.memoryNewCountToday,
+      // A1: 当日已选未答的新题 id 随进度持久化
+      memoryPendingNew: this.memoryPendingNew,
+      // C-1: 记忆练习初始化标记随进度持久化
+      memoryInitialized: this.memoryInitialized
     };
   }
   saveState() {
@@ -2782,6 +5169,10 @@ var StateManager = class {
 
 // src/main.ts
 var CSVQuizPlugin = class extends import_obsidian5.Plugin {
+  constructor() {
+    super(...arguments);
+    this.memoryReminderTimer = null;
+  }
   async onload() {
     this.stateManager = new StateManager(this);
     this.csvWriteQueue = new CSVWriteQueue(this.app);
@@ -2807,8 +5198,18 @@ var CSVQuizPlugin = class extends import_obsidian5.Plugin {
       }
     });
     this.addSettingTab(new CSVQuizSettingTab(this.app, this));
+    this.statusBar = this.addStatusBarItem();
+    this.updateMemoryReminder();
+    this.memoryReminderTimer = window.setInterval(
+      () => this.updateMemoryReminder(),
+      5 * 60 * 1e3
+    );
   }
   onunload() {
+    if (this.memoryReminderTimer !== null) {
+      window.clearInterval(this.memoryReminderTimer);
+      this.memoryReminderTimer = null;
+    }
     const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ);
     for (const leaf of leaves) {
       const view = leaf.view;
@@ -2834,8 +5235,29 @@ var CSVQuizPlugin = class extends import_obsidian5.Plugin {
       void view.refresh();
     }
   }
+  /**
+   * 根据当前状态栏显示「待复习」卡片数提醒；无到期卡片、
+   * 无状态或设置关闭时清空文本。
+   */
+  updateMemoryReminder() {
+    if (!this.settings || !this.settings.memoryReminder) {
+      this.statusBar.setText("");
+      return;
+    }
+    const state = this.stateManager.getState();
+    if (!state) {
+      this.statusBar.setText("");
+      return;
+    }
+    const dueCount = countDueCards(state.memoryCards);
+    this.statusBar.setText(dueCount > 0 ? "\u{1F9E0} \u5F85\u590D\u4E60 " + dueCount : "");
+  }
+  /** 供其他文件（如设置页）在设置变更后立即刷新状态栏提醒。 */
+  refreshMemoryReminder() {
+    this.updateMemoryReminder();
+  }
   async loadSettings() {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m;
     const data = await this.loadData() || {
       settings: {
         csvPath: "\u9898\u5E93.csv",
@@ -2847,7 +5269,11 @@ var CSVQuizPlugin = class extends import_obsidian5.Plugin {
         defaultFilterFavorite: "",
         defaultFilterMastered: "",
         defaultFilterRepeat: "",
-        defaultFilterWrong: ""
+        defaultFilterWrong: "",
+        memoryEnabled: true,
+        memoryDailyNew: 20,
+        memoryReminder: true,
+        memoryMarkRating: true
       },
       quizState: null
     };
@@ -2861,10 +5287,15 @@ var CSVQuizPlugin = class extends import_obsidian5.Plugin {
       defaultFilterFavorite: (_f = data.settings.defaultFilterFavorite) != null ? _f : "",
       defaultFilterMastered: (_g = data.settings.defaultFilterMastered) != null ? _g : "",
       defaultFilterRepeat: (_h = data.settings.defaultFilterRepeat) != null ? _h : "",
-      defaultFilterWrong: (_i = data.settings.defaultFilterWrong) != null ? _i : ""
+      defaultFilterWrong: (_i = data.settings.defaultFilterWrong) != null ? _i : "",
+      memoryEnabled: (_j = data.settings.memoryEnabled) != null ? _j : true,
+      memoryDailyNew: (_k = data.settings.memoryDailyNew) != null ? _k : 20,
+      memoryReminder: (_l = data.settings.memoryReminder) != null ? _l : true,
+      memoryMarkRating: (_m = data.settings.memoryMarkRating) != null ? _m : true
     };
   }
   async saveSettings() {
+    this.updateMemoryReminder();
     await this.stateManager.saveSettings(this.settings);
   }
   async flushSettingsSave() {
@@ -2872,11 +5303,38 @@ var CSVQuizPlugin = class extends import_obsidian5.Plugin {
   }
   /**
    * 清除已保存的刷题进度；若面板已打开则立即重建会话。
-   * 用于开启「随机题目顺序」等需要重排显示顺序的场景：面板打开时 refresh()
-   * 会以新设置重新 buildDisplayOrder（shuffle）；面板未打开时仅清空磁盘进度，
-   * 下次打开走 applyFreshStart 同样会 shuffle。
+   * choice 省略或为 "all" 时为「全部重置」语义（清空 data.json 并刷新面板、
+   * 重读题库，用于设置页「全部重置」与开启「随机题目顺序」等场景）；
+   * 传入 "records"/"cards" 时为设置页的分项清理（不重载题库、保留筛选）。
    */
-  async resetQuizProgress() {
+  async resetQuizProgress(choice) {
+    if (choice === "records" || choice === "cards") {
+      const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
+      const view = leaf == null ? void 0 : leaf.view;
+      if (view) {
+        await view.applyResetChoice(choice);
+      } else {
+        const state = this.stateManager.getState();
+        if (state) {
+          if (choice === "records") {
+            state.correctCount = 0;
+            state.wrongCount = 0;
+            state.answeredQuestions = {};
+          } else {
+            state.memoryCards = {};
+            state.memoryNewDate = "";
+            state.memoryNewCountToday = 0;
+            state.memoryPendingNew = [];
+          }
+          await this.stateManager.saveStateImmediately(state);
+          new import_obsidian5.Notice(
+            choice === "records" ? "\u5237\u9898\u8BB0\u5F55\u5DF2\u6E05\u7406" : "\u8BB0\u5FC6\u5361\u7247\u5DF2\u5220\u9664"
+          );
+        }
+        this.refreshMemoryReminder();
+      }
+      return;
+    }
     await this.stateManager.clearState();
     this.refreshQuiz();
   }
@@ -2890,4 +5348,9 @@ papaparse/papaparse.min.js:
   https://github.com/mholt/PapaParse
   License: MIT
   *)
+
+ts-fsrs/dist/index.mjs:
+ts-fsrs/dist/index.mjs:
+ts-fsrs/dist/index.mjs:
+  (* istanbul ignore next -- @preserve *)
 */

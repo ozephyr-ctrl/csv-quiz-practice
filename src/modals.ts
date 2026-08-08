@@ -84,6 +84,42 @@ export class ChoiceModal extends Modal {
   }
 }
 
+/** 弹「重置刷题进度」分项选择框；返回 "records"/"cards"/"all"，取消或关闭返回 null。 */
+export function askResetChoice(
+  app: App
+): Promise<"records" | "cards" | "all" | null> {
+  const modal = new ChoiceModal(app, {
+    title: "重置刷题进度",
+    message:
+      "选择要清理的内容。刷题记录：答题记录与正确/错误统计；记忆卡片：FSRS 间隔重复数据（到期安排、稳定性、难度等）。",
+    options: [
+      {
+        label: "仅清理刷题记录",
+        value: "records",
+        description: "清除答题记录与统计，保留记忆卡片",
+      },
+      {
+        label: "仅删除记忆卡片",
+        value: "cards",
+        description: "清除 FSRS 间隔重复数据，保留答题记录",
+      },
+      {
+        label: "全部重置",
+        value: "all",
+        description: "同时清理刷题记录与记忆卡片",
+        cta: true,
+      },
+      { label: "取消", value: "cancel" },
+    ],
+  });
+  modal.open();
+  return modal.promise.then((res) =>
+    res === null || res === "cancel"
+      ? null
+      : (res as "records" | "cards" | "all")
+  );
+}
+
 /**
  * Promise-based modal for picking tags from a list of all existing tags.
  * Displays checkboxes for each tag, pre-checked based on currentTags.

@@ -10,14 +10,14 @@ import {
   ToggleComponent,
 } from "obsidian";
 import { PluginSettings, DEFAULT_SETTINGS } from "./types";
-import { ChoiceModal } from "./modals";
+import { ChoiceModal, askResetChoice } from "./modals";
 
 interface PluginHandle {
   settings: PluginSettings;
   refreshQuiz(): void;
   saveSettings(): Promise<void>;
   flushSettingsSave(): Promise<void>;
-  resetQuizProgress(): Promise<void>;
+  resetQuizProgress(choice?: "records" | "cards" | "all"): Promise<void>;
 }
 
 export class CSVQuizSettingTab extends PluginSettingTab {
@@ -58,6 +58,38 @@ export class CSVQuizSettingTab extends PluginSettingTab {
         name: "随机选项顺序",
         desc: "开启后每个题目的选项顺序随机排列",
         control: { type: "toggle", key: "randomOptions" },
+      },
+      {
+        type: "group",
+        heading: "记忆练习",
+        items: [
+          {
+            name: "记忆练习",
+            desc: "启用基于记忆曲线的练习（FSRS 间隔重复调度）",
+            control: { type: "toggle", key: "memoryEnabled" },
+          },
+          {
+            name: "每日新题数",
+            desc: "记忆练习每天引入的新题数量上限",
+            control: {
+              type: "number",
+              key: "memoryDailyNew",
+              min: 1,
+              max: 100,
+              defaultValue: DEFAULT_SETTINGS.memoryDailyNew,
+            },
+          },
+          {
+            name: "到期提醒",
+            desc: "在状态栏显示今日待复习题数提醒",
+            control: { type: "toggle", key: "memoryReminder" },
+          },
+          {
+            name: "收藏/掌握参与评分",
+            desc: "记忆练习答对时按标记评分：掌握=Easy（间隔拉长更快）、收藏=Hard（复习更保守），同题掌握优先；答错一律 Again。",
+            control: { type: "toggle", key: "memoryMarkRating" },
+          },
+        ],
       },
       {
         name: "答对自动跳转延迟（秒）",
@@ -128,8 +160,10 @@ export class CSVQuizSettingTab extends PluginSettingTab {
         items: [
           {
             name: "重置刷题进度",
-            desc: "清除所有答题记录、统计和筛选状态，重新加载题库",
-            action: () => this.plugin.refreshQuiz(),
+            desc: "按选择清理答题记录和/或记忆卡片；全部重置会重新加载题库",
+            action: () => {
+              void this.handleResetProgress();
+            },
           },
         ],
       },
@@ -156,6 +190,15 @@ export class CSVQuizSettingTab extends PluginSettingTab {
     }
     (this.plugin.settings as unknown as Record<string, unknown>)[key] = value;
     await this.plugin.saveSettings();
+  }
+
+  /**
+   * 「重置刷题进度」按钮：弹分项选择框后按选择清理。
+   */
+  private async handleResetProgress(): Promise<void> {
+    const res = await askResetChoice(this.app);
+    if (!res) return;
+    await this.plugin.resetQuizProgress(res);
   }
 
   /**
@@ -221,6 +264,35 @@ export class CSVQuizSettingTab extends PluginSettingTab {
       "开启后每个题目的选项顺序随机排列",
       "randomOptions"
     );
+
+    new Setting(containerEl).setName("记忆练习").setHeading();
+    this.addToggleSetting(
+      containerEl,
+      "记忆练习",
+      "启用基于记忆曲线的练习（FSRS 间隔重复调度）",
+      "memoryEnabled"
+    );
+    this.addNumberSetting(
+      containerEl,
+      "每日新题数",
+      "记忆练习每天引入的新题数量上限",
+      "memoryDailyNew",
+      1,
+      100
+    );
+    this.addToggleSetting(
+      containerEl,
+      "到期提醒",
+      "在状态栏显示今日待复习题数提醒",
+      "memoryReminder"
+    );
+    this.addToggleSetting(
+      containerEl,
+      "收藏/掌握参与评分",
+      "记忆练习答对时按标记评分：掌握=Easy（间隔拉长更快）、收藏=Hard（复习更保守），同题掌握优先；答错一律 Again。",
+      "memoryMarkRating"
+    );
+
     this.addNumberSetting(
       containerEl,
       "答对自动跳转延迟（秒）",
@@ -268,10 +340,10 @@ export class CSVQuizSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("管理").setHeading();
     new Setting(containerEl)
       .setName("重置刷题进度")
-      .setDesc("清除所有答题记录、统计和筛选状态，重新加载题库")
+      .setDesc("按选择清理答题记录和/或记忆卡片；全部重置会重新加载题库")
       .addButton((btn) =>
         btn.setButtonText("重置").onClick(() => {
-          this.plugin.refreshQuiz();
+          void this.handleResetProgress();
         })
       );
   }

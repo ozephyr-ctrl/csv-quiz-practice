@@ -10,6 +10,7 @@ import {
   Question,
   QuizSessionState,
   PluginSettings,
+  MemoryCard,
   VIEW_TYPE_QUIZ,
 } from "./types";
 import {
@@ -24,8 +25,17 @@ import {
   CSVWriteQueue,
 } from "./csvHandler";
 import { StateManager } from "./stateManager";
-import { shuffle, sortByDisplayOrder, quizStateEquals } from "./utils";
-import { ChoiceModal, TagPickerModal } from "./modals";
+import {
+  shuffle,
+  sortByDisplayOrder,
+  quizStateEquals,
+  countDueCards,
+} from "./utils";
+import { ChoiceModal, TagPickerModal, askResetChoice } from "./modals";
+import { fsrs, createEmptyCard, Rating, State, type Card } from "ts-fsrs";
+
+/** FSRS 调度器单例：纯函数调度、不持有状态，可跨会话复用（模块级）。 */
+const memoryScheduler = fsrs();
 
 export class QuizView extends ItemView {
   private plugin: Plugin;
@@ -140,6 +150,7 @@ export class QuizView extends ItemView {
     this.stateManager.cancelScheduledSave();
     // 练习模式为临时会话：关闭前恢复常规位置，避免保存练习内的索引
     this.exitRandomPractice();
+    this.exitMemoryPractice();
     if (this.textFilterTimer !== null) {
       window.clearTimeout(this.textFilterTimer);
       this.textFilterTimer = null;
@@ -352,6 +363,11 @@ export class QuizView extends ItemView {
     this.correctCount = 0;
     this.wrongCount = 0;
     this.answeredQuestions = {};
+    this.memoryCards = {};
+    this.memoryNewDate = "";
+    this.memoryNewCountToday = 0;
+    this.memoryPendingNew = [];
+    this.memoryInitialized = false;
     this.currentShuffledQId = null;
     this.selectedOption = null;
     this.selectedOptions = [];
@@ -389,6 +405,34 @@ export class QuizView extends ItemView {
     this.correctCount = savedState.correctCount;
     this.wrongCount = savedState.wrongCount;
     this.answeredQuestions = savedState.answeredQuestions || {};
+    this.memoryCards = savedState.memoryCards || {};
+    // M1: 每日新题配额跨会话恢复
+    this.memoryNewDate = savedState.memoryNewDate || "";
+    this.memoryNewCountToday = savedState.memoryNewCountToday || 0;
+    // A1: 当日已选未答的新题 id 跨会话恢复
+    this.memoryPendingNew = savedState.memoryPendingNew || [];
+    // C-1: 记忆练习初始化标记跨会话恢复
+    this.memoryInitialized = !!savedState.memoryInitialized;
+    // M4: 清理题库中已不存在的僵尸记忆卡片（applyRestore 在 loadQuestions 之后调用，allQuestions 已填充）
+    this.pruneMemoryCards();
+  }
+
+  /** 清理题库中已不存在的僵尸记忆卡片（CSV 删题后保持计数一致）。 */
+  private pruneMemoryCards(): void {
+    const ids = new Set(this.allQuestions.map((q) => q.id));
+    let changed = false;
+    for (const k of Object.keys(this.memoryCards)) {
+      if (!ids.has(k)) {
+        delete this.memoryCards[k];
+        changed = true;
+      }
+    }
+    if (changed) {
+      void this.stateManager.saveStateImmediately(this.buildCurrentState());
+      // A2: 清理僵尸卡后立即刷新状态栏提醒（实际实例为 CSVQuizPlugin，故 cast 调用）
+      (this.plugin as unknown as { refreshMemoryReminder?: () => void })
+        .refreshMemoryReminder?.();
+    }
   }
 
   /** On CSV load failure: keep filters from saved state so the UI is not blank. */
@@ -624,6 +668,21 @@ export class QuizView extends ItemView {
     this.practiceCountEl = practiceRow.createSpan({
       cls: "csv-quiz-practice-count",
     });
+
+    // 记忆练习：FSRS 间隔重复，到期题优先 + 每日新题（受当前筛选影响）。
+    // M3: memoryEnabled 关闭时不创建按钮（memoryBtn 保持 undefined，updatePracticeButton 已有保护）
+    if (settings.memoryEnabled) {
+      this.memoryBtn = practiceRow.createEl("button", {
+        text: "🧠 记忆练习",
+        cls: "csv-quiz-btn csv-quiz-btn-sm csv-quiz-practice-btn",
+      });
+      this.memoryBtn.addEventListener("click", () => {
+        this.toggleMemoryPractice();
+      });
+      this.memoryCountEl = practiceRow.createSpan({
+        cls: "csv-quiz-practice-count",
+      });
+    }
   }
 
   private cat1Select!: HTMLSelectElement;
@@ -634,11 +693,37 @@ export class QuizView extends ItemView {
   private textFilterTimer: number | null = null;
   private practiceBtn!: HTMLButtonElement;
   private practiceCountEl!: HTMLElement;
+  private memoryBtn!: HTMLButtonElement;
+  private memoryCountEl!: HTMLElement;
   /** 随机练习模式：练习集为临时会话，不持久化，重开面板回到常规模式。 */
   private practiceActive: boolean = false;
   private practiceIds: string[] = [];
   /** 进入练习前的常规模式定位题号，退出时据此恢复位置。 */
   private practiceFocusId: string | null = null;
+  /** 记忆练习模式：练习集为临时会话，不持久化，重开面板回到常规模式。 */
+  private memoryActive: boolean = false;
+  private memoryIds: string[] = [];
+  /** 记忆练习的记忆卡片（题 id → 卡片），随答题进度一起持久化。 */
+  private memoryCards: Record<string, MemoryCard> = {};
+  /** 防双开：首次重置确认框 await 期间禁止重复进入（M2）。 */
+  private memoryEnabling: boolean = false;
+  /** 每日新题配额：最近一次启用记忆练习的自然日（本地日期 "YYYY-MM-DD"）。 */
+  private memoryNewDate: string = "";
+  /** 每日新题配额：当日已取的新题数量。 */
+  private memoryNewCountToday: number = 0;
+  /** 当日已选取但尚未作答的新题 id（退出再进仍保留，不重复扣配额）。 */
+  private memoryPendingNew: string[] = [];
+  /** 记忆练习是否已初始化过（至少判分一次）；仅删除记忆卡片时保留，避免重复触发首次启用重置提示。 */
+  private memoryInitialized: boolean = false;
+  /** 练习模式内本次会话已答的题 id 集合（练习内已答判断/渲染/计数均基于它）。 */
+  private practiceAnswered: Set<string> = new Set();
+  /** 练习模式本次会话的答题统计（不累加全局统计） */
+  private practiceCorrect: number = 0;
+  private practiceWrong: number = 0;
+  /** 记忆练习集中每题的来源（复习/新题），用于题目页眉显著标注。 */
+  private practiceSource: Record<string, "new" | "review"> = {};
+  /** 记忆卡片信息栏折叠状态（默认收起，仅影响本栏显示，不重渲染题目）。 */
+  private cardPanelOpen: boolean = false;
 
   private updateFilterUI(): void {
     if (!this.cat1Select) return;
@@ -702,6 +787,8 @@ export class QuizView extends ItemView {
   /** 随机练习：按当前筛选条件筛出未答题，随机取最多 100 道作为练习集（不足自适应）。 */
   private enableRandomPractice(): void {
     if (this.practiceActive) return;
+    // 进入任一练习模式前互斥退出另一个
+    if (this.memoryActive) this.exitMemoryPractice();
 
     const pool = this.applyFiltersTo(this.orderedQuestions);
     const unanswered = pool.filter(
@@ -716,6 +803,10 @@ export class QuizView extends ItemView {
     this.practiceFocusId = this.filteredQuestions[this.currentIndex]?.id ?? null;
     this.practiceIds = picked.map((q) => q.id);
     this.practiceActive = true;
+    // 练习内已答集合：本次会话从零开始
+    this.practiceAnswered = new Set();
+    this.practiceCorrect = 0;
+    this.practiceWrong = 0;
     // 练习集即当前显示列表（已随机序），常规 displayOrder/筛选/进度原样保留
     this.filteredQuestions = picked;
     this.currentIndex = 0;
@@ -731,6 +822,7 @@ export class QuizView extends ItemView {
     if (!this.practiceActive) return;
     this.practiceActive = false;
     this.practiceIds = [];
+    this.practiceAnswered.clear();
 
     this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
     if (this.practiceFocusId) {
@@ -763,20 +855,199 @@ export class QuizView extends ItemView {
     }
   }
 
-  /** 同步练习按钮的文案/高亮与完成计数。 */
+  /**
+   * 记忆练习：到期题（FSRS due 已到）按紧迫度优先 + 每日新题（随机取），
+   * 均受当前筛选条件影响。练习集为临时会话，不持久化。
+   */
+  private async enableMemoryPractice(): Promise<void> {
+    // M3: memoryEnabled 设置项必须 gate 行为
+    if (!this.getSettings().memoryEnabled) {
+      new Notice("记忆练习已关闭，请在设置中开启");
+      return;
+    }
+    // M2: 防双开——确认框 await 期间禁止重复进入
+    if (this.memoryActive || this.memoryEnabling) return;
+    this.memoryEnabling = true;
+    try {
+      // 进入任一练习模式前互斥退出另一个
+      if (this.practiceActive) this.exitRandomPractice();
+
+      // 首次启用检测：已有答题进度但无记忆数据 → 需重置进度才能开始。
+      // C-1: memoryInitialized 已置位（用户显式删过卡片或已判分过）则不再弹提示
+      if (
+        !this.memoryInitialized &&
+        Object.keys(this.memoryCards).length === 0 &&
+        Object.keys(this.answeredQuestions).length > 0
+      ) {
+        const modal = new ChoiceModal(this.app, {
+          title: "启用记忆练习需要重置进度",
+          message:
+            "检测到已有答题记录但没有记忆数据，记忆练习需要重置进度（清除答题记录/统计/记忆卡片）后重新开始。是否重置并开始？",
+          options: [
+            { label: "重置并开始", value: "reset", cta: true },
+            { label: "取消", value: "cancel" },
+          ],
+        });
+        modal.open();
+        const res = await modal.promise;
+        // L2: 弹窗期间视图被关闭 → 中止（finally 会复位 memoryEnabling）
+        if (this.isClosed) return;
+        if (res !== "reset") return;
+        // 清空进度（与 resetProgress 的清空逻辑等价；不弹提示、不退出面板）
+        this.correctCount = 0;
+        this.wrongCount = 0;
+        this.answeredQuestions = {};
+        this.memoryCards = {};
+        this.memoryNewDate = "";
+        this.memoryNewCountToday = 0;
+        this.memoryPendingNew = [];
+        this.memoryInitialized = false;
+        this.currentIndex = 0;
+        this.currentShuffledQId = null;
+        this.selectedOption = null;
+        this.selectedOptions = [];
+        this.cancelAutoNext();
+      }
+
+      const pool = this.applyFiltersTo(this.orderedQuestions);
+      const now = new Date();
+      // 到期题：有卡片且 due <= 当前时间（非法 due 视为未到期），按 due 升序（最紧迫在前）
+      const due = pool
+        .filter((q) => {
+          const card = this.memoryCards[q.id];
+          const t = card ? this.parseDueTime(card) : null;
+          return t !== null && t <= now.getTime();
+        })
+        .sort(
+          (a, b) =>
+            (this.parseDueTime(this.memoryCards[a.id]) ?? 0) -
+            (this.parseDueTime(this.memoryCards[b.id]) ?? 0)
+        );
+      // M1: 每日新题配额按自然日累计（跨天自动重置计数）
+      const today = (() => {
+        const d = new Date();
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      })();
+      if (this.memoryNewDate !== today) {
+        this.memoryNewDate = today;
+        this.memoryNewCountToday = 0;
+        // A1: 跨天后上一日的"已选未答"新题作废
+        this.memoryPendingNew = [];
+      }
+      // A1: 新题——当日已选未答的优先保留（不重复扣配额），其余按剩余配额随机补充
+      const noCard = pool.filter((q) => this.memoryCards[q.id] === undefined);
+      const pendingSet = new Set(this.memoryPendingNew);
+      const pendingFresh = noCard.filter((q) => pendingSet.has(q.id));
+      const quota = Math.max(
+        0,
+        this.getSettings().memoryDailyNew - (this.memoryNewCountToday || 0)
+      );
+      const freshNew = shuffle(
+        noCard.filter((q) => !pendingSet.has(q.id))
+      ).slice(0, quota);
+      const fresh = [...pendingFresh, ...freshNew];
+      this.memoryNewCountToday = (this.memoryNewCountToday || 0) + freshNew.length;
+      this.memoryPendingNew = fresh.map((q) => q.id);
+
+      if (due.length === 0 && fresh.length === 0) {
+        new Notice("今日没有待复习或可学习的新题");
+        return;
+      }
+
+      this.practiceFocusId = this.filteredQuestions[this.currentIndex]?.id ?? null;
+      this.memoryIds = [...due.map((q) => q.id), ...fresh.map((q) => q.id)];
+      this.filteredQuestions = [...due, ...fresh];
+      this.currentIndex = 0;
+      this.memoryActive = true;
+      // 练习内已答集合：本次会话从零开始
+      this.practiceAnswered = new Set();
+      this.practiceCorrect = 0;
+      this.practiceWrong = 0;
+      // 练习集来源标记：到期题=复习，新题=新
+      this.practiceSource = {};
+      for (const q of due) this.practiceSource[q.id] = "review";
+      for (const q of fresh) this.practiceSource[q.id] = "new";
+      this.currentShuffledQId = null;
+      this.cancelAutoNext();
+      this.renderQuestion();
+      this.saveState();
+      new Notice(`记忆练习：到期 ${due.length} 题 + 新题 ${fresh.length} 题`);
+    } finally {
+      // M2: 无论任何分支返回，都复位防双开标志
+      this.memoryEnabling = false;
+    }
+  }
+
+  /** 退出记忆练习模式：恢复常规筛选结果并定位到进入前的位置。不渲染、不保存，由调用方决定。 */
+  private exitMemoryPractice(): void {
+    if (!this.memoryActive) return;
+    this.memoryActive = false;
+    this.memoryIds = [];
+    this.practiceAnswered.clear();
+    this.practiceSource = {};
+
+    this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
+    if (this.practiceFocusId) {
+      const idx = this.filteredQuestions.findIndex(
+        (q) => q.id === this.practiceFocusId
+      );
+      if (idx >= 0) {
+        this.currentIndex = idx;
+      } else if (this.filteredQuestions.length > 0) {
+        this.currentIndex = 0;
+      } else {
+        this.currentIndex = -1;
+      }
+    } else {
+      this.currentIndex = this.filteredQuestions.length > 0 ? 0 : -1;
+    }
+    this.practiceFocusId = null;
+    this.currentShuffledQId = null;
+    this.cancelAutoNext();
+  }
+
+  private toggleMemoryPractice(): void {
+    if (this.memoryActive) {
+      this.exitMemoryPractice();
+      this.renderQuestion();
+      this.saveState();
+      new Notice("已退出记忆练习");
+    } else {
+      void this.enableMemoryPractice();
+    }
+  }
+
+  /** 同步练习按钮（随机/记忆）的文案/高亮与完成计数。 */
   private updatePracticeButton(): void {
     if (!this.practiceBtn) return;
     if (this.practiceActive) {
       this.practiceBtn.setText("退出随机练习");
       this.practiceBtn.addClass("csv-quiz-practice-btn-active");
-      const answered = this.practiceIds.filter(
-        (id) => this.answeredQuestions[id] !== undefined
+      const answered = this.practiceIds.filter((id) =>
+        this.practiceAnswered.has(id)
       ).length;
       this.practiceCountEl.setText(` 已完成 ${answered}/${this.practiceIds.length}`);
     } else {
       this.practiceBtn.setText("🎲 随机练习（100 题）");
       this.practiceBtn.removeClass("csv-quiz-practice-btn-active");
       this.practiceCountEl.setText("");
+    }
+
+    // 记忆练习按钮：活动时显示完成计数，非活动时显示今日待复习题数（纯全局计数，不受筛选影响）
+    if (!this.memoryBtn) return;
+    if (this.memoryActive) {
+      this.memoryBtn.setText("退出记忆练习");
+      this.memoryBtn.addClass("csv-quiz-practice-btn-active");
+      const answered = this.memoryIds.filter((id) =>
+        this.practiceAnswered.has(id)
+      ).length;
+      this.memoryCountEl.setText(` 已完成 ${answered}/${this.memoryIds.length}`);
+    } else {
+      this.memoryBtn.setText("🧠 记忆练习");
+      this.memoryBtn.removeClass("csv-quiz-practice-btn-active");
+      // L4/A3: 非法 due 不计入"今日待复习"（公共到期计数函数）
+      const dueCount = countDueCards(this.memoryCards);
+      this.memoryCountEl.setText(dueCount > 0 ? ` 今日待复习 ${dueCount} 题` : "");
     }
   }
 
@@ -866,6 +1137,8 @@ export class QuizView extends ItemView {
   }
 
   private reFilterForNavigation(): void {
+    // 练习模式：练习集为固定随机快照（≤100 题），导航时不得重建为完整筛选结果
+    if (this.practiceActive || this.memoryActive) return;
     const prevId = this.filteredQuestions[this.currentIndex]?.id;
     this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
     if (prevId) {
@@ -882,6 +1155,9 @@ export class QuizView extends ItemView {
     // 练习模式下修改筛选条件 → 自动退出练习，再按新筛选正常应用
     if (this.practiceActive) {
       this.exitRandomPractice();
+    }
+    if (this.memoryActive) {
+      this.exitMemoryPractice();
     }
     this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
     this.currentIndex = this.filteredQuestions.length > 0 ? 0 : -1;
@@ -926,7 +1202,14 @@ export class QuizView extends ItemView {
     // Restore answer state if this question was previously answered
     // 注意：判错时 answeredQuestions[id] 可能为空字符串（空选判错），
     // 必须用 !== undefined 判断，否则空字符串会被当作"未答"导致判错状态丢失。
-    const prevAnswer = this.answeredQuestions[question.id];
+    // 练习模式：旧题（本次会话未答）按未答状态渲染，允许继续练习；
+    // 本次会话已答的题才恢复判定展示。常规模式维持原行为。
+    const inPractice = this.practiceActive || this.memoryActive;
+    const prevAnswer = inPractice
+      ? this.practiceAnswered.has(question.id)
+        ? this.answeredQuestions[question.id]
+        : undefined
+      : this.answeredQuestions[question.id];
     if (prevAnswer !== undefined) {
       if (multi) {
         this.selectedOptions = prevAnswer.split("");
@@ -950,11 +1233,27 @@ export class QuizView extends ItemView {
       });
     }
 
+    // 记忆练习：显著标明题目来源（复习/新题），与 (多选) 标记并排
+    if (this.memoryActive && this.practiceSource[question.id]) {
+      const srcNew = this.practiceSource[question.id] === "new";
+      this.questionArea.createEl("span", {
+        text: srcNew ? "🆕 新题" : "🔁 复习",
+        cls:
+          "csv-quiz-source-badge" +
+          (srcNew
+            ? " csv-quiz-source-badge-new"
+            : " csv-quiz-source-badge-review"),
+      });
+    }
+
     // Stem with Markdown rendering
     const stemDiv = this.questionArea.createDiv("csv-quiz-stem");
     MarkdownRenderer.render(this.app, question.stem, stemDiv, "", this).catch(
       (e: unknown) => console.error("CSV Quiz: markdown render failed", e)
     );
+
+    // 题目页眉底部：可折叠的记忆卡片信息栏（所有模式都显示）
+    this.renderCardPanel(question);
 
     // Options
     const optionsDiv = this.questionArea.createDiv("csv-quiz-options");
@@ -1069,6 +1368,54 @@ export class QuizView extends ItemView {
     this.updatePracticeButton();
   }
 
+  /** 题目页眉底部：可折叠的记忆卡片信息栏（仅展示，不编辑）。 */
+  private renderCardPanel(question: Question): void {
+    const panel = this.questionArea.createDiv("csv-quiz-card-panel");
+    const header = panel.createDiv("csv-quiz-card-toggle");
+    header.createEl("span", { text: this.cardPanelOpen ? "▼" : "▶" });
+    header.createEl("span", { text: "记忆卡片" });
+    const body = panel.createDiv("csv-quiz-card-body");
+    body.classList.toggle("csv-quiz-card-body-hidden", !this.cardPanelOpen);
+    // 切换折叠只改本栏，不重渲染题目（避免丢失当前答题状态）
+    header.addEventListener("click", () => {
+      this.cardPanelOpen = !this.cardPanelOpen;
+      body.classList.toggle("csv-quiz-card-body-hidden", !this.cardPanelOpen);
+    });
+    const card = this.memoryCards[question.id];
+    if (!card) {
+      body.createEl("span", {
+        text: "该题暂无记忆卡片",
+        cls: "csv-quiz-card-empty",
+      });
+      return;
+    }
+    const stateNames: Record<number, string> = {
+      0: "新题",
+      1: "学习中",
+      2: "复习",
+      3: "再学习",
+    };
+    const fmtDate = (iso: string): string => {
+      if (!iso) return "—";
+      const t = new Date(iso).getTime();
+      return Number.isNaN(t) ? "—" : new Date(iso).toLocaleString();
+    };
+    const rows: Array<[string, string]> = [
+      ["状态", stateNames[card.state] ?? String(card.state)],
+      ["稳定性", `${card.stability.toFixed(2)} 天`],
+      ["难度", card.difficulty.toFixed(2)],
+      ["下次复习", fmtDate(card.due)],
+      ["复习次数", String(card.reps)],
+      ["遗忘次数", String(card.lapses)],
+      ["上次复习", fmtDate(card.lastReview)],
+    ];
+    for (const [label, value] of rows) {
+      const row = body.createDiv("csv-quiz-card-row");
+      row.createEl("span", { text: label, cls: "csv-quiz-card-label" });
+      row.createEl("span", { text: value, cls: "csv-quiz-card-value" });
+    }
+  }
+
   private renderFeedback(
     question: Question,
     displayOptions: Array<{ key: string; text: string }>
@@ -1161,6 +1508,10 @@ export class QuizView extends ItemView {
     const isCorrect = selectedStr === this.normalizeAnswer(question.answer);
     this.showingAnswer = true;
     await this.recordAnswer(question, selectedStr, isCorrect);
+    // 记忆练习：按判分结果更新 FSRS 卡片
+    if (this.memoryActive) {
+      this.applyMemoryReview(question.id, isCorrect);
+    }
 
     this.renderQuestion();
     this.updateProgress();
@@ -1187,9 +1538,18 @@ export class QuizView extends ItemView {
     isCorrect: boolean
   ): Promise<void> {
     this.answeredQuestions[question.id] = selectedStr;
+    // 练习模式：记录本次会话已答（渲染/计数/完成检测均基于 practiceAnswered）
+    if (this.practiceActive || this.memoryActive) {
+      this.practiceAnswered.add(question.id);
+    }
 
     if (isCorrect) {
-      this.correctCount++;
+      // 练习模式只累计本次会话统计，不污染全局统计
+      if (this.practiceActive || this.memoryActive) {
+        this.practiceCorrect++;
+      } else {
+        this.correctCount++;
+      }
       if (question.wrong === "1") {
         const prevWrong = question.wrong;
         question.wrong = "";
@@ -1197,7 +1557,11 @@ export class QuizView extends ItemView {
         if (!ok) question.wrong = prevWrong;
       }
     } else {
-      this.wrongCount++;
+      if (this.practiceActive || this.memoryActive) {
+        this.practiceWrong++;
+      } else {
+        this.wrongCount++;
+      }
       if (question.wrong !== "1") {
         const prevWrong = question.wrong;
         question.wrong = "1";
@@ -1205,6 +1569,100 @@ export class QuizView extends ItemView {
         if (!ok) question.wrong = prevWrong;
       }
     }
+  }
+
+  /** 解析卡片的 due 时间戳；非法字符串返回 null（视为未到期，不计入复习/计数）。 */
+  private parseDueTime(card: MemoryCard): number | null {
+    const t = new Date(card.due).getTime();
+    return Number.isNaN(t) ? null : t;
+  }
+
+  /** 记忆练习判分：用 FSRS 更新卡片；答错时把 wrong 标记置 "1" 并写回 CSV（写失败回滚并提示）。 */
+  private applyMemoryReview(id: string, correct: boolean): void {
+    // C-1: 一次记忆练习判分即视为已初始化（放方法最前，任何分支都置位）
+    this.memoryInitialized = true;
+    const now = new Date();
+    const saved = this.memoryCards[id];
+    // 防御非法持久化数据（如手工编辑 data.json）：state 越界或 lastReview 不可解析时跳过该题
+    if (
+      saved &&
+      (![0, 1, 2, 3].includes(saved.state) ||
+        (saved.lastReview !== "" &&
+          Number.isNaN(new Date(saved.lastReview).getTime())))
+    ) {
+      new Notice("记忆练习：卡片数据异常，已跳过该题");
+      return;
+    }
+    // 评分所需的题目对象（答错分支写 wrong 也复用）
+    const q = this.filteredQuestions.find((x) => x.id === id) ?? null;
+    let card: Card;
+    if (saved) {
+      card = {
+        due: new Date(saved.due),
+        stability: saved.stability,
+        difficulty: saved.difficulty,
+        reps: saved.reps,
+        lapses: saved.lapses,
+        learning_steps: saved.learningSteps,
+        state: saved.state as State,
+        elapsed_days: 0,
+        scheduled_days: 0,
+        // B1: 必须 round-trip last_review，否则 FSRS 认为从未复习，间隔不会增长
+        last_review: saved.lastReview
+          ? new Date(saved.lastReview)
+          : undefined,
+      };
+    } else {
+      card = createEmptyCard();
+    }
+    // 评分映射：答错一律 Again；答对按收藏/掌握标记选档（设置可关，同题掌握优先）
+    let rating: Rating;
+    if (!correct) {
+      rating = Rating.Again;
+    } else if (
+      this.getSettings().memoryMarkRating &&
+      q &&
+      q.mastered === "1"
+    ) {
+      rating = Rating.Easy;
+    } else if (
+      this.getSettings().memoryMarkRating &&
+      q &&
+      q.favorite === "1"
+    ) {
+      rating = Rating.Hard;
+    } else {
+      rating = Rating.Good;
+    }
+    const result = memoryScheduler.next(card, now, rating);
+    const c = result.card;
+    this.memoryCards[id] = {
+      state: c.state,
+      stability: c.stability,
+      difficulty: c.difficulty,
+      due: c.due.toISOString(),
+      reps: c.reps,
+      lapses: c.lapses,
+      learningSteps: c.learning_steps,
+      lastReview: c.last_review ? c.last_review.toISOString() : "",
+    };
+    if (!correct) {
+      // 答错计入 wrong 标记并写回 CSV（通过现有异步队列；失败时回滚内存标记）
+      if (q && q.wrong !== "1") {
+        const old = q.wrong;
+        q.wrong = "1";
+        void this.saveQuestionToCSV(q).then((ok) => {
+          if (!ok) {
+            q.wrong = old;
+            new Notice("记忆练习：错题标记保存失败");
+          }
+        });
+      }
+    }
+    this.saveState();
+    // L1/L3: 判分后立即刷新状态栏提醒（实际实例为 CSVQuizPlugin，故 cast 调用）
+    (this.plugin as unknown as { refreshMemoryReminder?: () => void })
+      .refreshMemoryReminder?.();
   }
 
   /** 「下一题」按钮：多选题未判定时先判定，否则跳转。 */
@@ -1223,25 +1681,53 @@ export class QuizView extends ItemView {
     await this.nextQuestion();
   }
 
-  /** 重置答题进度：清除答题记录与统计，保留筛选条件。 */
-  private async resetProgress(): Promise<void> {
-    const modal = new ChoiceModal(this.app, {
-      title: "重置答题进度",
-      message:
-        "将清除所有答题记录、正确/错误统计，并回到第一题。筛选条件保持不变。确定重置吗？",
-      options: [
-        { label: "重置", value: "reset", cta: true },
-        { label: "取消", value: "cancel" },
-      ],
-    });
-    modal.open();
-    const res = await modal.promise;
-    if (res !== "reset") return;
-
+  /** 按用户选择清理进度：records=刷题记录，cards=记忆卡片，all=全部。保留筛选条件。 */
+  async applyResetChoice(choice: "records" | "cards" | "all"): Promise<void> {
+    // C-3: 视图未就绪（已关闭/初始化中止）时回退到直接改状态并落盘，避免"弹了提示但磁盘未动"
+    if (this.isClosed || !this.canPersistState) {
+      const state = this.stateManager.getState();
+      if (state) {
+        if (choice !== "cards") {
+          state.correctCount = 0;
+          state.wrongCount = 0;
+          state.answeredQuestions = {};
+        }
+        if (choice !== "records") {
+          state.memoryCards = {};
+          state.memoryNewDate = "";
+          state.memoryNewCountToday = 0;
+          state.memoryPendingNew = [];
+        }
+        await this.stateManager.saveStateImmediately(state);
+      }
+      new Notice(
+        choice === "all"
+          ? "进度已重置"
+          : choice === "records"
+            ? "刷题记录已清理"
+            : "记忆卡片已删除"
+      );
+      return;
+    }
     await this.saveCurrentEdit();
-    this.correctCount = 0;
-    this.wrongCount = 0;
-    this.answeredQuestions = {};
+    // 重置进度时退出练习模式（记忆/随机均为临时会话），避免残留练习集状态
+    if (this.practiceActive) this.exitRandomPractice();
+    if (this.memoryActive) this.exitMemoryPractice();
+    if (choice !== "cards") {
+      this.correctCount = 0;
+      this.wrongCount = 0;
+      this.answeredQuestions = {};
+    }
+    if (choice !== "records") {
+      this.memoryCards = {};
+      this.memoryNewDate = "";
+      this.memoryNewCountToday = 0;
+      this.memoryPendingNew = [];
+    }
+    // C-1: 仅删除记忆卡片保留"已初始化"标记（避免再次触发首次启用重置提示）；全部重置才复位
+    if (choice === "all") {
+      this.memoryInitialized = false;
+    }
     this.currentIndex = 0;
     this.currentShuffledQId = null;
     this.selectedOption = null;
@@ -1249,7 +1735,24 @@ export class QuizView extends ItemView {
     this.cancelAutoNext();
     this.renderQuestion();
     this.saveState();
-    new Notice("答题进度已重置");
+    // 清理卡片后立即刷新状态栏提醒
+    (this.plugin as unknown as { refreshMemoryReminder?: () => void })
+      .refreshMemoryReminder?.();
+    new Notice(
+      choice === "all"
+        ? "进度已重置"
+        : choice === "records"
+          ? "刷题记录已清理"
+          : "记忆卡片已删除"
+    );
+  }
+
+  /** 重置答题进度：让用户选择清理刷题记录/记忆卡片，保留筛选条件。 */
+  private async resetProgress(): Promise<void> {
+    const res = await askResetChoice(this.app);
+    if (this.isClosed) return;
+    if (!res) return;
+    await this.applyResetChoice(res);
   }
 
   private renderCheckboxArea(question: Question): void {
@@ -1467,6 +1970,10 @@ export class QuizView extends ItemView {
     const isCorrect = selectedKey === question.answer;
     this.showingAnswer = true;
     await this.recordAnswer(question, selectedKey, isCorrect);
+    // 记忆练习：按判分结果更新 FSRS 卡片
+    if (this.memoryActive) {
+      this.applyMemoryReview(question.id, isCorrect);
+    }
 
     this.renderQuestion();
     this.updateProgress();
@@ -1510,12 +2017,10 @@ export class QuizView extends ItemView {
           this.currentIndex = newIdx + 1;
         } else {
           this.currentIndex = newIdx;
-          // 练习模式：练习集全部答完时提示完成
+          // 练习模式：练习集全部答完时提示完成（按本次会话已答集合判断）
           if (
-            this.practiceActive &&
-            this.filteredQuestions.every(
-              (q) => this.answeredQuestions[q.id] !== undefined
-            )
+            (this.practiceActive || this.memoryActive) &&
+            this.filteredQuestions.every((q) => this.practiceAnswered.has(q.id))
           ) {
             new Notice(`练习完成！共 ${this.filteredQuestions.length} 题`);
           }
@@ -1656,7 +2161,13 @@ export class QuizView extends ItemView {
   private goToNextUnanswered(): void {
     if (this.filteredQuestions.length === 0) return;
     for (let i = this.currentIndex + 1; i < this.filteredQuestions.length; i++) {
-      if (this.answeredQuestions[this.filteredQuestions[i].id] === undefined) {
+      const id = this.filteredQuestions[i].id;
+      // 练习模式：本次会话未答的题才算未答（旧题允许继续练习）；常规模式按答题记录判断
+      const unanswered =
+        this.practiceActive || this.memoryActive
+          ? !this.practiceAnswered.has(id)
+          : this.answeredQuestions[id] === undefined;
+      if (unanswered) {
         this.currentIndex = i;
         this.currentShuffledQId = null;
         this.cancelAutoNext();
@@ -1666,10 +2177,8 @@ export class QuizView extends ItemView {
       }
     }
     if (
-      this.practiceActive &&
-      this.filteredQuestions.every(
-        (q) => this.answeredQuestions[q.id] !== undefined
-      )
+      (this.practiceActive || this.memoryActive) &&
+      this.filteredQuestions.every((q) => this.practiceAnswered.has(q.id))
     ) {
       new Notice(`练习完成！共 ${this.filteredQuestions.length} 题`);
     } else {
@@ -1685,6 +2194,17 @@ export class QuizView extends ItemView {
         : 0;
     this.progressEl.textContent = `进度: ${current}/${total}`;
 
+    // 练习模式：显示本次会话统计（不展示全局统计）
+    if (this.practiceActive || this.memoryActive) {
+      this.statsEl.textContent = `✅ ${this.practiceCorrect}  ❌ ${this.practiceWrong}`;
+      const answered = this.practiceCorrect + this.practiceWrong;
+      if (answered > 0) {
+        const rate = ((this.practiceCorrect / answered) * 100).toFixed(1);
+        this.statsEl.textContent += `  (${rate}%)`;
+      }
+      return;
+    }
+
     this.statsEl.textContent = `✅ ${this.correctCount}  ❌ ${this.wrongCount}`;
     const totalAnswered = this.correctCount + this.wrongCount;
     if (totalAnswered > 0) {
@@ -1695,6 +2215,12 @@ export class QuizView extends ItemView {
 
   /** 重新计算筛选结果并定位指定题目的新位置（题目被筛掉时回退到第一题/空状态）。 */
   private reFilterAndLocate(questionId: string): void {
+    // 练习模式：练习集为固定随机快照，只在练习集内定位，不重建列表
+    if (this.practiceActive || this.memoryActive) {
+      const idx = this.filteredQuestions.findIndex((q) => q.id === questionId);
+      this.currentIndex = idx >= 0 ? idx : 0;
+      return;
+    }
     this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
     const idx = this.filteredQuestions.findIndex((q) => q.id === questionId);
     if (idx >= 0) {
@@ -1819,10 +2345,20 @@ export class QuizView extends ItemView {
 
       this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
 
+      // H1: 刷新会重建题库与进度，必须复位练习模式标志，避免常规模式答题误写记忆卡片
+      // （exit* 内部有 active 检查，未激活时无副作用；此处 orderedQuestions 已重建，applyFiltersTo 结果会被下方重置覆盖）
+      this.exitRandomPractice();
+      this.exitMemoryPractice();
+
       this.currentIndex = 0;
       this.correctCount = 0;
       this.wrongCount = 0;
       this.answeredQuestions = {};
+      this.memoryCards = {};
+      this.memoryNewDate = "";
+      this.memoryNewCountToday = 0;
+      this.memoryPendingNew = [];
+      this.memoryInitialized = false;
       this.currentShuffledQId = null;
       this.selectedOption = null;
       this.selectedOptions = [];
@@ -1856,7 +2392,7 @@ export class QuizView extends ItemView {
     // 练习模式为临时会话：保存时把 currentIndex 换算回常规模式的位置，
     // 重开面板后恢复到练习前的位置
     let savedIndex = this.currentIndex;
-    if (this.practiceActive) {
+    if (this.practiceActive || this.memoryActive) {
       if (this.practiceFocusId) {
         const idx = this.applyFiltersTo(this.orderedQuestions).findIndex(
           (q) => q.id === this.practiceFocusId
@@ -1882,6 +2418,14 @@ export class QuizView extends ItemView {
       filterRepeat: this.filterRepeat,
       filterWrong: this.filterWrong,
       answeredQuestions: this.answeredQuestions,
+      memoryCards: this.memoryCards,
+      // M1: 每日新题配额随进度持久化（跨会话/跨天保持一致）
+      memoryNewDate: this.memoryNewDate,
+      memoryNewCountToday: this.memoryNewCountToday,
+      // A1: 当日已选未答的新题 id 随进度持久化
+      memoryPendingNew: this.memoryPendingNew,
+      // C-1: 记忆练习初始化标记随进度持久化
+      memoryInitialized: this.memoryInitialized,
     };
   }
 

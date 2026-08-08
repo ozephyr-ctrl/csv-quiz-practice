@@ -1,4 +1,4 @@
-import { QuizSessionState } from "./types";
+import { QuizSessionState, MemoryCard } from "./types";
 
 export function shuffle<T>(array: T[]): T[] {
   const result = [...array];
@@ -62,5 +62,54 @@ export function quizStateEquals(
     if (a.answeredQuestions[k] !== b.answeredQuestions[k]) return false;
   }
 
+  // memoryCards 为可选字段（旧进度无记忆数据），缺失视为空对象
+  const am = a.memoryCards || {};
+  const bm = b.memoryCards || {};
+  const amk = Object.keys(am);
+  const bmk = Object.keys(bm);
+  if (amk.length !== bmk.length) return false;
+  for (const k of amk) {
+    const ac = am[k];
+    const bc = bm[k];
+    if (!ac || !bc) return false;
+    if (ac.state !== bc.state) return false;
+    if (ac.stability !== bc.stability) return false;
+    if (ac.difficulty !== bc.difficulty) return false;
+    if (ac.due !== bc.due) return false;
+    if (ac.reps !== bc.reps) return false;
+    if (ac.lapses !== bc.lapses) return false;
+    if (ac.learningSteps !== bc.learningSteps) return false;
+    if ((ac.lastReview || "") !== (bc.lastReview || "")) return false;
+  }
+
+  // 每日新题配额为可选字段（旧进度无），缺失视为 0/空
+  if ((a.memoryNewDate || "") !== (b.memoryNewDate || "")) return false;
+  if ((a.memoryNewCountToday || 0) !== (b.memoryNewCountToday || 0)) return false;
+
+  // 当日已选未答新题为可选字段（旧进度无），缺失视为空数组
+  const ap = a.memoryPendingNew || [];
+  const bp = b.memoryPendingNew || [];
+  if (ap.length !== bp.length) return false;
+  for (let i = 0; i < ap.length; i++) {
+    if (ap[i] !== bp[i]) return false;
+  }
+
+  // 记忆练习初始化标记为可选字段（旧进度无），缺失视为 false
+  if (!!a.memoryInitialized !== !!b.memoryInitialized) return false;
+
   return true;
+}
+
+/** 统计到期卡片数：due 非法（不可解析）的卡片不计入。 */
+export function countDueCards(
+  cards: Record<string, MemoryCard> | undefined,
+  now: Date = new Date()
+): number {
+  if (!cards) return 0;
+  let n = 0;
+  for (const c of Object.values(cards)) {
+    const t = new Date(c.due).getTime();
+    if (!Number.isNaN(t) && t <= now.getTime()) n++;
+  }
+  return n;
 }
