@@ -188,6 +188,8 @@ export default class CSVQuizPlugin extends Plugin {
             state.memoryNewCountToday = 0;
             state.memoryPendingNew = [];
           }
+          // 顺序将在下次打开面板时按当前设置重建（savedOrder 不匹配时 buildDisplayOrder 重建）
+          state.displayOrder = [];
           await this.stateManager.saveStateImmediately(state);
           // C-2: 面板未打开时也要给用户反馈
           new Notice(

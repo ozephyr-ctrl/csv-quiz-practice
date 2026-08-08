@@ -75,7 +75,7 @@ export class CSVQuizSettingTab extends PluginSettingTab {
               type: "number",
               key: "memoryDailyNew",
               min: 1,
-              max: 100,
+              max: 500,
               defaultValue: DEFAULT_SETTINGS.memoryDailyNew,
             },
           },
@@ -202,9 +202,9 @@ export class CSVQuizSettingTab extends PluginSettingTab {
   }
 
   /**
-   * 「随机题目顺序」开关处理：开启后会重新随机排列已有会话的显示顺序，
-   * 因此需要重置刷题进度（清除答题记录/统计）。用户取消则回滚开关。
-   * toggle 参数用于 <1.13 的命令式设置路径回滚开关 UI。
+   * 「随机题目顺序」开关处理：开启/关闭都会重排已有会话的显示顺序，
+   * 因此开关切换都需要重置刷题进度（清除答题记录/统计）。
+   * 用户取消则回滚开关。toggle 参数用于 <1.13 的命令式设置路径回滚开关 UI。
    */
   private async handleRandomOrderToggle(
     newValue: boolean,
@@ -212,33 +212,40 @@ export class CSVQuizSettingTab extends PluginSettingTab {
   ): Promise<void> {
     if (newValue === this.plugin.settings.randomOrder) return;
 
-    if (newValue) {
-      const modal = new ChoiceModal(this.app, {
-        title: "开启随机题目顺序需要重置进度",
-        message:
-          "打乱题目顺序需要重置当前刷题进度：将清除所有答题记录与正确/错误统计，并重新随机排列题目顺序。是否继续？",
-        options: [
-          { label: "重置并打乱", value: "confirm", cta: true },
-          { label: "取消", value: "cancel" },
-        ],
-      });
-      modal.open();
-      const res = await modal.promise;
-      if (res !== "confirm") {
-        // 回滚开关（1.13+ 声明式设置路径下 UI 可能残留开启显示，重新打开设置页即恢复）
-        this.plugin.settings.randomOrder = false;
-        toggle?.setValue(false);
-        new Notice("已取消：未启用随机题目顺序");
-        return;
-      }
+    const modal = new ChoiceModal(this.app, {
+      title: newValue
+        ? "开启随机题目顺序需要重置进度"
+        : "关闭随机题目顺序需要重置进度",
+      message: newValue
+        ? "打乱题目顺序需要重置当前刷题进度：将清除所有答题记录与正确/错误统计，并重新随机排列题目顺序。是否继续？"
+        : "恢复默认 CSV 顺序需要重置当前刷题进度：将清除所有答题记录与正确/错误统计，并恢复为 CSV 默认顺序。是否继续？",
+      options: [
+        {
+          label: newValue ? "重置并打乱" : "重置并恢复",
+          value: "confirm",
+          cta: true,
+        },
+        { label: "取消", value: "cancel" },
+      ],
+    });
+    modal.open();
+    const res = await modal.promise;
+    if (res !== "confirm") {
+      // 回滚开关（1.13+ 声明式设置路径下 UI 可能残留新状态显示，重新打开设置页即恢复）
+      this.plugin.settings.randomOrder = !newValue;
+      toggle?.setValue(!newValue);
+      new Notice("已取消");
+      return;
     }
 
     this.plugin.settings.randomOrder = newValue;
     await this.plugin.saveSettings();
-    if (newValue) {
-      await this.plugin.resetQuizProgress();
-      new Notice("已重置进度并随机打乱题目顺序");
-    }
+    await this.plugin.resetQuizProgress();
+    new Notice(
+      newValue
+        ? "已重置进度并随机打乱题目顺序"
+        : "已重置进度并恢复 CSV 默认顺序"
+    );
   }
 
   /**
@@ -278,7 +285,7 @@ export class CSVQuizSettingTab extends PluginSettingTab {
       "记忆练习每天引入的新题数量上限",
       "memoryDailyNew",
       1,
-      100
+      500
     );
     this.addToggleSetting(
       containerEl,

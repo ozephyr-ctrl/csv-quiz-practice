@@ -1508,10 +1508,8 @@ export class QuizView extends ItemView {
     const isCorrect = selectedStr === this.normalizeAnswer(question.answer);
     this.showingAnswer = true;
     await this.recordAnswer(question, selectedStr, isCorrect);
-    // 记忆练习：按判分结果更新 FSRS 卡片
-    if (this.memoryActive) {
-      this.applyMemoryReview(question.id, isCorrect);
-    }
+    // 任意模式判分都更新 FSRS 卡片（记忆练习/随机练习/常规模式一致）
+    this.applyMemoryReview(question.id, isCorrect);
 
     this.renderQuestion();
     this.updateProgress();
@@ -1728,6 +1726,16 @@ export class QuizView extends ItemView {
     if (choice === "all") {
       this.memoryInitialized = false;
     }
+    // 重置后按当前设置重建题目顺序（随机开启则重排，关闭则恢复 CSV 默认顺序）
+    this.displayOrder = buildDisplayOrder(
+      this.allQuestions,
+      this.getSettings().randomOrder
+    );
+    this.orderedQuestions = sortByDisplayOrder(
+      this.allQuestions,
+      this.displayOrder
+    );
+    this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
     this.currentIndex = 0;
     this.currentShuffledQId = null;
     this.selectedOption = null;
@@ -1970,10 +1978,8 @@ export class QuizView extends ItemView {
     const isCorrect = selectedKey === question.answer;
     this.showingAnswer = true;
     await this.recordAnswer(question, selectedKey, isCorrect);
-    // 记忆练习：按判分结果更新 FSRS 卡片
-    if (this.memoryActive) {
-      this.applyMemoryReview(question.id, isCorrect);
-    }
+    // 任意模式判分都更新 FSRS 卡片（记忆练习/随机练习/常规模式一致）
+    this.applyMemoryReview(question.id, isCorrect);
 
     this.renderQuestion();
     this.updateProgress();

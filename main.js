@@ -700,7 +700,7 @@ var CSVQuizSettingTab = class extends import_obsidian2.PluginSettingTab {
               type: "number",
               key: "memoryDailyNew",
               min: 1,
-              max: 100,
+              max: 500,
               defaultValue: DEFAULT_SETTINGS.memoryDailyNew
             }
           },
@@ -823,36 +823,38 @@ var CSVQuizSettingTab = class extends import_obsidian2.PluginSettingTab {
     await this.plugin.resetQuizProgress(res);
   }
   /**
-   * 「随机题目顺序」开关处理：开启后会重新随机排列已有会话的显示顺序，
-   * 因此需要重置刷题进度（清除答题记录/统计）。用户取消则回滚开关。
-   * toggle 参数用于 <1.13 的命令式设置路径回滚开关 UI。
+   * 「随机题目顺序」开关处理：开启/关闭都会重排已有会话的显示顺序，
+   * 因此开关切换都需要重置刷题进度（清除答题记录/统计）。
+   * 用户取消则回滚开关。toggle 参数用于 <1.13 的命令式设置路径回滚开关 UI。
    */
   async handleRandomOrderToggle(newValue, toggle) {
     if (newValue === this.plugin.settings.randomOrder) return;
-    if (newValue) {
-      const modal = new ChoiceModal(this.app, {
-        title: "\u5F00\u542F\u968F\u673A\u9898\u76EE\u987A\u5E8F\u9700\u8981\u91CD\u7F6E\u8FDB\u5EA6",
-        message: "\u6253\u4E71\u9898\u76EE\u987A\u5E8F\u9700\u8981\u91CD\u7F6E\u5F53\u524D\u5237\u9898\u8FDB\u5EA6\uFF1A\u5C06\u6E05\u9664\u6240\u6709\u7B54\u9898\u8BB0\u5F55\u4E0E\u6B63\u786E/\u9519\u8BEF\u7EDF\u8BA1\uFF0C\u5E76\u91CD\u65B0\u968F\u673A\u6392\u5217\u9898\u76EE\u987A\u5E8F\u3002\u662F\u5426\u7EE7\u7EED\uFF1F",
-        options: [
-          { label: "\u91CD\u7F6E\u5E76\u6253\u4E71", value: "confirm", cta: true },
-          { label: "\u53D6\u6D88", value: "cancel" }
-        ]
-      });
-      modal.open();
-      const res = await modal.promise;
-      if (res !== "confirm") {
-        this.plugin.settings.randomOrder = false;
-        toggle == null ? void 0 : toggle.setValue(false);
-        new import_obsidian2.Notice("\u5DF2\u53D6\u6D88\uFF1A\u672A\u542F\u7528\u968F\u673A\u9898\u76EE\u987A\u5E8F");
-        return;
-      }
+    const modal = new ChoiceModal(this.app, {
+      title: newValue ? "\u5F00\u542F\u968F\u673A\u9898\u76EE\u987A\u5E8F\u9700\u8981\u91CD\u7F6E\u8FDB\u5EA6" : "\u5173\u95ED\u968F\u673A\u9898\u76EE\u987A\u5E8F\u9700\u8981\u91CD\u7F6E\u8FDB\u5EA6",
+      message: newValue ? "\u6253\u4E71\u9898\u76EE\u987A\u5E8F\u9700\u8981\u91CD\u7F6E\u5F53\u524D\u5237\u9898\u8FDB\u5EA6\uFF1A\u5C06\u6E05\u9664\u6240\u6709\u7B54\u9898\u8BB0\u5F55\u4E0E\u6B63\u786E/\u9519\u8BEF\u7EDF\u8BA1\uFF0C\u5E76\u91CD\u65B0\u968F\u673A\u6392\u5217\u9898\u76EE\u987A\u5E8F\u3002\u662F\u5426\u7EE7\u7EED\uFF1F" : "\u6062\u590D\u9ED8\u8BA4 CSV \u987A\u5E8F\u9700\u8981\u91CD\u7F6E\u5F53\u524D\u5237\u9898\u8FDB\u5EA6\uFF1A\u5C06\u6E05\u9664\u6240\u6709\u7B54\u9898\u8BB0\u5F55\u4E0E\u6B63\u786E/\u9519\u8BEF\u7EDF\u8BA1\uFF0C\u5E76\u6062\u590D\u4E3A CSV \u9ED8\u8BA4\u987A\u5E8F\u3002\u662F\u5426\u7EE7\u7EED\uFF1F",
+      options: [
+        {
+          label: newValue ? "\u91CD\u7F6E\u5E76\u6253\u4E71" : "\u91CD\u7F6E\u5E76\u6062\u590D",
+          value: "confirm",
+          cta: true
+        },
+        { label: "\u53D6\u6D88", value: "cancel" }
+      ]
+    });
+    modal.open();
+    const res = await modal.promise;
+    if (res !== "confirm") {
+      this.plugin.settings.randomOrder = !newValue;
+      toggle == null ? void 0 : toggle.setValue(!newValue);
+      new import_obsidian2.Notice("\u5DF2\u53D6\u6D88");
+      return;
     }
     this.plugin.settings.randomOrder = newValue;
     await this.plugin.saveSettings();
-    if (newValue) {
-      await this.plugin.resetQuizProgress();
-      new import_obsidian2.Notice("\u5DF2\u91CD\u7F6E\u8FDB\u5EA6\u5E76\u968F\u673A\u6253\u4E71\u9898\u76EE\u987A\u5E8F");
-    }
+    await this.plugin.resetQuizProgress();
+    new import_obsidian2.Notice(
+      newValue ? "\u5DF2\u91CD\u7F6E\u8FDB\u5EA6\u5E76\u968F\u673A\u6253\u4E71\u9898\u76EE\u987A\u5E8F" : "\u5DF2\u91CD\u7F6E\u8FDB\u5EA6\u5E76\u6062\u590D CSV \u9ED8\u8BA4\u987A\u5E8F"
+    );
   }
   /**
    * < 1.13.0: Obsidian 调用此方法，保持原有命令式实现不变。
@@ -888,7 +890,7 @@ var CSVQuizSettingTab = class extends import_obsidian2.PluginSettingTab {
       "\u8BB0\u5FC6\u7EC3\u4E60\u6BCF\u5929\u5F15\u5165\u7684\u65B0\u9898\u6570\u91CF\u4E0A\u9650",
       "memoryDailyNew",
       1,
-      100
+      500
     );
     this.addToggleSetting(
       containerEl,
@@ -4292,9 +4294,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     const isCorrect = selectedStr === this.normalizeAnswer(question.answer);
     this.showingAnswer = true;
     await this.recordAnswer(question, selectedStr, isCorrect);
-    if (this.memoryActive) {
-      this.applyMemoryReview(question.id, isCorrect);
-    }
+    this.applyMemoryReview(question.id, isCorrect);
     this.renderQuestion();
     this.updateProgress();
     const settings = this.getSettings();
@@ -4470,6 +4470,15 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     if (choice === "all") {
       this.memoryInitialized = false;
     }
+    this.displayOrder = buildDisplayOrder(
+      this.allQuestions,
+      this.getSettings().randomOrder
+    );
+    this.orderedQuestions = sortByDisplayOrder(
+      this.allQuestions,
+      this.displayOrder
+    );
+    this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
     this.currentIndex = 0;
     this.currentShuffledQId = null;
     this.selectedOption = null;
@@ -4655,9 +4664,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     const isCorrect = selectedKey === question.answer;
     this.showingAnswer = true;
     await this.recordAnswer(question, selectedKey, isCorrect);
-    if (this.memoryActive) {
-      this.applyMemoryReview(question.id, isCorrect);
-    }
+    this.applyMemoryReview(question.id, isCorrect);
     this.renderQuestion();
     this.updateProgress();
     const settings = this.getSettings();
@@ -5326,6 +5333,7 @@ var CSVQuizPlugin = class extends import_obsidian5.Plugin {
             state.memoryNewCountToday = 0;
             state.memoryPendingNew = [];
           }
+          state.displayOrder = [];
           await this.stateManager.saveStateImmediately(state);
           new import_obsidian5.Notice(
             choice === "records" ? "\u5237\u9898\u8BB0\u5F55\u5DF2\u6E05\u7406" : "\u8BB0\u5FC6\u5361\u7247\u5DF2\u5220\u9664"
