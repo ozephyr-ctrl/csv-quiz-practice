@@ -62,6 +62,27 @@ The CSV file must be **BOM-prefixed UTF-8** with 15 columns:
 - **随机选项顺序**：每题选项随机排列
   **Random options**: shuffle answer options per question
 
+### 练习模式 / Practice Modes
+
+- **随机练习**：按当前筛选条件随机选 **100 道未答题**作为练习集（不足自适应）
+  **Random practice**: pick up to 100 unanswered questions (respecting current filters) as a practice set
+- **记忆练习（FSRS 间隔重复）**：基于记忆曲线的智能复习
+  **Memory practice (FSRS spaced repetition)**: smart review based on memory curve
+  - 选题 = 到期复习题（按紧迫度排序）+ 每日新题（数量可配置，按自然日累计）
+    Practice set = due reviews (sorted by urgency) + daily new questions (configurable quota, tracked per day)
+  - 答对按 FSRS 拉长复习间隔，答错进入再学习并在当天重现
+    Correct answers extend intervals via FSRS; mistakes trigger relearning and reappear the same day
+  - 练习集中显著标明题目来源：🆕 新题 / 🔁 复习
+    Question source is clearly labeled: 🆕 new / 🔁 review
+  - **收藏/掌握参与评分**（可关闭）：掌握题答对按 Easy（少复习）、收藏题答对按 Hard（多复习），同题掌握优先
+    **Flag-aware rating** (optional): mastered questions answered correctly count as Easy, favorited ones as Hard (mastered wins on conflict)
+  - 练习模式下统计显示**本次会话**答题结果，不污染全局正确率
+    Practice mode shows per-session stats, leaving global accuracy untouched
+  - 题目页眉底部可折叠「记忆卡片」信息栏，查看每题 FSRS 状态（难度/稳定性/到期时间等）
+    Collapsible "memory card" panel shows each question's FSRS state (difficulty/stability/due, etc.)
+  - 首次启用时若已有答题记录但无记忆数据，会提示重置进度后再开始
+    First enable with existing progress but no memory data prompts a reset before starting
+
 ### 筛选 / Filtering
 
 - **标签筛选**：点击标签芯片切换，支持多标签交集
@@ -88,6 +109,8 @@ The CSV file must be **BOM-prefixed UTF-8** with 15 columns:
   Resumes from where you left off after reopening Obsidian
 - 切换 CSV 路径自动开始新会话
   Switching CSV path starts a fresh session
+- **分项重置进度**：重置时可选「仅清理刷题记录 / 仅删除记忆卡片 / 全部重置」，筛选条件保留
+  **Selective reset**: choose to clear answer records only, memory cards only, or both (filters preserved)
 
 ### 设置项 / Settings
 
@@ -100,7 +123,11 @@ The CSV file must be **BOM-prefixed UTF-8** with 15 columns:
 | 默认展开筛选栏 / Filter Panel Open | 打开面板时筛选栏默认展开 |
 | 默认展开编辑栏 / Edit Panel Open | 打开面板时编辑栏默认展开 |
 | 标记筛选默认值 / Default Filter Values | 各标记筛选的默认状态 |
-| 重置刷题进度 / Reset Progress | 清除所有状态，重新加载题库 |
+| 记忆练习 / Memory Practice | 启用基于记忆曲线（FSRS）的练习 |
+| 每日新题数 / Daily New Questions | 记忆练习每天引入的新题数量上限（默认 20） |
+| 到期提醒 / Due Reminder | 状态栏显示今日待复习题数提醒 |
+| 收藏/掌握参与评分 / Flag-aware Rating | 掌握答对=Easy、收藏答对=Hard（默认开启） |
+| 重置刷题进度 / Reset Progress | 分项清理：仅刷题记录 / 仅记忆卡片 / 全部重置 |
 
 ---
 
