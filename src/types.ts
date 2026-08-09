@@ -46,6 +46,8 @@ export interface QuizSessionState {
   filterMastered: string;
   filterRepeat: string;
   filterWrong: string;
+  /** 未答题筛选：""=不限、"1"=仅未答、"0"=仅已答 */
+  filterUnanswered: string;
   answeredQuestions: Record<string, string>;
   /** 记忆练习的记忆卡片（题 id → 卡片）。旧进度无此字段。 */
   memoryCards?: Record<string, MemoryCard>;
@@ -75,7 +77,7 @@ export interface PluginSettings {
   memoryDailyNew: number;
   /** 状态栏显示今日待复习题数提醒 */
   memoryReminder: boolean;
-  /** 收藏/掌握标记参与 FSRS 评分（掌握答对=Easy、收藏答对=Hard） */
+  /** 掌握标记参与 FSRS 评分（掌握答对=Easy）；收藏不参与评分，避免 Hard 导致难度虚高与间隔压缩 */
   memoryMarkRating: boolean;
 }
 

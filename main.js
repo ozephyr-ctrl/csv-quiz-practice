@@ -464,7 +464,7 @@ __export(main_exports, {
   default: () => CSVQuizPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian5 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 
 // src/types.ts
 var VIEW_TYPE_QUIZ = "csv-quiz-practice-view";
@@ -710,8 +710,8 @@ var CSVQuizSettingTab = class extends import_obsidian2.PluginSettingTab {
             control: { type: "toggle", key: "memoryReminder" }
           },
           {
-            name: "\u6536\u85CF/\u638C\u63E1\u53C2\u4E0E\u8BC4\u5206",
-            desc: "\u8BB0\u5FC6\u7EC3\u4E60\u7B54\u5BF9\u65F6\u6309\u6807\u8BB0\u8BC4\u5206\uFF1A\u638C\u63E1=Easy\uFF08\u95F4\u9694\u62C9\u957F\u66F4\u5FEB\uFF09\u3001\u6536\u85CF=Hard\uFF08\u590D\u4E60\u66F4\u4FDD\u5B88\uFF09\uFF0C\u540C\u9898\u638C\u63E1\u4F18\u5148\uFF1B\u7B54\u9519\u4E00\u5F8B Again\u3002",
+            name: "\u638C\u63E1\u53C2\u4E0E\u8BC4\u5206",
+            desc: "\u8BB0\u5FC6\u7EC3\u4E60\u7B54\u5BF9\u65F6\u6309\u6807\u8BB0\u8BC4\u5206\uFF1A\u638C\u63E1=Easy\uFF08\u95F4\u9694\u62C9\u957F\u66F4\u5FEB\uFF09\u3001\u5176\u4F59\u4E00\u5F8B Good\uFF1B\u6536\u85CF\u4E0D\u53C2\u4E0E\u8BC4\u5206\uFF08\u907F\u514D\u96BE\u5EA6\u865A\u9AD8\u4E0E\u95F4\u9694\u538B\u7F29\uFF09\uFF1B\u7B54\u9519\u4E00\u5F8B Again\u3002",
             control: { type: "toggle", key: "memoryMarkRating" }
           }
         ]
@@ -900,8 +900,8 @@ var CSVQuizSettingTab = class extends import_obsidian2.PluginSettingTab {
     );
     this.addToggleSetting(
       containerEl,
-      "\u6536\u85CF/\u638C\u63E1\u53C2\u4E0E\u8BC4\u5206",
-      "\u8BB0\u5FC6\u7EC3\u4E60\u7B54\u5BF9\u65F6\u6309\u6807\u8BB0\u8BC4\u5206\uFF1A\u638C\u63E1=Easy\uFF08\u95F4\u9694\u62C9\u957F\u66F4\u5FEB\uFF09\u3001\u6536\u85CF=Hard\uFF08\u590D\u4E60\u66F4\u4FDD\u5B88\uFF09\uFF0C\u540C\u9898\u638C\u63E1\u4F18\u5148\uFF1B\u7B54\u9519\u4E00\u5F8B Again\u3002",
+      "\u638C\u63E1\u53C2\u4E0E\u8BC4\u5206",
+      "\u8BB0\u5FC6\u7EC3\u4E60\u7B54\u5BF9\u65F6\u6309\u6807\u8BB0\u8BC4\u5206\uFF1A\u638C\u63E1=Easy\uFF08\u95F4\u9694\u62C9\u957F\u66F4\u5FEB\uFF09\u3001\u5176\u4F59\u4E00\u5F8B Good\uFF1B\u6536\u85CF\u4E0D\u53C2\u4E0E\u8BC4\u5206\uFF08\u907F\u514D\u96BE\u5EA6\u865A\u9AD8\u4E0E\u95F4\u9694\u538B\u7F29\uFF09\uFF1B\u7B54\u9519\u4E00\u5F8B Again\u3002",
       "memoryMarkRating"
     );
     this.addNumberSetting(
@@ -1039,10 +1039,35 @@ var import_obsidian3 = require("obsidian");
 function parseCSV(content) {
   const result = import_papaparse.default.parse(content, { header: false, skipEmptyLines: true });
   const rows = result.data;
+  if (result.errors.length > 0) {
+    console.warn("CSV \u89E3\u6790\u8B66\u544A: \u68C0\u6D4B\u5230\u89E3\u6790\u9519\u8BEF", result.errors.slice(0, 3));
+    new import_obsidian3.Notice(
+      `CSV \u89E3\u6790\u8B66\u544A: ${result.errors.length} \u5904\u95EE\u9898\uFF08\u5982\u672A\u95ED\u5408\u5F15\u53F7\uFF09\uFF0C\u6570\u636E\u53EF\u80FD\u9519\u4F4D`
+    );
+  }
   if (rows.length > 0 && rows[0].length > 0) {
     rows[0][0] = rows[0][0].replace(/^\uFEFF/, "");
   }
   const dataRows = rows.slice(1);
+  const usedIds = /* @__PURE__ */ new Set();
+  for (const row of dataRows) {
+    const id = String(row[0] || "").trim();
+    if (id) usedIds.add(id);
+  }
+  let autoSeq = 1;
+  for (const row of dataRows) {
+    const id = String(row[0] || "").trim();
+    if (!id) {
+      let candidate = `__auto_${autoSeq}`;
+      autoSeq++;
+      while (usedIds.has(candidate)) {
+        candidate = `__auto_${autoSeq}`;
+        autoSeq++;
+      }
+      usedIds.add(candidate);
+      row[0] = candidate;
+    }
+  }
   return dataRows.map((row) => ({
     id: String(row[0] || "").trim(),
     stem: row[1] || "",
@@ -1083,16 +1108,27 @@ function generateCSVRow(question) {
 function findAndUpdateRow(csvContent, questionId, newData) {
   const result = import_papaparse.default.parse(csvContent, { header: false, skipEmptyLines: true });
   const rows = result.data;
+  if (result.errors.length > 0) {
+    console.warn("CSV \u89E3\u6790\u8B66\u544A: \u68C0\u6D4B\u5230\u89E3\u6790\u9519\u8BEF", result.errors.slice(0, 3));
+  }
   if (rows.length < 2) return null;
   const header = rows[0];
   const dataRows = rows.slice(1);
   if (header.length > 0) {
     header[0] = header[0].replace(/^\uFEFF/, "");
   }
-  const idx = dataRows.findIndex(
-    (row) => String(row[0] || "").trim() === questionId
-  );
-  if (idx < 0) return null;
+  if (questionId.trim() === "") {
+    throw new Error("CSV \u4E2D\u9898\u53F7\u91CD\u590D\u6216\u4E3A\u7A7A\uFF0C\u5DF2\u62D2\u7EDD\u5199\u5165\uFF0C\u8BF7\u68C0\u67E5\u9898\u5E93");
+  }
+  const matchedIndices = [];
+  dataRows.forEach((row, i) => {
+    if (String(row[0] || "").trim() === questionId) matchedIndices.push(i);
+  });
+  if (matchedIndices.length === 0) return null;
+  if (matchedIndices.length > 1) {
+    throw new Error("CSV \u4E2D\u9898\u53F7\u91CD\u590D\u6216\u4E3A\u7A7A\uFF0C\u5DF2\u62D2\u7EDD\u5199\u5165\uFF0C\u8BF7\u68C0\u67E5\u9898\u5E93");
+  }
+  const idx = matchedIndices[0];
   const targetRow = dataRows[idx];
   dataRows[idx] = newData.length >= targetRow.length ? newData : [...newData, ...targetRow.slice(newData.length)];
   return import_papaparse.default.unparse([header, ...dataRows], { delimiter: "," });
@@ -1129,12 +1165,16 @@ async function readCSVFile(vault, path) {
 async function writeCSVFile(vault, path, content) {
   await vault.adapter.write(path, "\uFEFF" + content);
 }
-function filterQuestions(questions, filterTags, filterCat1, filterCat2, filterCat3, filterFavorite = "", filterMastered = "", filterRepeat = "", filterWrong = "", filterText = "") {
+function filterQuestions(questions, filterTags, filterCat1, filterCat2, filterCat3, filterFavorite = "", filterMastered = "", filterRepeat = "", filterWrong = "", filterText = "", filterUnanswered = "", answeredQuestions = {}) {
   return questions.filter((q) => {
     const text = filterText.trim().toLowerCase();
     if (text) {
       const haystack = (q.stem + " " + q.optionA + " " + q.optionB + " " + q.optionC + " " + q.optionD).toLowerCase();
       if (!haystack.includes(text)) return false;
+    }
+    if (filterUnanswered !== "") {
+      const answered = filterUnanswered === "1" ? (q2) => answeredQuestions[q2.id] === void 0 : (q2) => answeredQuestions[q2.id] !== void 0;
+      if (!answered(q)) return false;
     }
     if (filterTags && filterTags.trim() !== "") {
       const tagFilters = filterTags.trim().split(/\s+/).filter((t) => t.length > 0);
@@ -1185,8 +1225,21 @@ var CSVWriteQueue = class {
     this.vault = app.vault;
   }
   enqueue(csvPath, transform) {
+    const existing = this.queue.find((item) => item.csvPath === csvPath);
+    if (existing) {
+      existing.transforms.push(transform);
+      return new Promise((resolve, reject) => {
+        existing.resolves.push(resolve);
+        existing.rejects.push(reject);
+      });
+    }
     return new Promise((resolve, reject) => {
-      this.queue.push({ csvPath, transform, resolve, reject });
+      this.queue.push({
+        csvPath,
+        transforms: [transform],
+        resolves: [resolve],
+        rejects: [reject]
+      });
       void this.processNext();
     });
   }
@@ -1195,33 +1248,38 @@ var CSVWriteQueue = class {
     this.processing = true;
     const item = this.queue.shift();
     try {
-      const editor = this.getOpenEditor(item.csvPath);
-      const currentContent = editor ? editor.getValue() : await readCSVFile(this.vault, item.csvPath);
-      const newContent = await Promise.resolve(item.transform(currentContent));
+      const editors = this.getOpenEditors(item.csvPath);
+      const currentContent = editors.length > 0 ? editors[0].getValue() : await readCSVFile(this.vault, item.csvPath);
+      let newContent = currentContent;
+      for (const transform of item.transforms) {
+        newContent = await Promise.resolve(transform(newContent));
+      }
       await writeCSVFile(this.vault, item.csvPath, newContent);
-      if (editor) {
-        editor.setValue(newContent);
+      if (editors.length > 0) {
+        for (const editor of editors) {
+          editor.setValue(newContent);
+        }
         new import_obsidian3.Notice("\u9898\u5E93\u6587\u4EF6\u6B63\u5728\u7F16\u8F91\u5668\u4E2D\u6253\u5F00\uFF0C\u5DF2\u540C\u6B65\u66F4\u65B0\u7F16\u8F91\u5668\u5185\u5BB9");
       }
-      item.resolve();
+      for (const resolve of item.resolves) resolve();
     } catch (e) {
-      item.reject(e);
+      for (const reject of item.rejects) reject(e);
     } finally {
       this.processing = false;
       void this.processNext();
     }
   }
-  /** 若 csvPath 对应的文件正打开在 Markdown 编辑器中，返回其编辑器实例，否则返回 null。 */
-  getOpenEditor(csvPath) {
+  /** 若 csvPath 对应的文件正打开在 Markdown 编辑器中，返回其全部编辑器实例，否则返回空数组。 */
+  getOpenEditors(csvPath) {
     const file = this.app.vault.getFileByPath(csvPath);
-    if (!file) return null;
-    let editor = null;
+    if (!file) return [];
+    const editors = [];
     this.app.workspace.iterateAllLeaves((leaf) => {
       if (leaf.view instanceof import_obsidian3.MarkdownView && leaf.view.file === file) {
-        editor = leaf.view.editor;
+        editors.push(leaf.view.editor);
       }
     });
-    return editor;
+    return editors;
   }
   get pending() {
     return this.queue.length;
@@ -1268,15 +1326,20 @@ function quizStateEquals(a, b) {
   if (a.filterMastered !== b.filterMastered) return false;
   if (a.filterRepeat !== b.filterRepeat) return false;
   if (a.filterWrong !== b.filterWrong) return false;
-  if (a.displayOrder.length !== b.displayOrder.length) return false;
-  for (let i = 0; i < a.displayOrder.length; i++) {
-    if (a.displayOrder[i] !== b.displayOrder[i]) return false;
+  if ((a.filterUnanswered || "") !== (b.filterUnanswered || "")) return false;
+  const aOrder = a.displayOrder || [];
+  const bOrder = b.displayOrder || [];
+  if (aOrder.length !== bOrder.length) return false;
+  for (let i = 0; i < aOrder.length; i++) {
+    if (aOrder[i] !== bOrder[i]) return false;
   }
-  const ak = Object.keys(a.answeredQuestions);
-  const bk = Object.keys(b.answeredQuestions);
+  const aq = a.answeredQuestions || {};
+  const bq = b.answeredQuestions || {};
+  const ak = Object.keys(aq);
+  const bk = Object.keys(bq);
   if (ak.length !== bk.length) return false;
   for (const k of ak) {
-    if (a.answeredQuestions[k] !== b.answeredQuestions[k]) return false;
+    if (aq[k] !== bq[k]) return false;
   }
   const am = a.memoryCards || {};
   const bm = b.memoryCards || {};
@@ -1311,6 +1374,7 @@ function countDueCards(cards, now = /* @__PURE__ */ new Date()) {
   if (!cards) return 0;
   let n = 0;
   for (const c of Object.values(cards)) {
+    if (!c || typeof c !== "object") continue;
     const t = new Date(c.due).getTime();
     if (!Number.isNaN(t) && t <= now.getTime()) n++;
   }
@@ -3157,6 +3221,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     this.filterMastered = "";
     this.filterRepeat = "";
     this.filterWrong = "";
+    this.filterUnanswered = "";
     this.csvPath = "";
     this.answeredQuestions = {};
     this.currentShuffledQId = null;
@@ -3171,6 +3236,8 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     this.isClosed = false;
     /** 题库加载成功前禁止写入状态，避免加载失败后用空进度覆盖磁盘进度。 */
     this.canPersistState = false;
+    /** 已排队或已写入磁盘的状态快照（心跳脏检查基准；buildCurrentState 每次返回新对象）。 */
+    this.lastSavedState = null;
     /** 本实例是否已计入 openViewCount。 */
     this.counted = false;
     this.textFilterTimer = null;
@@ -3249,7 +3316,9 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
       this.textFilterTimer = null;
     }
     if (this.stateManager.getState() && this.canPersistState) {
-      await this.stateManager.saveStateImmediately(this.buildCurrentState());
+      const state = this.buildCurrentState();
+      await this.stateManager.saveStateImmediately(state);
+      this.lastSavedState = state;
     }
     await this.csvWriteQueue.drain();
   }
@@ -3385,12 +3454,14 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
       this.filterMastered = savedState.filterMastered || "";
       this.filterRepeat = savedState.filterRepeat || "";
       this.filterWrong = savedState.filterWrong || "";
+      this.filterUnanswered = savedState.filterUnanswered || "";
     } else {
       const s = this.getSettings();
       this.filterFavorite = s.defaultFilterFavorite;
       this.filterMastered = s.defaultFilterMastered;
       this.filterRepeat = s.defaultFilterRepeat;
       this.filterWrong = s.defaultFilterWrong;
+      this.filterUnanswered = "";
     }
     this.displayOrder = buildDisplayOrder(this.allQuestions, settings.randomOrder);
     this.orderedQuestions = sortByDisplayOrder(this.allQuestions, this.displayOrder);
@@ -3419,6 +3490,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     this.filterMastered = savedState.filterMastered || "";
     this.filterRepeat = savedState.filterRepeat || "";
     this.filterWrong = savedState.filterWrong || "";
+    this.filterUnanswered = savedState.filterUnanswered || "";
     this.displayOrder = buildDisplayOrder(
       this.allQuestions,
       settings.randomOrder,
@@ -3469,6 +3541,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     this.filterMastered = savedState.filterMastered || "";
     this.filterRepeat = savedState.filterRepeat || "";
     this.filterWrong = savedState.filterWrong || "";
+    this.filterUnanswered = savedState.filterUnanswered || "";
     this.updateFilterUI();
   }
   /** Periodic auto-save every 5s to protect against sudden app close. */
@@ -3479,7 +3552,12 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     }
     this.autoSaveTimer = window.setInterval(() => {
       if (!this.isClosed && this.canPersistState && this.stateManager.getState()) {
-        this.stateManager.scheduleSave(this.buildCurrentState(), 0);
+        const state = this.buildCurrentState();
+        if (this.lastSavedState !== null && quizStateEquals(state, this.lastSavedState)) {
+          return;
+        }
+        this.lastSavedState = state;
+        this.stateManager.scheduleSave(state, 0);
       }
     }, 5e3);
   }
@@ -3627,7 +3705,8 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
       { key: "filterFavorite", label: "\u6536\u85CF", value: this.filterFavorite },
       { key: "filterMastered", label: "\u638C\u63E1", value: this.filterMastered },
       { key: "filterRepeat", label: "\u91CD\u590D", value: this.filterRepeat },
-      { key: "filterWrong", label: "\u9519\u9898", value: this.filterWrong }
+      { key: "filterWrong", label: "\u9519\u9898", value: this.filterWrong },
+      { key: "filterUnanswered", label: "\u672A\u7B54", value: this.filterUnanswered }
     ];
     for (const bf of boolFilters) {
       const group = boolRow.createSpan({ cls: "csv-quiz-bool-group" });
@@ -3691,8 +3770,10 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     if (this.textFilterTimer !== null) {
       window.clearTimeout(this.textFilterTimer);
     }
-    this.textFilterTimer = window.setTimeout(() => {
+    this.textFilterTimer = window.setTimeout(async () => {
       this.textFilterTimer = null;
+      if (this.isClosed) return;
+      await this.saveCurrentEdit();
       if (this.isClosed) return;
       this.filterText = this.filterTextInput.value;
       this.applyFiltersAndReset();
@@ -3706,7 +3787,8 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
       filterFavorite: this.filterFavorite,
       filterMastered: this.filterMastered,
       filterRepeat: this.filterRepeat,
-      filterWrong: this.filterWrong
+      filterWrong: this.filterWrong,
+      filterUnanswered: this.filterUnanswered
     };
     Array.from(chips).forEach((chip) => {
       const key = chip.getAttribute("data-bool-key") || "";
@@ -3726,7 +3808,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
   /** 随机练习：按当前筛选条件筛出未答题，随机取最多 100 道作为练习集（不足自适应）。 */
   enableRandomPractice() {
     var _a, _b;
-    if (this.practiceActive) return;
+    if (this.practiceActive || this.memoryEnabling) return;
     if (this.memoryActive) this.exitMemoryPractice();
     const pool = this.applyFiltersTo(this.orderedQuestions);
     const unanswered = pool.filter(
@@ -3813,6 +3895,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
         const res = await modal.promise;
         if (this.isClosed) return;
         if (res !== "reset") return;
+        if (this.practiceActive) this.exitRandomPractice();
         this.correctCount = 0;
         this.wrongCount = 0;
         this.answeredQuestions = {};
@@ -4015,7 +4098,9 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
       this.filterMastered,
       this.filterRepeat,
       this.filterWrong,
-      this.filterText
+      this.filterText,
+      this.filterUnanswered,
+      this.answeredQuestions
     );
   }
   reFilterForNavigation() {
@@ -4052,7 +4137,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
   }
   /** 忽略字母顺序与重复，归一化答案字符串用于比较。 */
   normalizeAnswer(value) {
-    return [...new Set(value)].sort().join("");
+    return [...new Set(value.toUpperCase().replace(/[^A-D]/g, ""))].sort().join("");
   }
   renderQuestion() {
     this.questionArea.empty();
@@ -4354,65 +4439,69 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     this.memoryInitialized = true;
     const now = /* @__PURE__ */ new Date();
     const saved = this.memoryCards[id];
-    if (saved && (![0, 1, 2, 3].includes(saved.state) || saved.lastReview !== "" && Number.isNaN(new Date(saved.lastReview).getTime()))) {
+    if (saved && (![0, 1, 2, 3].includes(saved.state) || saved.lastReview !== "" && Number.isNaN(new Date(saved.lastReview).getTime()) || saved.due && Number.isNaN(new Date(saved.due).getTime()))) {
+      console.warn(`CSV Quiz: memory card data invalid for question "${id}", skipped`);
       new import_obsidian4.Notice("\u8BB0\u5FC6\u7EC3\u4E60\uFF1A\u5361\u7247\u6570\u636E\u5F02\u5E38\uFF0C\u5DF2\u8DF3\u8FC7\u8BE5\u9898");
       return;
     }
-    const q = (_a = this.filteredQuestions.find((x) => x.id === id)) != null ? _a : null;
-    let card;
-    if (saved) {
-      card = {
-        due: new Date(saved.due),
-        stability: saved.stability,
-        difficulty: saved.difficulty,
-        reps: saved.reps,
-        lapses: saved.lapses,
-        learning_steps: saved.learningSteps,
-        state: saved.state,
-        elapsed_days: 0,
-        scheduled_days: 0,
-        // B1: 必须 round-trip last_review，否则 FSRS 认为从未复习，间隔不会增长
-        last_review: saved.lastReview ? new Date(saved.lastReview) : void 0
-      };
-    } else {
-      card = createEmptyCard();
-    }
-    let rating;
-    if (!correct) {
-      rating = Rating.Again;
-    } else if (this.getSettings().memoryMarkRating && q && q.mastered === "1") {
-      rating = Rating.Easy;
-    } else if (this.getSettings().memoryMarkRating && q && q.favorite === "1") {
-      rating = Rating.Hard;
-    } else {
-      rating = Rating.Good;
-    }
-    const result = memoryScheduler.next(card, now, rating);
-    const c = result.card;
-    this.memoryCards[id] = {
-      state: c.state,
-      stability: c.stability,
-      difficulty: c.difficulty,
-      due: c.due.toISOString(),
-      reps: c.reps,
-      lapses: c.lapses,
-      learningSteps: c.learning_steps,
-      lastReview: c.last_review ? c.last_review.toISOString() : ""
-    };
-    if (!correct) {
-      if (q && q.wrong !== "1") {
-        const old = q.wrong;
-        q.wrong = "1";
-        void this.saveQuestionToCSV(q).then((ok) => {
-          if (!ok) {
-            q.wrong = old;
-            new import_obsidian4.Notice("\u8BB0\u5FC6\u7EC3\u4E60\uFF1A\u9519\u9898\u6807\u8BB0\u4FDD\u5B58\u5931\u8D25");
-          }
-        });
+    try {
+      const q = (_a = this.filteredQuestions.find((x) => x.id === id)) != null ? _a : null;
+      let card;
+      if (saved) {
+        card = {
+          due: new Date(saved.due),
+          stability: saved.stability,
+          difficulty: saved.difficulty,
+          reps: saved.reps,
+          lapses: saved.lapses,
+          learning_steps: saved.learningSteps,
+          state: saved.state,
+          elapsed_days: 0,
+          scheduled_days: 0,
+          // B1: 必须 round-trip last_review，否则 FSRS 认为从未复习，间隔不会增长
+          last_review: saved.lastReview ? new Date(saved.lastReview) : void 0
+        };
+      } else {
+        card = createEmptyCard();
       }
+      let rating;
+      if (!correct) {
+        rating = Rating.Again;
+      } else if (this.getSettings().memoryMarkRating && q && q.mastered === "1") {
+        rating = Rating.Easy;
+      } else {
+        rating = Rating.Good;
+      }
+      const result = memoryScheduler.next(card, now, rating);
+      const c = result.card;
+      this.memoryCards[id] = {
+        state: c.state,
+        stability: c.stability,
+        difficulty: c.difficulty,
+        due: c.due.toISOString(),
+        reps: c.reps,
+        lapses: c.lapses,
+        learningSteps: c.learning_steps,
+        lastReview: c.last_review ? c.last_review.toISOString() : ""
+      };
+      if (!correct) {
+        if (q && q.wrong !== "1") {
+          const old = q.wrong;
+          q.wrong = "1";
+          void this.saveQuestionToCSV(q).then((ok) => {
+            if (!ok) {
+              q.wrong = old;
+              new import_obsidian4.Notice("\u8BB0\u5FC6\u7EC3\u4E60\uFF1A\u9519\u9898\u6807\u8BB0\u4FDD\u5B58\u5931\u8D25");
+            }
+          });
+        }
+      }
+      this.saveState();
+      (_c = (_b = this.plugin).refreshMemoryReminder) == null ? void 0 : _c.call(_b);
+    } catch (e) {
+      console.error("CSV Quiz: applyMemoryReview failed", e);
+      new import_obsidian4.Notice("\u8BB0\u5FC6\u5361\u7247\u66F4\u65B0\u5931\u8D25\uFF0C\u5DF2\u8DF3\u8FC7\u8BE5\u9898");
     }
-    this.saveState();
-    (_c = (_b = this.plugin).refreshMemoryReminder) == null ? void 0 : _c.call(_b);
   }
   /** 「下一题」按钮：多选题未判定时先判定，否则跳转。 */
   async onNextClick() {
@@ -4938,6 +5027,10 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
   async refresh() {
     this.canPersistState = false;
     await this.saveCurrentEdit();
+    if (this.isClosed) {
+      this.canPersistState = true;
+      return;
+    }
     this.cancelAutoNext();
     if (this.autoSaveTimer !== null) {
       window.clearInterval(this.autoSaveTimer);
@@ -4947,14 +5040,23 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     this.csvPath = settings.csvPath;
     try {
       const csvContent = await readCSVFile(this.vault, this.csvPath);
+      if (this.isClosed) {
+        this.canPersistState = true;
+        return;
+      }
       this.allQuestions = parseCSV(csvContent);
       this.checkDuplicateIds();
       if (this.allQuestions.length === 0) {
         this.showError("CSV \u6587\u4EF6\u4E2D\u6CA1\u6709\u627E\u5230\u9898\u76EE\u6570\u636E");
+        this.startAutoSave();
         return;
       }
       this.canPersistState = true;
       await this.stateManager.clearState();
+      if (this.isClosed) {
+        this.canPersistState = true;
+        return;
+      }
       this.displayOrder = buildDisplayOrder(
         this.allQuestions,
         settings.randomOrder
@@ -4972,6 +5074,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
       this.filterMastered = settings.defaultFilterMastered;
       this.filterRepeat = settings.defaultFilterRepeat;
       this.filterWrong = settings.defaultFilterWrong;
+      this.filterUnanswered = "";
       this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
       this.exitRandomPractice();
       this.exitMemoryPractice();
@@ -4995,6 +5098,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     } catch (e) {
       console.error("CSV Quiz: Refresh failed", e);
       this.showError(`\u5237\u65B0\u5931\u8D25: ${e instanceof Error ? e.message : String(e)}`);
+      this.startAutoSave();
     }
   }
   showError(message) {
@@ -5034,6 +5138,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
       filterMastered: this.filterMastered,
       filterRepeat: this.filterRepeat,
       filterWrong: this.filterWrong,
+      filterUnanswered: this.filterUnanswered,
       answeredQuestions: this.answeredQuestions,
       memoryCards: this.memoryCards,
       // M1: 每日新题配额随进度持久化（跨会话/跨天保持一致）
@@ -5049,6 +5154,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     if (this.isClosed) return;
     if (!this.canPersistState) return;
     const state = this.buildCurrentState();
+    this.lastSavedState = state;
     this.stateManager.scheduleSave(state, 300);
   }
 };
@@ -5057,6 +5163,7 @@ _QuizView.openViewCount = 0;
 var QuizView = _QuizView;
 
 // src/stateManager.ts
+var import_obsidian5 = require("obsidian");
 var StateWriteQueue = class {
   constructor(plugin) {
     this.queue = [];
@@ -5100,6 +5207,8 @@ var StateManager = class {
     this.saveTimer = null;
     this.settingsSaveTimer = null;
     this.pendingSettings = null;
+    /** 等待本次设置落盘完成的 resolve 集合（共享 promise 语义：后一次保存覆盖前一次，所有等待者统一在最终写入完成后 resolve）。 */
+    this.settingsResolvers = [];
     this.plugin = plugin;
     this.writeQueue = new StateWriteQueue(plugin);
   }
@@ -5109,9 +5218,49 @@ var StateManager = class {
       ...currentSettings,
       ...data.settings || {}
     };
-    const quizState = data.quizState ? { ...data.quizState } : null;
+    const quizState = this.normalizeQuizState(data.quizState);
     this.currentState = quizState;
     return { settings, quizState };
+  }
+  /**
+   * 对磁盘上读取的 quizState 做字段级归一化防御：类型错误的字段
+   * （如 correctCount: "5"、memoryDailyNew: "abc"）在此兜底，避免
+   * 类型错误进入运行时崩溃。
+   */
+  normalizeQuizState(raw) {
+    if (raw === null || typeof raw !== "object") return null;
+    const r = raw;
+    const toNumber = (v) => {
+      const n = Number(v);
+      return Number.isNaN(n) ? 0 : n;
+    };
+    const toStr = (v) => typeof v === "string" ? v : "";
+    const toStrArray = (v) => Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
+    const toRecord = (v) => v && typeof v === "object" ? v : {};
+    const memoryCards = r.memoryCards === void 0 ? void 0 : r.memoryCards && typeof r.memoryCards === "object" ? r.memoryCards : {};
+    return {
+      csvPath: toStr(r.csvPath),
+      currentIndex: toNumber(r.currentIndex),
+      correctCount: toNumber(r.correctCount),
+      wrongCount: toNumber(r.wrongCount),
+      displayOrder: toStrArray(r.displayOrder),
+      filterText: toStr(r.filterText),
+      filterTags: toStr(r.filterTags),
+      filterCat1: toStr(r.filterCat1),
+      filterCat2: toStr(r.filterCat2),
+      filterCat3: toStr(r.filterCat3),
+      filterFavorite: toStr(r.filterFavorite),
+      filterMastered: toStr(r.filterMastered),
+      filterRepeat: toStr(r.filterRepeat),
+      filterWrong: toStr(r.filterWrong),
+      filterUnanswered: toStr(r.filterUnanswered),
+      answeredQuestions: toRecord(r.answeredQuestions),
+      memoryCards,
+      memoryNewDate: toStr(r.memoryNewDate),
+      memoryNewCountToday: toNumber(r.memoryNewCountToday),
+      memoryPendingNew: toStrArray(r.memoryPendingNew),
+      memoryInitialized: typeof r.memoryInitialized === "boolean" ? r.memoryInitialized : void 0
+    };
   }
   getState() {
     return this.currentState;
@@ -5120,6 +5269,7 @@ var StateManager = class {
     this.currentState = state;
   }
   async saveStateImmediately(state) {
+    this.cancelScheduledSave();
     this.currentState = state;
     await this.writeQueue.enqueue({ quizState: state });
   }
@@ -5130,12 +5280,15 @@ var StateManager = class {
     }
     this.saveTimer = window.setTimeout(() => {
       this.saveTimer = null;
-      this.writeQueue.enqueue({ quizState: state }).catch(
-        (e) => console.error("CSV Quiz: Failed to save state", e)
-      );
+      this.writeQueue.enqueue({ quizState: state }).catch((e) => {
+        console.error("CSV Quiz: Failed to save state", e);
+        const message = e instanceof Error ? e.message : String(e);
+        new import_obsidian5.Notice("\u5237\u9898\u8FDB\u5EA6\u4FDD\u5B58\u5931\u8D25: " + message);
+      });
     }, delay);
   }
   async clearState() {
+    this.cancelScheduledSave();
     this.currentState = null;
     await this.writeQueue.enqueue({ quizState: null });
   }
@@ -5145,18 +5298,21 @@ var StateManager = class {
       this.saveTimer = null;
     }
   }
-  /** 设置保存防抖：设置面板每次击键都会触发，合并为最后一次变更后 400ms 写入一次。 */
+  /**
+   * 设置保存防抖：设置面板每次击键都会触发，合并为最后一次变更后 400ms 写入一次。
+   * 使用"共享 promise"语义：每次调用都会登记一个 resolve，由最终那次写入完成后统一
+   * resolve，避免旧调用 clearTimeout 后其返回的 Promise 永不 resolve。
+   */
   async saveSettings(settings) {
     this.pendingSettings = settings;
     if (this.settingsSaveTimer !== null) {
       window.clearTimeout(this.settingsSaveTimer);
     }
     return new Promise((resolve) => {
+      this.settingsResolvers.push(resolve);
       this.settingsSaveTimer = window.setTimeout(() => {
         this.settingsSaveTimer = null;
-        const s = this.pendingSettings;
-        this.pendingSettings = null;
-        void this.writeQueue.enqueue({ settings: s }).then(resolve);
+        void this.flushSettingsSave();
       }, 400);
     });
   }
@@ -5168,14 +5324,20 @@ var StateManager = class {
     }
     const s = this.pendingSettings;
     this.pendingSettings = null;
-    if (s) {
-      await this.writeQueue.enqueue({ settings: s });
+    const resolvers = this.settingsResolvers;
+    this.settingsResolvers = [];
+    try {
+      if (s) {
+        await this.writeQueue.enqueue({ settings: s });
+      }
+    } finally {
+      resolvers.forEach((resolve) => resolve());
     }
   }
 };
 
 // src/main.ts
-var CSVQuizPlugin = class extends import_obsidian5.Plugin {
+var CSVQuizPlugin = class extends import_obsidian6.Plugin {
   constructor() {
     super(...arguments);
     this.memoryReminderTimer = null;
@@ -5221,10 +5383,14 @@ var CSVQuizPlugin = class extends import_obsidian5.Plugin {
     for (const leaf of leaves) {
       const view = leaf.view;
       if (view && view.onClose) {
-        void view.onClose();
+        void view.onClose().catch(
+          (e) => console.error("CSV Quiz: failed to close view", e)
+        );
       }
     }
-    void this.stateManager.flushSettingsSave();
+    void this.stateManager.flushSettingsSave().catch(
+      (e) => console.error("CSV Quiz: flush settings failed", e)
+    );
   }
   activateView() {
     const { workspace } = this.app;
@@ -5264,7 +5430,7 @@ var CSVQuizPlugin = class extends import_obsidian5.Plugin {
     this.updateMemoryReminder();
   }
   async loadSettings() {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k;
     const data = await this.loadData() || {
       settings: {
         csvPath: "\u9898\u5E93.csv",
@@ -5284,21 +5450,27 @@ var CSVQuizPlugin = class extends import_obsidian5.Plugin {
       },
       quizState: null
     };
+    const rawSettings = data.settings && typeof data.settings === "object" ? data.settings : {};
+    const toNumber = (v, fallback) => {
+      if (v === null || v === void 0) return fallback;
+      const n = Number(v);
+      return Number.isNaN(n) ? fallback : n;
+    };
     this.settings = {
-      csvPath: data.settings.csvPath || "\u9898\u5E93.csv",
-      randomOrder: (_a = data.settings.randomOrder) != null ? _a : false,
-      randomOptions: (_b = data.settings.randomOptions) != null ? _b : false,
-      autoNextDelay: (_c = data.settings.autoNextDelay) != null ? _c : 1,
-      filterPanelOpen: (_d = data.settings.filterPanelOpen) != null ? _d : true,
-      editPanelOpen: (_e = data.settings.editPanelOpen) != null ? _e : true,
-      defaultFilterFavorite: (_f = data.settings.defaultFilterFavorite) != null ? _f : "",
-      defaultFilterMastered: (_g = data.settings.defaultFilterMastered) != null ? _g : "",
-      defaultFilterRepeat: (_h = data.settings.defaultFilterRepeat) != null ? _h : "",
-      defaultFilterWrong: (_i = data.settings.defaultFilterWrong) != null ? _i : "",
-      memoryEnabled: (_j = data.settings.memoryEnabled) != null ? _j : true,
-      memoryDailyNew: (_k = data.settings.memoryDailyNew) != null ? _k : 20,
-      memoryReminder: (_l = data.settings.memoryReminder) != null ? _l : true,
-      memoryMarkRating: (_m = data.settings.memoryMarkRating) != null ? _m : true
+      csvPath: rawSettings.csvPath || "\u9898\u5E93.csv",
+      randomOrder: (_a = rawSettings.randomOrder) != null ? _a : false,
+      randomOptions: (_b = rawSettings.randomOptions) != null ? _b : false,
+      autoNextDelay: toNumber(rawSettings.autoNextDelay, 1),
+      filterPanelOpen: (_c = rawSettings.filterPanelOpen) != null ? _c : true,
+      editPanelOpen: (_d = rawSettings.editPanelOpen) != null ? _d : true,
+      defaultFilterFavorite: (_e = rawSettings.defaultFilterFavorite) != null ? _e : "",
+      defaultFilterMastered: (_f = rawSettings.defaultFilterMastered) != null ? _f : "",
+      defaultFilterRepeat: (_g = rawSettings.defaultFilterRepeat) != null ? _g : "",
+      defaultFilterWrong: (_h = rawSettings.defaultFilterWrong) != null ? _h : "",
+      memoryEnabled: (_i = rawSettings.memoryEnabled) != null ? _i : true,
+      memoryDailyNew: toNumber(rawSettings.memoryDailyNew, 20),
+      memoryReminder: (_j = rawSettings.memoryReminder) != null ? _j : true,
+      memoryMarkRating: (_k = rawSettings.memoryMarkRating) != null ? _k : true
     };
   }
   async saveSettings() {
@@ -5335,7 +5507,7 @@ var CSVQuizPlugin = class extends import_obsidian5.Plugin {
           }
           state.displayOrder = [];
           await this.stateManager.saveStateImmediately(state);
-          new import_obsidian5.Notice(
+          new import_obsidian6.Notice(
             choice === "records" ? "\u5237\u9898\u8BB0\u5F55\u5DF2\u6E05\u7406" : "\u8BB0\u5FC6\u5361\u7247\u5DF2\u5220\u9664"
           );
         }

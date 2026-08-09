@@ -60,6 +60,7 @@ export class QuizView extends ItemView {
   private filterMastered: string = "";
   private filterRepeat: string = "";
   private filterWrong: string = "";
+  private filterUnanswered: string = "";
 
   private csvPath: string = "";
 
@@ -76,6 +77,8 @@ export class QuizView extends ItemView {
   private isClosed: boolean = false;
   /** 题库加载成功前禁止写入状态，避免加载失败后用空进度覆盖磁盘进度。 */
   private canPersistState: boolean = false;
+  /** 已排队或已写入磁盘的状态快照（心跳脏检查基准；buildCurrentState 每次返回新对象）。 */
+  private lastSavedState: QuizSessionState | null = null;
   /** 当前打开的视图实例数（模块级）：防止同一窗口内出现双实例互相覆盖进度。 */
   private static openViewCount = 0;
   /** 本实例是否已计入 openViewCount。 */
@@ -156,7 +159,10 @@ export class QuizView extends ItemView {
       this.textFilterTimer = null;
     }
     if (this.stateManager.getState() && this.canPersistState) {
-      await this.stateManager.saveStateImmediately(this.buildCurrentState());
+      const state = this.buildCurrentState();
+      await this.stateManager.saveStateImmediately(state);
+      // F4: 保存后同步脏检查基准，保证 lastSavedState 反映已落盘状态
+      this.lastSavedState = state;
     }
     await this.csvWriteQueue.drain();
   }
@@ -348,12 +354,14 @@ export class QuizView extends ItemView {
       this.filterMastered = savedState.filterMastered || "";
       this.filterRepeat = savedState.filterRepeat || "";
       this.filterWrong = savedState.filterWrong || "";
+      this.filterUnanswered = savedState.filterUnanswered || "";
     } else {
       const s = this.getSettings();
       this.filterFavorite = s.defaultFilterFavorite;
       this.filterMastered = s.defaultFilterMastered;
       this.filterRepeat = s.defaultFilterRepeat;
       this.filterWrong = s.defaultFilterWrong;
+      this.filterUnanswered = "";
     }
 
     this.displayOrder = buildDisplayOrder(this.allQuestions, settings.randomOrder);
@@ -387,6 +395,7 @@ export class QuizView extends ItemView {
     this.filterMastered = savedState.filterMastered || "";
     this.filterRepeat = savedState.filterRepeat || "";
     this.filterWrong = savedState.filterWrong || "";
+    this.filterUnanswered = savedState.filterUnanswered || "";
 
     this.displayOrder = buildDisplayOrder(
       this.allQuestions,
@@ -447,6 +456,7 @@ export class QuizView extends ItemView {
     this.filterMastered = savedState.filterMastered || "";
     this.filterRepeat = savedState.filterRepeat || "";
     this.filterWrong = savedState.filterWrong || "";
+    this.filterUnanswered = savedState.filterUnanswered || "";
     this.updateFilterUI();
   }
 
@@ -460,7 +470,16 @@ export class QuizView extends ItemView {
     this.autoSaveTimer = window.setInterval(() => {
       // V2: 关闭后残留的心跳（若有）不得再写盘
       if (!this.isClosed && this.canPersistState && this.stateManager.getState()) {
-        this.stateManager.scheduleSave(this.buildCurrentState(), 0);
+        // F4: 心跳脏检查——状态未变化时跳过写盘，避免 5 秒无条件全量写 data.json
+        const state = this.buildCurrentState();
+        if (
+          this.lastSavedState !== null &&
+          quizStateEquals(state, this.lastSavedState)
+        ) {
+          return;
+        }
+        this.lastSavedState = state;
+        this.stateManager.scheduleSave(state, 0);
       }
     }, 5000);
   }
@@ -632,6 +651,7 @@ export class QuizView extends ItemView {
       { key: "filterMastered", label: "掌握", value: this.filterMastered },
       { key: "filterRepeat", label: "重复", value: this.filterRepeat },
       { key: "filterWrong", label: "错题", value: this.filterWrong },
+      { key: "filterUnanswered", label: "未答", value: this.filterUnanswered },
     ];
     for (const bf of boolFilters) {
       const group = boolRow.createSpan({ cls: "csv-quiz-bool-group" });
@@ -750,8 +770,13 @@ export class QuizView extends ItemView {
     if (this.textFilterTimer !== null) {
       window.clearTimeout(this.textFilterTimer);
     }
-    this.textFilterTimer = window.setTimeout(() => {
+    this.textFilterTimer = window.setTimeout(async () => {
       this.textFilterTimer = null;
+      if (this.isClosed) return;
+      // F5: 先保存编辑区未提交的标签/分类修改，避免筛选时静默丢失。
+      // saveCurrentEdit 无变化时立即返回；有变化时写 CSV 并 reFilter，
+      // 之后 applyFiltersAndReset 会再以新 filterText 重筛（与其它筛选入口一致）。
+      await this.saveCurrentEdit();
       if (this.isClosed) return;
       this.filterText = this.filterTextInput.value;
       this.applyFiltersAndReset();
@@ -766,6 +791,7 @@ export class QuizView extends ItemView {
       filterMastered: this.filterMastered,
       filterRepeat: this.filterRepeat,
       filterWrong: this.filterWrong,
+      filterUnanswered: this.filterUnanswered,
     };
     Array.from(chips).forEach((chip) => {
       const key = chip.getAttribute("data-bool-key") || "";
@@ -786,7 +812,8 @@ export class QuizView extends ItemView {
 
   /** 随机练习：按当前筛选条件筛出未答题，随机取最多 100 道作为练习集（不足自适应）。 */
   private enableRandomPractice(): void {
-    if (this.practiceActive) return;
+    // F3: 记忆练习确认弹窗 await 期间禁止进入随机练习，避免双模式并存
+    if (this.practiceActive || this.memoryEnabling) return;
     // 进入任一练习模式前互斥退出另一个
     if (this.memoryActive) this.exitMemoryPractice();
 
@@ -893,6 +920,9 @@ export class QuizView extends ItemView {
         // L2: 弹窗期间视图被关闭 → 中止（finally 会复位 memoryEnabling）
         if (this.isClosed) return;
         if (res !== "reset") return;
+        // F3: 弹窗 await 期间用户可能已进入随机练习（当时 practiceActive 仍为 false），
+        // 确认后退出它，由记忆练习接管（与"进入任一练习模式前互斥退出另一个"语义一致）
+        if (this.practiceActive) this.exitRandomPractice();
         // 清空进度（与 resetProgress 的清空逻辑等价；不弹提示、不退出面板）
         this.correctCount = 0;
         this.wrongCount = 0;
@@ -1132,7 +1162,9 @@ export class QuizView extends ItemView {
       this.filterMastered,
       this.filterRepeat,
       this.filterWrong,
-      this.filterText
+      this.filterText,
+      this.filterUnanswered,
+      this.answeredQuestions
     );
   }
 
@@ -1174,7 +1206,9 @@ export class QuizView extends ItemView {
 
   /** 忽略字母顺序与重复，归一化答案字符串用于比较。 */
   private normalizeAnswer(value: string): string {
-    return [...new Set(value)].sort().join("");
+    // F7: 先过滤非 A-D 字符（答案列可能含空格/逗号/小写等脏数据）再归一化，
+    // 避免如答案 "A B" 归一化后带空格、与用户选择 "AB" 永不相等
+    return [...new Set(value.toUpperCase().replace(/[^A-D]/g, ""))].sort().join("");
   }
 
   private renderQuestion(): void {
@@ -1581,86 +1615,92 @@ export class QuizView extends ItemView {
     this.memoryInitialized = true;
     const now = new Date();
     const saved = this.memoryCards[id];
-    // 防御非法持久化数据（如手工编辑 data.json）：state 越界或 lastReview 不可解析时跳过该题
+    // F2: 防御非法持久化数据（如手工编辑 data.json）：state 越界、lastReview 不可解析、
+    // 或 due 存在但不可解析时跳过该题（非法 due 会让 FSRS 产出 NaN 间隔 → toISOString 抛异常）
     if (
       saved &&
       (![0, 1, 2, 3].includes(saved.state) ||
         (saved.lastReview !== "" &&
-          Number.isNaN(new Date(saved.lastReview).getTime())))
+          Number.isNaN(new Date(saved.lastReview).getTime())) ||
+        (saved.due && Number.isNaN(new Date(saved.due).getTime())))
     ) {
+      console.warn(`CSV Quiz: memory card data invalid for question "${id}", skipped`);
       new Notice("记忆练习：卡片数据异常，已跳过该题");
       return;
     }
-    // 评分所需的题目对象（答错分支写 wrong 也复用）
-    const q = this.filteredQuestions.find((x) => x.id === id) ?? null;
-    let card: Card;
-    if (saved) {
-      card = {
-        due: new Date(saved.due),
-        stability: saved.stability,
-        difficulty: saved.difficulty,
-        reps: saved.reps,
-        lapses: saved.lapses,
-        learning_steps: saved.learningSteps,
-        state: saved.state as State,
-        elapsed_days: 0,
-        scheduled_days: 0,
-        // B1: 必须 round-trip last_review，否则 FSRS 认为从未复习，间隔不会增长
-        last_review: saved.lastReview
-          ? new Date(saved.lastReview)
-          : undefined,
-      };
-    } else {
-      card = createEmptyCard();
-    }
-    // 评分映射：答错一律 Again；答对按收藏/掌握标记选档（设置可关，同题掌握优先）
-    let rating: Rating;
-    if (!correct) {
-      rating = Rating.Again;
-    } else if (
-      this.getSettings().memoryMarkRating &&
-      q &&
-      q.mastered === "1"
-    ) {
-      rating = Rating.Easy;
-    } else if (
-      this.getSettings().memoryMarkRating &&
-      q &&
-      q.favorite === "1"
-    ) {
-      rating = Rating.Hard;
-    } else {
-      rating = Rating.Good;
-    }
-    const result = memoryScheduler.next(card, now, rating);
-    const c = result.card;
-    this.memoryCards[id] = {
-      state: c.state,
-      stability: c.stability,
-      difficulty: c.difficulty,
-      due: c.due.toISOString(),
-      reps: c.reps,
-      lapses: c.lapses,
-      learningSteps: c.learning_steps,
-      lastReview: c.last_review ? c.last_review.toISOString() : "",
-    };
-    if (!correct) {
-      // 答错计入 wrong 标记并写回 CSV（通过现有异步队列；失败时回滚内存标记）
-      if (q && q.wrong !== "1") {
-        const old = q.wrong;
-        q.wrong = "1";
-        void this.saveQuestionToCSV(q).then((ok) => {
-          if (!ok) {
-            q.wrong = old;
-            new Notice("记忆练习：错题标记保存失败");
-          }
-        });
+    try {
+      // 评分所需的题目对象（答错分支写 wrong 也复用）
+      const q = this.filteredQuestions.find((x) => x.id === id) ?? null;
+      let card: Card;
+      if (saved) {
+        card = {
+          due: new Date(saved.due),
+          stability: saved.stability,
+          difficulty: saved.difficulty,
+          reps: saved.reps,
+          lapses: saved.lapses,
+          learning_steps: saved.learningSteps,
+          state: saved.state as State,
+          elapsed_days: 0,
+          scheduled_days: 0,
+          // B1: 必须 round-trip last_review，否则 FSRS 认为从未复习，间隔不会增长
+          last_review: saved.lastReview
+            ? new Date(saved.lastReview)
+            : undefined,
+        };
+      } else {
+        card = createEmptyCard();
       }
+      // 评分映射：答错一律 Again；答对按掌握标记选档（设置可关）。
+      // 收藏不参与评分——用 Hard 表达"想多复习"会持续推高难度并压缩间隔（难度虚高、
+      // 复习越来越频繁），故收藏只用于筛选/练习集，不干预 FSRS 调度。
+      let rating: Rating;
+      if (!correct) {
+        rating = Rating.Again;
+      } else if (
+        this.getSettings().memoryMarkRating &&
+        q &&
+        q.mastered === "1"
+      ) {
+        rating = Rating.Easy;
+      } else {
+        rating = Rating.Good;
+      }
+      const result = memoryScheduler.next(card, now, rating);
+      const c = result.card;
+      this.memoryCards[id] = {
+        state: c.state,
+        stability: c.stability,
+        difficulty: c.difficulty,
+        due: c.due.toISOString(),
+        reps: c.reps,
+        lapses: c.lapses,
+        learningSteps: c.learning_steps,
+        lastReview: c.last_review ? c.last_review.toISOString() : "",
+      };
+      if (!correct) {
+        // 答错计入 wrong 标记并写回 CSV（通过现有异步队列；失败时回滚内存标记）
+        if (q && q.wrong !== "1") {
+          const old = q.wrong;
+          q.wrong = "1";
+          void this.saveQuestionToCSV(q).then((ok) => {
+            if (!ok) {
+              q.wrong = old;
+              new Notice("记忆练习：错题标记保存失败");
+            }
+          });
+        }
+      }
+      this.saveState();
+      // L1/L3: 判分后立即刷新状态栏提醒（实际实例为 CSVQuizPlugin，故 cast 调用）
+      (this.plugin as unknown as { refreshMemoryReminder?: () => void })
+        .refreshMemoryReminder?.();
+    } catch (e: unknown) {
+      // F2: 任何异常（如未预期损坏的卡片数据）不外泄、不打断调用方，
+      // answering 复位逻辑在调用方（handleAnswer/evaluateMultiAnswer）正常执行
+      console.error("CSV Quiz: applyMemoryReview failed", e);
+      new Notice("记忆卡片更新失败，已跳过该题");
     }
-    this.saveState();
-    // L1/L3: 判分后立即刷新状态栏提醒（实际实例为 CSVQuizPlugin，故 cast 调用）
-    (this.plugin as unknown as { refreshMemoryReminder?: () => void })
-      .refreshMemoryReminder?.();
   }
 
   /** 「下一题」按钮：多选题未判定时先判定，否则跳转。 */
@@ -2305,6 +2345,12 @@ export class QuizView extends ItemView {
   async refresh(): Promise<void> {
     this.canPersistState = false;
     await this.saveCurrentEdit();
+    // F1: 保存编辑期间视图被关闭 → 中止。onClose 已保存进度；恢复
+    // canPersistState 为刷新前的值（true），已关闭视图不会因此触发任何写盘。
+    if (this.isClosed) {
+      this.canPersistState = true;
+      return;
+    }
     this.cancelAutoNext();
     if (this.autoSaveTimer !== null) {
       window.clearInterval(this.autoSaveTimer);
@@ -2316,18 +2362,31 @@ export class QuizView extends ItemView {
 
     try {
       const csvContent = await readCSVFile(this.vault, this.csvPath);
+      // F1: 读文件期间视图被关闭 → 中止，阻止后续 clearState 覆盖 onClose 已保存的进度
+      if (this.isClosed) {
+        this.canPersistState = true;
+        return;
+      }
       this.allQuestions = parseCSV(csvContent);
       this.checkDuplicateIds();
       if (this.allQuestions.length === 0) {
         // V1: 题库为空时不清除已保存的进度（与 loadQuestions 的空题库路径保持一致），
         // 避免用户误触「重置」或更换到空文件时静默清空旧进度。
         this.showError("CSV 文件中没有找到题目数据");
+        // F6: 空题库 early-return 路径也重启心跳（canPersistState 仍为 false，保持只读，
+        // 避免把半重置状态写回磁盘；startAutoSave 内部有 isClosed/canPersistState 守卫）
+        this.startAutoSave();
         return;
       }
       this.canPersistState = true;
 
       // Clear state completely
       await this.stateManager.clearState();
+      // F1: clearState 期间视图被关闭 → 中止（onClose 已保存进度）
+      if (this.isClosed) {
+        this.canPersistState = true;
+        return;
+      }
 
       // Fresh start
       this.displayOrder = buildDisplayOrder(
@@ -2348,6 +2407,7 @@ export class QuizView extends ItemView {
       this.filterMastered = settings.defaultFilterMastered;
       this.filterRepeat = settings.defaultFilterRepeat;
       this.filterWrong = settings.defaultFilterWrong;
+      this.filterUnanswered = "";
 
       this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
 
@@ -2379,6 +2439,9 @@ export class QuizView extends ItemView {
     } catch (e: unknown) {
       console.error("CSV Quiz: Refresh failed", e);
       this.showError(`刷新失败: ${e instanceof Error ? e.message : String(e)}`);
+      // F6: 刷新失败后视图保持只读（不恢复 canPersistState，避免把陈旧/半重置状态
+      // 写回磁盘），但重启心跳以维持视图可响应
+      this.startAutoSave();
     }
   }
 
@@ -2423,6 +2486,7 @@ export class QuizView extends ItemView {
       filterMastered: this.filterMastered,
       filterRepeat: this.filterRepeat,
       filterWrong: this.filterWrong,
+      filterUnanswered: this.filterUnanswered,
       answeredQuestions: this.answeredQuestions,
       memoryCards: this.memoryCards,
       // M1: 每日新题配额随进度持久化（跨会话/跨天保持一致）
@@ -2441,6 +2505,8 @@ export class QuizView extends ItemView {
     if (this.isClosed) return;
     if (!this.canPersistState) return;
     const state = this.buildCurrentState();
+    // F4: 记录脏检查基准（已排队或已写入磁盘的状态快照）
+    this.lastSavedState = state;
     this.stateManager.scheduleSave(state, 300);
   }
 }

@@ -49,17 +49,23 @@ export function quizStateEquals(
   if (a.filterMastered !== b.filterMastered) return false;
   if (a.filterRepeat !== b.filterRepeat) return false;
   if (a.filterWrong !== b.filterWrong) return false;
+  if ((a.filterUnanswered || "") !== (b.filterUnanswered || "")) return false;
 
-  if (a.displayOrder.length !== b.displayOrder.length) return false;
-  for (let i = 0; i < a.displayOrder.length; i++) {
-    if (a.displayOrder[i] !== b.displayOrder[i]) return false;
+  // displayOrder / answeredQuestions 为旧版数据可能缺失的字段，缺失时按空值处理
+  const aOrder = a.displayOrder || [];
+  const bOrder = b.displayOrder || [];
+  if (aOrder.length !== bOrder.length) return false;
+  for (let i = 0; i < aOrder.length; i++) {
+    if (aOrder[i] !== bOrder[i]) return false;
   }
 
-  const ak = Object.keys(a.answeredQuestions);
-  const bk = Object.keys(b.answeredQuestions);
+  const aq = a.answeredQuestions || {};
+  const bq = b.answeredQuestions || {};
+  const ak = Object.keys(aq);
+  const bk = Object.keys(bq);
   if (ak.length !== bk.length) return false;
   for (const k of ak) {
-    if (a.answeredQuestions[k] !== b.answeredQuestions[k]) return false;
+    if (aq[k] !== bq[k]) return false;
   }
 
   // memoryCards 为可选字段（旧进度无记忆数据），缺失视为空对象
@@ -108,6 +114,7 @@ export function countDueCards(
   if (!cards) return 0;
   let n = 0;
   for (const c of Object.values(cards)) {
+    if (!c || typeof c !== "object") continue;
     const t = new Date(c.due).getTime();
     if (!Number.isNaN(t) && t <= now.getTime()) n++;
   }

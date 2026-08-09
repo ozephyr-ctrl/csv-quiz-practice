@@ -85,8 +85,8 @@ export class CSVQuizSettingTab extends PluginSettingTab {
             control: { type: "toggle", key: "memoryReminder" },
           },
           {
-            name: "收藏/掌握参与评分",
-            desc: "记忆练习答对时按标记评分：掌握=Easy（间隔拉长更快）、收藏=Hard（复习更保守），同题掌握优先；答错一律 Again。",
+            name: "掌握参与评分",
+            desc: "记忆练习答对时按标记评分：掌握=Easy（间隔拉长更快）、其余一律 Good；收藏不参与评分（避免难度虚高与间隔压缩）；答错一律 Again。",
             control: { type: "toggle", key: "memoryMarkRating" },
           },
         ],
@@ -295,8 +295,8 @@ export class CSVQuizSettingTab extends PluginSettingTab {
     );
     this.addToggleSetting(
       containerEl,
-      "收藏/掌握参与评分",
-      "记忆练习答对时按标记评分：掌握=Easy（间隔拉长更快）、收藏=Hard（复习更保守），同题掌握优先；答错一律 Again。",
+      "掌握参与评分",
+      "记忆练习答对时按标记评分：掌握=Easy（间隔拉长更快）、其余一律 Good；收藏不参与评分（避免难度虚高与间隔压缩）；答错一律 Again。",
       "memoryMarkRating"
     );
 

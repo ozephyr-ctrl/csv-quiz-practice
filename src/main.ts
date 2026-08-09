@@ -61,10 +61,14 @@ export default class CSVQuizPlugin extends Plugin {
     for (const leaf of leaves) {
       const view = leaf.view as QuizView;
       if (view && view.onClose) {
-        void view.onClose();
+        void view.onClose().catch((e: unknown) =>
+          console.error("CSV Quiz: failed to close view", e)
+        );
       }
     }
-    void this.stateManager.flushSettingsSave();
+    void this.stateManager.flushSettingsSave().catch((e: unknown) =>
+      console.error("CSV Quiz: flush settings failed", e)
+    );
   }
 
   activateView(): void {
@@ -133,21 +137,33 @@ export default class CSVQuizPlugin extends Plugin {
         quizState: null,
       };
 
+    const rawSettings = (
+      data.settings && typeof data.settings === "object" ? data.settings : {}
+    ) as Partial<PluginSettings>;
+
+    // 数字字段用 Number() + isNaN 校验，类型错误（如 "abc"）回退默认值；
+    // null/undefined 保持原有 ?? 语义回退默认值。
+    const toNumber = (v: unknown, fallback: number): number => {
+      if (v === null || v === undefined) return fallback;
+      const n = Number(v);
+      return Number.isNaN(n) ? fallback : n;
+    };
+
     this.settings = {
-      csvPath: data.settings.csvPath || "题库.csv",
-      randomOrder: data.settings.randomOrder ?? false,
-      randomOptions: data.settings.randomOptions ?? false,
-      autoNextDelay: data.settings.autoNextDelay ?? 1,
-      filterPanelOpen: data.settings.filterPanelOpen ?? true,
-      editPanelOpen: data.settings.editPanelOpen ?? true,
-      defaultFilterFavorite: data.settings.defaultFilterFavorite ?? "",
-      defaultFilterMastered: data.settings.defaultFilterMastered ?? "",
-      defaultFilterRepeat: data.settings.defaultFilterRepeat ?? "",
-      defaultFilterWrong: data.settings.defaultFilterWrong ?? "",
-      memoryEnabled: data.settings.memoryEnabled ?? true,
-      memoryDailyNew: data.settings.memoryDailyNew ?? 20,
-      memoryReminder: data.settings.memoryReminder ?? true,
-      memoryMarkRating: data.settings.memoryMarkRating ?? true,
+      csvPath: rawSettings.csvPath || "题库.csv",
+      randomOrder: rawSettings.randomOrder ?? false,
+      randomOptions: rawSettings.randomOptions ?? false,
+      autoNextDelay: toNumber(rawSettings.autoNextDelay, 1),
+      filterPanelOpen: rawSettings.filterPanelOpen ?? true,
+      editPanelOpen: rawSettings.editPanelOpen ?? true,
+      defaultFilterFavorite: rawSettings.defaultFilterFavorite ?? "",
+      defaultFilterMastered: rawSettings.defaultFilterMastered ?? "",
+      defaultFilterRepeat: rawSettings.defaultFilterRepeat ?? "",
+      defaultFilterWrong: rawSettings.defaultFilterWrong ?? "",
+      memoryEnabled: rawSettings.memoryEnabled ?? true,
+      memoryDailyNew: toNumber(rawSettings.memoryDailyNew, 20),
+      memoryReminder: rawSettings.memoryReminder ?? true,
+      memoryMarkRating: rawSettings.memoryMarkRating ?? true,
     };
   }
 
