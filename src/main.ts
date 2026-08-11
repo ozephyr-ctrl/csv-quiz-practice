@@ -179,22 +179,32 @@ export default class CSVQuizPlugin extends Plugin {
   /**
    * 清除已保存的刷题进度；若面板已打开则立即重建会话。
    * choice 省略或为 "all" 时为「全部重置」语义（清空 data.json 并刷新面板、
-   * 重读题库，用于设置页「全部重置」与开启「随机题目顺序」等场景）；
-   * 传入 "records"/"cards" 时为设置页的分项清理（不重载题库、保留筛选）。
+   * 重读题库，用于设置页「全部重置」等场景）；
+   * 传入 "records"/"cards"/"order" 时为设置页的分项清理（不重载题库、保留筛选）。
    */
   async resetQuizProgress(
-    choice?: "records" | "cards" | "all"
+    choice?: "records" | "cards" | "order" | "all"
   ): Promise<void> {
-    // 分项清理（仅刷题记录 / 仅记忆卡片）：不重载题库、保留筛选
-    if (choice === "records" || choice === "cards") {
+    // 分项清理（仅刷题记录 / 仅记忆卡片 / 仅重置顺序）：不重载题库、保留筛选
+    if (choice === "records" || choice === "cards" || choice === "order") {
       const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
       const view = leaf?.view as QuizView | undefined;
       if (view) {
         await view.applyResetChoice(choice);
       } else {
         const state = this.stateManager.getState();
+        // 重置顺序时若随机设置开启,自动关闭（避免与 CSV 原始顺序语义冲突）
+        let autoOff = false;
         if (state) {
-          if (choice === "records") {
+          if (choice === "order") {
+            // 顺序下次打开面板时按设置重建
+            state.displayOrder = [];
+            if (this.settings.randomOrder) {
+              this.settings.randomOrder = false;
+              await this.saveSettings();
+              autoOff = true;
+            }
+          } else if (choice === "records") {
             state.correctCount = 0;
             state.wrongCount = 0;
             state.answeredQuestions = {};
@@ -204,12 +214,16 @@ export default class CSVQuizPlugin extends Plugin {
             state.memoryNewCountToday = 0;
             state.memoryPendingNew = [];
           }
-          // 顺序将在下次打开面板时按当前设置重建（savedOrder 不匹配时 buildDisplayOrder 重建）
-          state.displayOrder = [];
           await this.stateManager.saveStateImmediately(state);
           // C-2: 面板未打开时也要给用户反馈
           new Notice(
-            choice === "records" ? "刷题记录已清理" : "记忆卡片已删除"
+            choice === "order"
+              ? autoOff
+                ? "题目顺序已重置，重新打开面板时生效，并已自动关闭随机题目顺序"
+                : "题目顺序已重置，重新打开面板时生效"
+              : choice === "records"
+                ? "刷题记录已清理"
+                : "记忆卡片已删除"
           );
         }
         this.refreshMemoryReminder();
@@ -217,8 +231,27 @@ export default class CSVQuizPlugin extends Plugin {
       return;
     }
     // 全部重置（choice 省略或 "all"）：清空 data.json 并刷新面板（重读题库），
-    // 供设置页「全部重置」与随机题目顺序开关使用
+    // 供设置页「全部重置」使用
     await this.stateManager.clearState();
     this.refreshQuiz();
+  }
+
+  /**
+   * 随机题目顺序开关变更后：保留答题进度重排顺序。
+   * 面板打开时由视图就地重排并保存；未打开时清空已存顺序，
+   * 下次打开面板时按当前设置重建（buildDisplayOrder 的 savedOrder 不匹配即重建）。
+   */
+  async reorderQuestions(): Promise<void> {
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
+    const view = leaf?.view as QuizView | undefined;
+    if (view) {
+      await view.reorderForRandomSetting();
+    } else {
+      const state = this.stateManager.getState();
+      if (state) {
+        state.displayOrder = [];
+        await this.stateManager.saveStateImmediately(state);
+      }
+    }
   }
 }

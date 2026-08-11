@@ -84,10 +84,10 @@ export class ChoiceModal extends Modal {
   }
 }
 
-/** 弹「重置刷题进度」分项选择框；返回 "records"/"cards"/"all"，取消或关闭返回 null。 */
+/** 弹「重置刷题进度」分项选择框；返回 "records"/"cards"/"order"/"all"，取消或关闭返回 null。 */
 export function askResetChoice(
   app: App
-): Promise<"records" | "cards" | "all" | null> {
+): Promise<"records" | "cards" | "order" | "all" | null> {
   const modal = new ChoiceModal(app, {
     title: "重置刷题进度",
     message:
@@ -96,12 +96,17 @@ export function askResetChoice(
       {
         label: "仅清理刷题记录",
         value: "records",
-        description: "清除答题记录与统计，保留记忆卡片",
+        description: "清除答题记录与统计，保留记忆卡片；题目顺序将按当前设置重建",
       },
       {
         label: "仅删除记忆卡片",
         value: "cards",
-        description: "清除 FSRS 间隔重复数据，保留答题记录",
+        description: "清除 FSRS 间隔重复数据，保留答题记录；题目顺序将按当前设置重建",
+      },
+      {
+        label: "重置题目顺序",
+        value: "order",
+        description: "将题目顺序恢复为 CSV 文件原始顺序，不清理答题记录与记忆卡片",
       },
       {
         label: "全部重置",
@@ -116,7 +121,7 @@ export function askResetChoice(
   return modal.promise.then((res) =>
     res === null || res === "cancel"
       ? null
-      : (res as "records" | "cards" | "all")
+      : (res as "records" | "cards" | "order" | "all")
   );
 }
 

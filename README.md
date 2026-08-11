@@ -57,8 +57,8 @@ The CSV file must be **BOM-prefixed UTF-8** with 15 columns:
   Instant feedback on answer selection with the correct answer shown
 - **答对自动跳转**：可设置延迟秒数后自动进入下一题
   **Auto-advance**: auto-next with configurable delay on correct answer
-- **随机题目顺序**：每次加载时重新排列题目
-  **Random order**: shuffle questions on each load
+- **随机题目顺序**：每次加载时重新排列题目；开关切换保留答题进度，仅重排显示顺序（关闭时恢复 CSV 默认顺序）
+  **Random order**: shuffle questions on each load; toggling preserves progress and only reorders (off = back to CSV order)
 - **随机选项顺序**：每题选项随机排列
   **Random options**: shuffle answer options per question
 
@@ -74,8 +74,8 @@ The CSV file must be **BOM-prefixed UTF-8** with 15 columns:
     Correct answers extend intervals via FSRS; mistakes trigger relearning and reappear the same day
   - 练习集中显著标明题目来源：🆕 新题 / 🔁 复习
     Question source is clearly labeled: 🆕 new / 🔁 review
-  - **收藏/掌握参与评分**（可关闭）：掌握题答对按 Easy（少复习）、收藏题答对按 Hard（多复习），同题掌握优先
-    **Flag-aware rating** (optional): mastered questions answered correctly count as Easy, favorited ones as Hard (mastered wins on conflict)
+  - **掌握参与评分**（可关闭）：掌握题答对按 Easy（少复习）、其余一律 Good；收藏不参与评分（避免难度虚高与间隔压缩）；答错一律 Again
+    **Mastery-aware rating** (optional): mastered questions answered correctly count as Easy, others as Good; favorites do not affect rating (prevents artificial difficulty inflation and interval compression); wrong answers always count as Again
   - 练习模式下统计显示**本次会话**答题结果，不污染全局正确率
     Practice mode shows per-session stats, leaving global accuracy untouched
   - 题目页眉底部可折叠「记忆卡片」信息栏，查看每题 FSRS 状态（难度/稳定性/到期时间等）
@@ -126,7 +126,7 @@ The CSV file must be **BOM-prefixed UTF-8** with 15 columns:
 | 记忆练习 / Memory Practice | 启用基于记忆曲线（FSRS）的练习 |
 | 每日新题数 / Daily New Questions | 记忆练习每天引入的新题数量上限（默认 20） |
 | 到期提醒 / Due Reminder | 状态栏显示今日待复习题数提醒 |
-| 收藏/掌握参与评分 / Flag-aware Rating | 掌握答对=Easy、收藏答对=Hard（默认开启） |
+| 掌握参与评分 / Mastery-aware Rating | 掌握答对=Easy、其余=Good；收藏不参与评分（默认开启） |
 | 重置刷题进度 / Reset Progress | 分项清理：仅刷题记录 / 仅记忆卡片 / 全部重置 |
 
 ---

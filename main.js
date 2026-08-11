@@ -545,12 +545,17 @@ function askResetChoice(app) {
       {
         label: "\u4EC5\u6E05\u7406\u5237\u9898\u8BB0\u5F55",
         value: "records",
-        description: "\u6E05\u9664\u7B54\u9898\u8BB0\u5F55\u4E0E\u7EDF\u8BA1\uFF0C\u4FDD\u7559\u8BB0\u5FC6\u5361\u7247"
+        description: "\u6E05\u9664\u7B54\u9898\u8BB0\u5F55\u4E0E\u7EDF\u8BA1\uFF0C\u4FDD\u7559\u8BB0\u5FC6\u5361\u7247\uFF1B\u9898\u76EE\u987A\u5E8F\u5C06\u6309\u5F53\u524D\u8BBE\u7F6E\u91CD\u5EFA"
       },
       {
         label: "\u4EC5\u5220\u9664\u8BB0\u5FC6\u5361\u7247",
         value: "cards",
-        description: "\u6E05\u9664 FSRS \u95F4\u9694\u91CD\u590D\u6570\u636E\uFF0C\u4FDD\u7559\u7B54\u9898\u8BB0\u5F55"
+        description: "\u6E05\u9664 FSRS \u95F4\u9694\u91CD\u590D\u6570\u636E\uFF0C\u4FDD\u7559\u7B54\u9898\u8BB0\u5F55\uFF1B\u9898\u76EE\u987A\u5E8F\u5C06\u6309\u5F53\u524D\u8BBE\u7F6E\u91CD\u5EFA"
+      },
+      {
+        label: "\u91CD\u7F6E\u9898\u76EE\u987A\u5E8F",
+        value: "order",
+        description: "\u5C06\u9898\u76EE\u987A\u5E8F\u6062\u590D\u4E3A CSV \u6587\u4EF6\u539F\u59CB\u987A\u5E8F\uFF0C\u4E0D\u6E05\u7406\u7B54\u9898\u8BB0\u5F55\u4E0E\u8BB0\u5FC6\u5361\u7247"
       },
       {
         label: "\u5168\u90E8\u91CD\u7F6E",
@@ -695,7 +700,7 @@ var CSVQuizSettingTab = class extends import_obsidian2.PluginSettingTab {
           },
           {
             name: "\u6BCF\u65E5\u65B0\u9898\u6570",
-            desc: "\u8BB0\u5FC6\u7EC3\u4E60\u6BCF\u5929\u5F15\u5165\u7684\u65B0\u9898\u6570\u91CF\u4E0A\u9650",
+            desc: "\u8BB0\u5FC6\u7EC3\u4E60\u6BCF\u5929\u5F15\u5165\u7684\u65B0\u9898\u6570\u91CF\u4E0A\u9650\uFF08\u7A33\u5B9A\u540E\u6BCF\u65E5\u590D\u4E60\u91CF\u7EA6\u4E3A\u8BE5\u503C\u7684 2~3 \u500D\uFF09",
             control: {
               type: "number",
               key: "memoryDailyNew",
@@ -823,37 +828,16 @@ var CSVQuizSettingTab = class extends import_obsidian2.PluginSettingTab {
     await this.plugin.resetQuizProgress(res);
   }
   /**
-   * 「随机题目顺序」开关处理：开启/关闭都会重排已有会话的显示顺序，
-   * 因此开关切换都需要重置刷题进度（清除答题记录/统计）。
-   * 用户取消则回滚开关。toggle 参数用于 <1.13 的命令式设置路径回滚开关 UI。
+   * 「随机题目顺序」开关处理：切换后保留答题进度，仅重建显示顺序
+   * （开启=随机排列，关闭=恢复 CSV 默认顺序），当前题按 id 重新定位。
    */
   async handleRandomOrderToggle(newValue, toggle) {
     if (newValue === this.plugin.settings.randomOrder) return;
-    const modal = new ChoiceModal(this.app, {
-      title: newValue ? "\u5F00\u542F\u968F\u673A\u9898\u76EE\u987A\u5E8F\u9700\u8981\u91CD\u7F6E\u8FDB\u5EA6" : "\u5173\u95ED\u968F\u673A\u9898\u76EE\u987A\u5E8F\u9700\u8981\u91CD\u7F6E\u8FDB\u5EA6",
-      message: newValue ? "\u6253\u4E71\u9898\u76EE\u987A\u5E8F\u9700\u8981\u91CD\u7F6E\u5F53\u524D\u5237\u9898\u8FDB\u5EA6\uFF1A\u5C06\u6E05\u9664\u6240\u6709\u7B54\u9898\u8BB0\u5F55\u4E0E\u6B63\u786E/\u9519\u8BEF\u7EDF\u8BA1\uFF0C\u5E76\u91CD\u65B0\u968F\u673A\u6392\u5217\u9898\u76EE\u987A\u5E8F\u3002\u662F\u5426\u7EE7\u7EED\uFF1F" : "\u6062\u590D\u9ED8\u8BA4 CSV \u987A\u5E8F\u9700\u8981\u91CD\u7F6E\u5F53\u524D\u5237\u9898\u8FDB\u5EA6\uFF1A\u5C06\u6E05\u9664\u6240\u6709\u7B54\u9898\u8BB0\u5F55\u4E0E\u6B63\u786E/\u9519\u8BEF\u7EDF\u8BA1\uFF0C\u5E76\u6062\u590D\u4E3A CSV \u9ED8\u8BA4\u987A\u5E8F\u3002\u662F\u5426\u7EE7\u7EED\uFF1F",
-      options: [
-        {
-          label: newValue ? "\u91CD\u7F6E\u5E76\u6253\u4E71" : "\u91CD\u7F6E\u5E76\u6062\u590D",
-          value: "confirm",
-          cta: true
-        },
-        { label: "\u53D6\u6D88", value: "cancel" }
-      ]
-    });
-    modal.open();
-    const res = await modal.promise;
-    if (res !== "confirm") {
-      this.plugin.settings.randomOrder = !newValue;
-      toggle == null ? void 0 : toggle.setValue(!newValue);
-      new import_obsidian2.Notice("\u5DF2\u53D6\u6D88");
-      return;
-    }
     this.plugin.settings.randomOrder = newValue;
     await this.plugin.saveSettings();
-    await this.plugin.resetQuizProgress();
+    await this.plugin.reorderQuestions();
     new import_obsidian2.Notice(
-      newValue ? "\u5DF2\u91CD\u7F6E\u8FDB\u5EA6\u5E76\u968F\u673A\u6253\u4E71\u9898\u76EE\u987A\u5E8F" : "\u5DF2\u91CD\u7F6E\u8FDB\u5EA6\u5E76\u6062\u590D CSV \u9ED8\u8BA4\u987A\u5E8F"
+      newValue ? "\u5DF2\u5F00\u542F\u968F\u673A\u9898\u76EE\u987A\u5E8F\uFF0C\u7B54\u9898\u8FDB\u5EA6\u5DF2\u4FDD\u7559" : "\u5DF2\u5173\u95ED\u968F\u673A\u9898\u76EE\u987A\u5E8F\uFF0C\u6062\u590D\u9ED8\u8BA4\u987A\u5E8F\uFF0C\u7B54\u9898\u8FDB\u5EA6\u5DF2\u4FDD\u7559"
     );
   }
   /**
@@ -887,7 +871,7 @@ var CSVQuizSettingTab = class extends import_obsidian2.PluginSettingTab {
     this.addNumberSetting(
       containerEl,
       "\u6BCF\u65E5\u65B0\u9898\u6570",
-      "\u8BB0\u5FC6\u7EC3\u4E60\u6BCF\u5929\u5F15\u5165\u7684\u65B0\u9898\u6570\u91CF\u4E0A\u9650",
+      "\u8BB0\u5FC6\u7EC3\u4E60\u6BCF\u5929\u5F15\u5165\u7684\u65B0\u9898\u6570\u91CF\u4E0A\u9650\uFF08\u7A33\u5B9A\u540E\u6BCF\u65E5\u590D\u4E60\u91CF\u7EA6\u4E3A\u8BE5\u503C\u7684 2~3 \u500D\uFF09",
       "memoryDailyNew",
       1,
       500
@@ -3773,7 +3757,12 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     this.textFilterTimer = window.setTimeout(async () => {
       this.textFilterTimer = null;
       if (this.isClosed) return;
-      await this.saveCurrentEdit();
+      try {
+        await this.saveCurrentEdit();
+      } catch (e) {
+        console.error("CSV Quiz: \u6587\u672C\u7B5B\u9009\u524D\u4FDD\u5B58\u7F16\u8F91\u5931\u8D25", e);
+        return;
+      }
       if (this.isClosed) return;
       this.filterText = this.filterTextInput.value;
       this.applyFiltersAndReset();
@@ -4518,31 +4507,85 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     }
     await this.nextQuestion();
   }
-  /** 按用户选择清理进度：records=刷题记录，cards=记忆卡片，all=全部。保留筛选条件。 */
-  async applyResetChoice(choice) {
+  /** 按指定随机开关重建显示顺序，并按当前题 id 定位（找不到或 id 为空回第一题/空状态）。 */
+  rebuildOrderAndLocate(random, currentId) {
+    this.displayOrder = buildDisplayOrder(this.allQuestions, random);
+    this.orderedQuestions = sortByDisplayOrder(
+      this.allQuestions,
+      this.displayOrder
+    );
+    this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
+    if (currentId) {
+      const idx = this.filteredQuestions.findIndex((q) => q.id === currentId);
+      this.currentIndex = idx >= 0 ? idx : 0;
+    } else {
+      this.currentIndex = this.filteredQuestions.length > 0 ? 0 : -1;
+    }
+  }
+  /** 随机题目顺序开关变更：保留答题进度，按当前设置重建显示顺序并重新定位当前题。 */
+  async reorderForRandomSetting() {
     var _a, _b;
+    if (this.practiceActive) this.exitRandomPractice();
+    if (this.memoryActive) this.exitMemoryPractice();
+    const currentId = (_b = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id) != null ? _b : null;
+    this.rebuildOrderAndLocate(this.getSettings().randomOrder, currentId);
+    this.currentShuffledQId = null;
+    this.cancelAutoNext();
+    this.renderQuestion();
+    this.saveState();
+  }
+  /** 按用户选择清理进度：records=刷题记录，cards=记忆卡片，order=仅重置题目顺序，all=全部。保留筛选条件。 */
+  async applyResetChoice(choice) {
+    var _a, _b, _c, _d, _e, _f;
     if (this.isClosed || !this.canPersistState) {
       const state = this.stateManager.getState();
       if (state) {
-        if (choice !== "cards") {
-          state.correctCount = 0;
-          state.wrongCount = 0;
-          state.answeredQuestions = {};
-        }
-        if (choice !== "records") {
-          state.memoryCards = {};
-          state.memoryNewDate = "";
-          state.memoryNewCountToday = 0;
-          state.memoryPendingNew = [];
+        if (choice === "order") {
+          state.displayOrder = [];
+          if (this.getSettings().randomOrder) {
+            this.getSettings().randomOrder = false;
+            await ((_b = (_a = this.plugin).saveSettings) == null ? void 0 : _b.call(_a));
+          }
+        } else {
+          if (choice !== "cards") {
+            state.correctCount = 0;
+            state.wrongCount = 0;
+            state.answeredQuestions = {};
+          }
+          if (choice !== "records") {
+            state.memoryCards = {};
+            state.memoryNewDate = "";
+            state.memoryNewCountToday = 0;
+            state.memoryPendingNew = [];
+          }
         }
         await this.stateManager.saveStateImmediately(state);
       }
       new import_obsidian4.Notice(
-        choice === "all" ? "\u8FDB\u5EA6\u5DF2\u91CD\u7F6E" : choice === "records" ? "\u5237\u9898\u8BB0\u5F55\u5DF2\u6E05\u7406" : "\u8BB0\u5FC6\u5361\u7247\u5DF2\u5220\u9664"
+        choice === "all" ? "\u8FDB\u5EA6\u5DF2\u91CD\u7F6E" : choice === "order" ? "\u9898\u76EE\u987A\u5E8F\u5DF2\u91CD\u7F6E\uFF0C\u91CD\u65B0\u6253\u5F00\u9762\u677F\u65F6\u751F\u6548" : choice === "records" ? "\u5237\u9898\u8BB0\u5F55\u5DF2\u6E05\u7406" : "\u8BB0\u5FC6\u5361\u7247\u5DF2\u5220\u9664"
       );
       return;
     }
     await this.saveCurrentEdit();
+    if (choice === "order") {
+      if (this.practiceActive) this.exitRandomPractice();
+      if (this.memoryActive) this.exitMemoryPractice();
+      let autoOff = false;
+      if (this.getSettings().randomOrder) {
+        this.getSettings().randomOrder = false;
+        await ((_d = (_c = this.plugin).saveSettings) == null ? void 0 : _d.call(_c));
+        autoOff = true;
+      }
+      this.rebuildOrderAndLocate(false, null);
+      this.currentShuffledQId = null;
+      this.cancelAutoNext();
+      this.renderQuestion();
+      this.saveState();
+      new import_obsidian4.Notice(
+        autoOff ? "\u9898\u76EE\u987A\u5E8F\u5DF2\u91CD\u7F6E\u4E3A CSV \u539F\u59CB\u987A\u5E8F\uFF0C\u5E76\u5DF2\u81EA\u52A8\u5173\u95ED\u968F\u673A\u9898\u76EE\u987A\u5E8F" : "\u9898\u76EE\u987A\u5E8F\u5DF2\u91CD\u7F6E\u4E3A CSV \u539F\u59CB\u987A\u5E8F"
+      );
+      return;
+    }
     if (this.practiceActive) this.exitRandomPractice();
     if (this.memoryActive) this.exitMemoryPractice();
     if (choice !== "cards") {
@@ -4559,15 +4602,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     if (choice === "all") {
       this.memoryInitialized = false;
     }
-    this.displayOrder = buildDisplayOrder(
-      this.allQuestions,
-      this.getSettings().randomOrder
-    );
-    this.orderedQuestions = sortByDisplayOrder(
-      this.allQuestions,
-      this.displayOrder
-    );
-    this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
+    this.rebuildOrderAndLocate(this.getSettings().randomOrder, null);
     this.currentIndex = 0;
     this.currentShuffledQId = null;
     this.selectedOption = null;
@@ -4575,7 +4610,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     this.cancelAutoNext();
     this.renderQuestion();
     this.saveState();
-    (_b = (_a = this.plugin).refreshMemoryReminder) == null ? void 0 : _b.call(_a);
+    (_f = (_e = this.plugin).refreshMemoryReminder) == null ? void 0 : _f.call(_e);
     new import_obsidian4.Notice(
       choice === "all" ? "\u8FDB\u5EA6\u5DF2\u91CD\u7F6E" : choice === "records" ? "\u5237\u9898\u8BB0\u5F55\u5DF2\u6E05\u7406" : "\u8BB0\u5FC6\u5361\u7247\u5DF2\u5220\u9664"
     );
@@ -5483,19 +5518,27 @@ var CSVQuizPlugin = class extends import_obsidian6.Plugin {
   /**
    * 清除已保存的刷题进度；若面板已打开则立即重建会话。
    * choice 省略或为 "all" 时为「全部重置」语义（清空 data.json 并刷新面板、
-   * 重读题库，用于设置页「全部重置」与开启「随机题目顺序」等场景）；
-   * 传入 "records"/"cards" 时为设置页的分项清理（不重载题库、保留筛选）。
+   * 重读题库，用于设置页「全部重置」等场景）；
+   * 传入 "records"/"cards"/"order" 时为设置页的分项清理（不重载题库、保留筛选）。
    */
   async resetQuizProgress(choice) {
-    if (choice === "records" || choice === "cards") {
+    if (choice === "records" || choice === "cards" || choice === "order") {
       const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
       const view = leaf == null ? void 0 : leaf.view;
       if (view) {
         await view.applyResetChoice(choice);
       } else {
         const state = this.stateManager.getState();
+        let autoOff = false;
         if (state) {
-          if (choice === "records") {
+          if (choice === "order") {
+            state.displayOrder = [];
+            if (this.settings.randomOrder) {
+              this.settings.randomOrder = false;
+              await this.saveSettings();
+              autoOff = true;
+            }
+          } else if (choice === "records") {
             state.correctCount = 0;
             state.wrongCount = 0;
             state.answeredQuestions = {};
@@ -5505,10 +5548,9 @@ var CSVQuizPlugin = class extends import_obsidian6.Plugin {
             state.memoryNewCountToday = 0;
             state.memoryPendingNew = [];
           }
-          state.displayOrder = [];
           await this.stateManager.saveStateImmediately(state);
           new import_obsidian6.Notice(
-            choice === "records" ? "\u5237\u9898\u8BB0\u5F55\u5DF2\u6E05\u7406" : "\u8BB0\u5FC6\u5361\u7247\u5DF2\u5220\u9664"
+            choice === "order" ? autoOff ? "\u9898\u76EE\u987A\u5E8F\u5DF2\u91CD\u7F6E\uFF0C\u91CD\u65B0\u6253\u5F00\u9762\u677F\u65F6\u751F\u6548\uFF0C\u5E76\u5DF2\u81EA\u52A8\u5173\u95ED\u968F\u673A\u9898\u76EE\u987A\u5E8F" : "\u9898\u76EE\u987A\u5E8F\u5DF2\u91CD\u7F6E\uFF0C\u91CD\u65B0\u6253\u5F00\u9762\u677F\u65F6\u751F\u6548" : choice === "records" ? "\u5237\u9898\u8BB0\u5F55\u5DF2\u6E05\u7406" : "\u8BB0\u5FC6\u5361\u7247\u5DF2\u5220\u9664"
           );
         }
         this.refreshMemoryReminder();
@@ -5517,6 +5559,24 @@ var CSVQuizPlugin = class extends import_obsidian6.Plugin {
     }
     await this.stateManager.clearState();
     this.refreshQuiz();
+  }
+  /**
+   * 随机题目顺序开关变更后：保留答题进度重排顺序。
+   * 面板打开时由视图就地重排并保存；未打开时清空已存顺序，
+   * 下次打开面板时按当前设置重建（buildDisplayOrder 的 savedOrder 不匹配即重建）。
+   */
+  async reorderQuestions() {
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
+    const view = leaf == null ? void 0 : leaf.view;
+    if (view) {
+      await view.reorderForRandomSetting();
+    } else {
+      const state = this.stateManager.getState();
+      if (state) {
+        state.displayOrder = [];
+        await this.stateManager.saveStateImmediately(state);
+      }
+    }
   }
 };
 /*! Bundled license information:

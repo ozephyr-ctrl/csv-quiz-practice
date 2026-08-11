@@ -773,10 +773,16 @@ export class QuizView extends ItemView {
     this.textFilterTimer = window.setTimeout(async () => {
       this.textFilterTimer = null;
       if (this.isClosed) return;
-      // F5: 先保存编辑区未提交的标签/分类修改，避免筛选时静默丢失。
-      // saveCurrentEdit 无变化时立即返回；有变化时写 CSV 并 reFilter，
-      // 之后 applyFiltersAndReset 会再以新 filterText 重筛（与其它筛选入口一致）。
-      await this.saveCurrentEdit();
+      try {
+        // F5: 先保存编辑区未提交的标签/分类修改，避免筛选时静默丢失。
+        // saveCurrentEdit 无变化时立即返回；有变化时写 CSV 并 reFilter，
+        // 之后 applyFiltersAndReset 会再以新 filterText 重筛（与其它筛选入口一致）。
+        await this.saveCurrentEdit();
+      } catch (e) {
+        // L-1: 捕获保存失败，避免 setTimeout 回调产生未处理的 Promise rejection
+        console.error("CSV Quiz: 文本筛选前保存编辑失败", e);
+        return;
+      }
       if (this.isClosed) return;
       this.filterText = this.filterTextInput.value;
       this.applyFiltersAndReset();
@@ -1719,35 +1725,104 @@ export class QuizView extends ItemView {
     await this.nextQuestion();
   }
 
-  /** 按用户选择清理进度：records=刷题记录，cards=记忆卡片，all=全部。保留筛选条件。 */
-  async applyResetChoice(choice: "records" | "cards" | "all"): Promise<void> {
+  /** 按指定随机开关重建显示顺序，并按当前题 id 定位（找不到或 id 为空回第一题/空状态）。 */
+  private rebuildOrderAndLocate(random: boolean, currentId: string | null): void {
+    this.displayOrder = buildDisplayOrder(this.allQuestions, random);
+    this.orderedQuestions = sortByDisplayOrder(
+      this.allQuestions,
+      this.displayOrder
+    );
+    this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
+    if (currentId) {
+      const idx = this.filteredQuestions.findIndex((q) => q.id === currentId);
+      this.currentIndex = idx >= 0 ? idx : 0;
+    } else {
+      this.currentIndex = this.filteredQuestions.length > 0 ? 0 : -1;
+    }
+  }
+
+  /** 随机题目顺序开关变更：保留答题进度，按当前设置重建显示顺序并重新定位当前题。 */
+  async reorderForRandomSetting(): Promise<void> {
+    if (this.practiceActive) this.exitRandomPractice();
+    if (this.memoryActive) this.exitMemoryPractice();
+    const currentId = this.filteredQuestions[this.currentIndex]?.id ?? null;
+    this.rebuildOrderAndLocate(this.getSettings().randomOrder, currentId);
+    this.currentShuffledQId = null;
+    this.cancelAutoNext();
+    this.renderQuestion();
+    this.saveState();
+  }
+
+  /** 按用户选择清理进度：records=刷题记录，cards=记忆卡片，order=仅重置题目顺序，all=全部。保留筛选条件。 */
+  async applyResetChoice(
+    choice: "records" | "cards" | "order" | "all"
+  ): Promise<void> {
     // C-3: 视图未就绪（已关闭/初始化中止）时回退到直接改状态并落盘，避免"弹了提示但磁盘未动"
     if (this.isClosed || !this.canPersistState) {
       const state = this.stateManager.getState();
       if (state) {
-        if (choice !== "cards") {
-          state.correctCount = 0;
-          state.wrongCount = 0;
-          state.answeredQuestions = {};
-        }
-        if (choice !== "records") {
-          state.memoryCards = {};
-          state.memoryNewDate = "";
-          state.memoryNewCountToday = 0;
-          state.memoryPendingNew = [];
+        if (choice === "order") {
+          // 顺序下次打开面板时按设置重建；随机设置开启时自动关闭（与就绪分支一致）
+          state.displayOrder = [];
+          if (this.getSettings().randomOrder) {
+            this.getSettings().randomOrder = false;
+            await (this.plugin as unknown as {
+              saveSettings?: () => Promise<void>;
+            }).saveSettings?.();
+          }
+        } else {
+          if (choice !== "cards") {
+            state.correctCount = 0;
+            state.wrongCount = 0;
+            state.answeredQuestions = {};
+          }
+          if (choice !== "records") {
+            state.memoryCards = {};
+            state.memoryNewDate = "";
+            state.memoryNewCountToday = 0;
+            state.memoryPendingNew = [];
+          }
         }
         await this.stateManager.saveStateImmediately(state);
       }
       new Notice(
         choice === "all"
           ? "进度已重置"
-          : choice === "records"
-            ? "刷题记录已清理"
-            : "记忆卡片已删除"
+          : choice === "order"
+            ? "题目顺序已重置，重新打开面板时生效"
+            : choice === "records"
+              ? "刷题记录已清理"
+              : "记忆卡片已删除"
       );
       return;
     }
     await this.saveCurrentEdit();
+    // order：仅重置题目顺序为 CSV 原始顺序（不清理任何记录/卡片）
+    if (choice === "order") {
+      // 退出练习模式（与 records/cards/all 分支一致），避免练习标志残留
+      if (this.practiceActive) this.exitRandomPractice();
+      if (this.memoryActive) this.exitMemoryPractice();
+      // 随机题目顺序开启时重置为 CSV 顺序会与之冲突：自动关闭该设置并保存
+      let autoOff = false;
+      if (this.getSettings().randomOrder) {
+        this.getSettings().randomOrder = false;
+        await (this.plugin as unknown as {
+          saveSettings?: () => Promise<void>;
+        }).saveSettings?.();
+        autoOff = true;
+      }
+      this.rebuildOrderAndLocate(false, null);
+      this.currentShuffledQId = null;
+      this.cancelAutoNext();
+      this.renderQuestion();
+      this.saveState();
+      new Notice(
+        autoOff
+          ? "题目顺序已重置为 CSV 原始顺序，并已自动关闭随机题目顺序"
+          : "题目顺序已重置为 CSV 原始顺序"
+      );
+      return;
+    }
     // 重置进度时退出练习模式（记忆/随机均为临时会话），避免残留练习集状态
     if (this.practiceActive) this.exitRandomPractice();
     if (this.memoryActive) this.exitMemoryPractice();
@@ -1767,15 +1842,7 @@ export class QuizView extends ItemView {
       this.memoryInitialized = false;
     }
     // 重置后按当前设置重建题目顺序（随机开启则重排，关闭则恢复 CSV 默认顺序）
-    this.displayOrder = buildDisplayOrder(
-      this.allQuestions,
-      this.getSettings().randomOrder
-    );
-    this.orderedQuestions = sortByDisplayOrder(
-      this.allQuestions,
-      this.displayOrder
-    );
-    this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
+    this.rebuildOrderAndLocate(this.getSettings().randomOrder, null);
     this.currentIndex = 0;
     this.currentShuffledQId = null;
     this.selectedOption = null;
