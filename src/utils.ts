@@ -120,3 +120,8 @@ export function countDueCards(
   }
   return n;
 }
+
+/** 归一化答案：大写、去除非 A-D、去重、排序（用于对错比较，忽略字母顺序与重复）。 */
+export function normalizeAnswerValue(value: string): string {
+  return [...new Set(value.toUpperCase().replace(/[^A-D]/g, ""))].sort().join("");
+}

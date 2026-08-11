@@ -819,3 +819,92 @@
   text-align: right;
   word-break: break-word;
 }
+
+/* 刷题进度弹窗 */
+.csv-quiz-progress-summary {
+  padding: 6px 0 10px;
+  font-size: 13px;
+  color: var(--text-normal);
+  border-bottom: 1px solid var(--background-modifier-border);
+  margin-bottom: 8px;
+}
+.csv-quiz-progress-list {
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.csv-quiz-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.csv-quiz-progress-row:hover {
+  background: var(--background-modifier-hover);
+}
+.csv-quiz-progress-row-current {
+  background: var(--background-modifier-active-hover, var(--background-modifier-hover));
+}
+.csv-quiz-progress-id {
+  flex-shrink: 0;
+  min-width: 40px;
+  font-weight: 600;
+  color: var(--text-accent);
+}
+.csv-quiz-progress-stem {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-normal);
+}
+.csv-quiz-progress-status {
+  flex-shrink: 0;
+  font-size: 12px;
+}
+.csv-quiz-progress-correct {
+  color: var(--color-green, #2e7d32);
+}
+.csv-quiz-progress-wrong {
+  color: var(--color-red, #c62828);
+}
+.csv-quiz-progress-unanswered {
+  color: var(--text-muted);
+}
+.csv-quiz-progress-memory {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.csv-quiz-progress-memory-due {
+  color: var(--color-red, #c62828);
+  font-weight: 600;
+}
+.csv-quiz-progress-flags {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* 点击进度文本打开刷题进度弹窗 */
+.csv-quiz-progress-icon {
+  font-size: 12px;
+  margin-right: 4px;
+  opacity: 0.8;
+}
+.csv-quiz-progress-clickable {
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  border-radius: 4px;
+  padding: 0 4px;
+}
+.csv-quiz-progress-clickable:hover {
+  background: var(--background-modifier-hover);
+  text-decoration: underline;
+  color: var(--text-accent);
+}

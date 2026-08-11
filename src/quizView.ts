@@ -30,8 +30,10 @@ import {
   sortByDisplayOrder,
   quizStateEquals,
   countDueCards,
+  normalizeAnswerValue,
 } from "./utils";
 import { ChoiceModal, TagPickerModal, askResetChoice } from "./modals";
+import { ProgressModal } from "./progressModal";
 import { fsrs, createEmptyCard, Rating, State, type Card } from "ts-fsrs";
 
 /** FSRS 调度器单例：纯函数调度、不持有状态，可跨会话复用（模块级）。 */
@@ -170,10 +172,53 @@ export class QuizView extends ItemView {
   private buildLayout(): void {
     this.contentEl.empty();
 
+    // 滑动切题：同步 data-ignore-swipe 屏蔽 Obsidian 原生手势（值须为字面量 "true"）
+    this.syncSwipeNavigation();
+    // 手势监听只注册一次（registerDomEvent 随视图卸载自动清理；buildLayout 会被 refresh 多次调用）
+    if (!this.swipeBound) {
+      this.swipeBound = true;
+      this.registerDomEvent(
+        this.contentEl,
+        "touchstart",
+        (e: TouchEvent) => this.handleSwipeStart(e),
+        { capture: true, passive: true }
+      );
+      this.registerDomEvent(
+        this.contentEl,
+        "touchmove",
+        (e: TouchEvent) => this.handleSwipeMove(e),
+        { capture: true, passive: false }
+      );
+      this.registerDomEvent(
+        this.contentEl,
+        "touchend",
+        (e: TouchEvent) => this.handleSwipeEnd(e),
+        { capture: true, passive: true }
+      );
+      // M-1: 手势被系统取消时复位状态机，避免残留污染后续点击
+      this.registerDomEvent(
+        this.contentEl,
+        "touchcancel",
+        () => {
+          this.swipeActive = false;
+          this.swipeDecided = false;
+        },
+        { capture: true }
+      );
+    }
+
     // Progress & stats
     const infoBar = this.contentEl.createDiv("csv-quiz-info-bar");
-    this.progressEl = infoBar.createDiv("csv-quiz-progress");
+    const progressIcon = infoBar.createSpan({
+      text: "📋",
+      cls: "csv-quiz-progress-icon",
+    });
+    this.progressEl = infoBar.createDiv(
+      "csv-quiz-progress csv-quiz-progress-clickable"
+    );
     this.statsEl = infoBar.createDiv("csv-quiz-stats");
+    // 点击进度文本打开刷题进度弹窗（列表顺序/筛选与当前视图一致）
+    this.progressEl.addEventListener("click", () => this.openProgressModal());
 
     // Question area
     this.questionArea = this.contentEl.createDiv("csv-quiz-question-area");
@@ -744,6 +789,14 @@ export class QuizView extends ItemView {
   private practiceSource: Record<string, "new" | "review"> = {};
   /** 记忆卡片信息栏折叠状态（默认收起，仅影响本栏显示，不重渲染题目）。 */
   private cardPanelOpen: boolean = false;
+  /** 滑动切题手势状态 */
+  private swipeX0: number = 0;
+  private swipeY0: number = 0;
+  private swipeActive: boolean = false;
+  private swipeDecided: boolean = false;
+  private swipeHorizontal: boolean = false;
+  private swipeLastTrigger: number = 0;
+  private swipeBound: boolean = false;
 
   private updateFilterUI(): void {
     if (!this.cat1Select) return;
@@ -1214,10 +1267,12 @@ export class QuizView extends ItemView {
   private normalizeAnswer(value: string): string {
     // F7: 先过滤非 A-D 字符（答案列可能含空格/逗号/小写等脏数据）再归一化，
     // 避免如答案 "A B" 归一化后带空格、与用户选择 "AB" 永不相等
-    return [...new Set(value.toUpperCase().replace(/[^A-D]/g, ""))].sort().join("");
+    return normalizeAnswerValue(value);
   }
 
   private renderQuestion(): void {
+    // 滑动切题开关：同步 data-ignore-swipe（Obsidian 手势识别器对该区域跳过），开关变化即时生效
+    this.syncSwipeNavigation();
     this.questionArea.empty();
     this.feedbackArea.empty();
     this.editArea.empty();
@@ -2297,6 +2352,109 @@ export class QuizView extends ItemView {
     } else {
       new Notice("没有更多未答题");
     }
+  }
+
+  /** 同步 data-ignore-swipe 属性（Obsidian 手势识别器对该区域跳过）；设置页开关变更后即时调用。 */
+  syncSwipeNavigation(): void {
+    if (this.getSettings().swipeNavigation) {
+      this.contentEl.setAttribute("data-ignore-swipe", "true");
+    } else {
+      this.contentEl.removeAttribute("data-ignore-swipe");
+    }
+  }
+
+  /** 滑动切题：touchstart 记录起点；边缘让位、可交互元素豁免。 */
+  private handleSwipeStart(e: TouchEvent): void {
+    // M-1: 每次 touchstart 先复位状态,避免被取消的手势(touchcancel)残留污染后续点击
+    this.swipeActive = false;
+    this.swipeDecided = false;
+    if (!this.getSettings().swipeNavigation) return;
+    if (e.touches.length !== 1) return;
+    const tc = e.touches[0];
+    // 距屏幕边缘 <12px 让位给系统手势（如 iOS 边缘返回）
+    if (Math.min(tc.clientX, window.innerWidth - tc.clientX) < 12) return;
+    const target = e.target as HTMLElement | null;
+    if (
+      target &&
+      target.closest(
+        "a, button, input, textarea, select, label, [contenteditable]"
+      )
+    ) {
+      return;
+    }
+    this.swipeX0 = tc.clientX;
+    this.swipeY0 = tc.clientY;
+    this.swipeActive = true;
+    this.swipeDecided = false;
+    this.swipeHorizontal = false;
+  }
+
+  /** 滑动切题：方向判定；确定为水平后拦截事件（Obsidian 手势识别器不看 preventDefault，需 stopPropagation）。 */
+  private handleSwipeMove(e: TouchEvent): void {
+    if (!this.swipeActive) return;
+    if (e.touches.length !== 1) {
+      this.swipeActive = false;
+      return;
+    }
+    const tc = e.touches[0];
+    const dx = tc.clientX - this.swipeX0;
+    const dy = tc.clientY - this.swipeY0;
+    if (!this.swipeDecided) {
+      if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
+      // 纵向位移更大 → 视为滚动，放行
+      if (Math.abs(dy) > Math.abs(dx)) {
+        this.swipeActive = false;
+        return;
+      }
+      this.swipeDecided = true;
+      this.swipeHorizontal = true;
+    }
+    if (this.swipeHorizontal) {
+      e.stopPropagation();
+      if (e.cancelable) e.preventDefault();
+    }
+  }
+
+  /** 滑动切题：touchend 判定是否触发切题（阈值 45px、横向 > 纵向 1.5 倍、400ms 冷却）。 */
+  private handleSwipeEnd(e: TouchEvent): void {
+    if (!this.swipeActive) return;
+    this.swipeActive = false;
+    if (!this.swipeDecided) return;
+    const tc = e.changedTouches[0];
+    const dx = tc.clientX - this.swipeX0;
+    const dy = tc.clientY - this.swipeY0;
+    if (Math.abs(dx) < 45 || Math.abs(dx) <= Math.abs(dy) * 1.5) return;
+    const now = Date.now();
+    if (now - this.swipeLastTrigger < 400) return;
+    this.swipeLastTrigger = now;
+    if (dx < 0) {
+      void this.nextQuestion();
+    } else {
+      void this.prevQuestion();
+    }
+  }
+
+  /** 打开刷题进度弹窗：列表顺序/筛选与当前视图一致，点击行跳转。 */
+  private openProgressModal(): void {
+    const modal = new ProgressModal(this.app, {
+      questions: this.filteredQuestions,
+      answeredQuestions: this.answeredQuestions,
+      memoryCards: this.memoryCards,
+      currentId: this.filteredQuestions[this.currentIndex]?.id ?? null,
+      onJump: (id: string) => {
+        const idx = this.filteredQuestions.findIndex((q) => q.id === id);
+        if (idx < 0) {
+          new Notice("该题不在当前列表");
+          return;
+        }
+        this.currentIndex = idx;
+        this.currentShuffledQId = null;
+        this.cancelAutoNext();
+        this.renderQuestion();
+        this.saveState();
+      },
+    });
+    modal.open();
   }
 
   private updateProgress(): void {

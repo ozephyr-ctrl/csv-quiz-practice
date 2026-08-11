@@ -79,6 +79,8 @@ export interface PluginSettings {
   memoryReminder: boolean;
   /** 掌握标记参与 FSRS 评分（掌握答对=Easy）；收藏不参与评分，避免 Hard 导致难度虚高与间隔压缩 */
   memoryMarkRating: boolean;
+  /** 移动端左右滑动切题（左滑下一题/右滑上一题） */
+  swipeNavigation: boolean;
 }
 
 export interface PluginData {
@@ -103,4 +105,5 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   memoryDailyNew: 20,
   memoryReminder: true,
   memoryMarkRating: true,
+  swipeNavigation: true,
 };

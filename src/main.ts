@@ -133,6 +133,7 @@ export default class CSVQuizPlugin extends Plugin {
           memoryDailyNew: 20,
           memoryReminder: true,
           memoryMarkRating: true,
+          swipeNavigation: true,
         },
         quizState: null,
       };
@@ -164,6 +165,7 @@ export default class CSVQuizPlugin extends Plugin {
       memoryDailyNew: toNumber(rawSettings.memoryDailyNew, 20),
       memoryReminder: rawSettings.memoryReminder ?? true,
       memoryMarkRating: rawSettings.memoryMarkRating ?? true,
+      swipeNavigation: rawSettings.swipeNavigation ?? true,
     };
   }
 
@@ -252,6 +254,15 @@ export default class CSVQuizPlugin extends Plugin {
         state.displayOrder = [];
         await this.stateManager.saveStateImmediately(state);
       }
+    }
+  }
+
+  /** 「左右滑动切题」开关变更后同步视图（即时生效）。 */
+  syncSwipeNavigation(): void {
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
+    const view = leaf?.view as QuizView | undefined;
+    if (view) {
+      view.syncSwipeNavigation();
     }
   }
 }

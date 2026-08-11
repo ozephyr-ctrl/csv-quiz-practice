@@ -1,7 +1,7 @@
 {
   "id": "csv-quiz-practice",
   "name": "csv quiz practice",
-  "version": "1.4.4",
+  "version": "2.0.1",
   "minAppVersion": "1.12.7",
   "description": "a csv to quiz plugin.",
   "author": "Kong",

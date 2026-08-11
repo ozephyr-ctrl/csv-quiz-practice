@@ -19,6 +19,7 @@ interface PluginHandle {
   flushSettingsSave(): Promise<void>;
   resetQuizProgress(choice?: "records" | "cards" | "order" | "all"): Promise<void>;
   reorderQuestions(): Promise<void>;
+  syncSwipeNavigation(): void;
 }
 
 export class CSVQuizSettingTab extends PluginSettingTab {
@@ -89,6 +90,11 @@ export class CSVQuizSettingTab extends PluginSettingTab {
             name: "掌握参与评分",
             desc: "记忆练习答对时按标记评分：掌握=Easy（间隔拉长更快）、其余一律 Good；收藏不参与评分（避免难度虚高与间隔压缩）；答错一律 Again。",
             control: { type: "toggle", key: "memoryMarkRating" },
+          },
+          {
+            name: "左右滑动切题",
+            desc: "移动端在刷题面板内左右滑动切换题目（左滑下一题、右滑上一题）；开启时面板区域不触发 Obsidian 自身的侧边栏滑动",
+            control: { type: "toggle", key: "swipeNavigation" },
           },
         ],
       },
@@ -189,6 +195,13 @@ export class CSVQuizSettingTab extends PluginSettingTab {
       await this.handleRandomOrderToggle(value === true);
       return;
     }
+    if (key === "swipeNavigation") {
+      (this.plugin.settings as unknown as Record<string, unknown>)[key] = value;
+      await this.plugin.saveSettings();
+      // L-1: 开关变更即时同步视图的 data-ignore-swipe 属性，无需重开面板
+      this.plugin.syncSwipeNavigation();
+      return;
+    }
     (this.plugin.settings as unknown as Record<string, unknown>)[key] = value;
     await this.plugin.saveSettings();
   }
@@ -271,6 +284,12 @@ export class CSVQuizSettingTab extends PluginSettingTab {
       "掌握参与评分",
       "记忆练习答对时按标记评分：掌握=Easy（间隔拉长更快）、其余一律 Good；收藏不参与评分（避免难度虚高与间隔压缩）；答错一律 Again。",
       "memoryMarkRating"
+    );
+    this.addToggleSetting(
+      containerEl,
+      "左右滑动切题",
+      "移动端在刷题面板内左右滑动切换题目（左滑下一题、右滑上一题）；开启时面板区域不触发 Obsidian 自身的侧边栏滑动",
+      "swipeNavigation"
     );
 
     this.addNumberSetting(

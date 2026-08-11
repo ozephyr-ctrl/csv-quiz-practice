@@ -464,7 +464,7 @@ __export(main_exports, {
   default: () => CSVQuizPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian6 = require("obsidian");
+var import_obsidian7 = require("obsidian");
 
 // src/types.ts
 var VIEW_TYPE_QUIZ = "csv-quiz-practice-view";
@@ -482,7 +482,8 @@ var DEFAULT_SETTINGS = {
   memoryEnabled: true,
   memoryDailyNew: 20,
   memoryReminder: true,
-  memoryMarkRating: true
+  memoryMarkRating: true,
+  swipeNavigation: true
 };
 
 // src/settings.ts
@@ -718,6 +719,11 @@ var CSVQuizSettingTab = class extends import_obsidian2.PluginSettingTab {
             name: "\u638C\u63E1\u53C2\u4E0E\u8BC4\u5206",
             desc: "\u8BB0\u5FC6\u7EC3\u4E60\u7B54\u5BF9\u65F6\u6309\u6807\u8BB0\u8BC4\u5206\uFF1A\u638C\u63E1=Easy\uFF08\u95F4\u9694\u62C9\u957F\u66F4\u5FEB\uFF09\u3001\u5176\u4F59\u4E00\u5F8B Good\uFF1B\u6536\u85CF\u4E0D\u53C2\u4E0E\u8BC4\u5206\uFF08\u907F\u514D\u96BE\u5EA6\u865A\u9AD8\u4E0E\u95F4\u9694\u538B\u7F29\uFF09\uFF1B\u7B54\u9519\u4E00\u5F8B Again\u3002",
             control: { type: "toggle", key: "memoryMarkRating" }
+          },
+          {
+            name: "\u5DE6\u53F3\u6ED1\u52A8\u5207\u9898",
+            desc: "\u79FB\u52A8\u7AEF\u5728\u5237\u9898\u9762\u677F\u5185\u5DE6\u53F3\u6ED1\u52A8\u5207\u6362\u9898\u76EE\uFF08\u5DE6\u6ED1\u4E0B\u4E00\u9898\u3001\u53F3\u6ED1\u4E0A\u4E00\u9898\uFF09\uFF1B\u5F00\u542F\u65F6\u9762\u677F\u533A\u57DF\u4E0D\u89E6\u53D1 Obsidian \u81EA\u8EAB\u7684\u4FA7\u8FB9\u680F\u6ED1\u52A8",
+            control: { type: "toggle", key: "swipeNavigation" }
           }
         ]
       },
@@ -816,6 +822,12 @@ var CSVQuizSettingTab = class extends import_obsidian2.PluginSettingTab {
       await this.handleRandomOrderToggle(value === true);
       return;
     }
+    if (key === "swipeNavigation") {
+      this.plugin.settings[key] = value;
+      await this.plugin.saveSettings();
+      this.plugin.syncSwipeNavigation();
+      return;
+    }
     this.plugin.settings[key] = value;
     await this.plugin.saveSettings();
   }
@@ -887,6 +899,12 @@ var CSVQuizSettingTab = class extends import_obsidian2.PluginSettingTab {
       "\u638C\u63E1\u53C2\u4E0E\u8BC4\u5206",
       "\u8BB0\u5FC6\u7EC3\u4E60\u7B54\u5BF9\u65F6\u6309\u6807\u8BB0\u8BC4\u5206\uFF1A\u638C\u63E1=Easy\uFF08\u95F4\u9694\u62C9\u957F\u66F4\u5FEB\uFF09\u3001\u5176\u4F59\u4E00\u5F8B Good\uFF1B\u6536\u85CF\u4E0D\u53C2\u4E0E\u8BC4\u5206\uFF08\u907F\u514D\u96BE\u5EA6\u865A\u9AD8\u4E0E\u95F4\u9694\u538B\u7F29\uFF09\uFF1B\u7B54\u9519\u4E00\u5F8B Again\u3002",
       "memoryMarkRating"
+    );
+    this.addToggleSetting(
+      containerEl,
+      "\u5DE6\u53F3\u6ED1\u52A8\u5207\u9898",
+      "\u79FB\u52A8\u7AEF\u5728\u5237\u9898\u9762\u677F\u5185\u5DE6\u53F3\u6ED1\u52A8\u5207\u6362\u9898\u76EE\uFF08\u5DE6\u6ED1\u4E0B\u4E00\u9898\u3001\u53F3\u6ED1\u4E0A\u4E00\u9898\uFF09\uFF1B\u5F00\u542F\u65F6\u9762\u677F\u533A\u57DF\u4E0D\u89E6\u53D1 Obsidian \u81EA\u8EAB\u7684\u4FA7\u8FB9\u680F\u6ED1\u52A8",
+      "swipeNavigation"
     );
     this.addNumberSetting(
       containerEl,
@@ -1015,7 +1033,7 @@ var FilePickerModal = class extends import_obsidian2.SuggestModal {
 };
 
 // src/quizView.ts
-var import_obsidian4 = require("obsidian");
+var import_obsidian5 = require("obsidian");
 
 // src/csvHandler.ts
 var import_papaparse = __toESM(require_papaparse_min());
@@ -1364,6 +1382,111 @@ function countDueCards(cards, now = /* @__PURE__ */ new Date()) {
   }
   return n;
 }
+function normalizeAnswerValue(value) {
+  return [...new Set(value.toUpperCase().replace(/[^A-D]/g, ""))].sort().join("");
+}
+
+// src/progressModal.ts
+var import_obsidian4 = require("obsidian");
+var RENDER_LIMIT = 500;
+var ProgressModal = class extends import_obsidian4.Modal {
+  constructor(app, opts) {
+    super(app);
+    this.opts = opts;
+    this.titleEl.setText("\u5237\u9898\u8FDB\u5EA6");
+  }
+  onOpen() {
+    var _a;
+    this.contentEl.empty();
+    const { questions, answeredQuestions, memoryCards, currentId } = this.opts;
+    const now = (/* @__PURE__ */ new Date()).getTime();
+    const summary = this.contentEl.createDiv("csv-quiz-progress-summary");
+    const list = this.contentEl.createDiv("csv-quiz-progress-list");
+    const stateNames = {
+      0: "\u65B0\u9898",
+      1: "\u5B66\u4E60\u4E2D",
+      2: "\u590D\u4E60",
+      3: "\u518D\u5B66\u4E60"
+    };
+    const frag = document.createDocumentFragment();
+    let answered = 0;
+    let correct = 0;
+    const renderCount = Math.min(questions.length, RENDER_LIMIT);
+    for (let i = 0; i < renderCount; i++) {
+      const q = questions[i];
+      const a = answeredQuestions[q.id];
+      if (a !== void 0) {
+        answered++;
+        if (normalizeAnswerValue(a) === normalizeAnswerValue(q.answer)) {
+          correct++;
+        }
+      }
+      const row = frag.createEl("div", { cls: "csv-quiz-progress-row" });
+      if (q.id === currentId) row.addClass("csv-quiz-progress-row-current");
+      row.createEl("span", { text: q.id, cls: "csv-quiz-progress-id" });
+      const stem = q.stem.replace(/[#*`_~[\]()>!-]/g, "").trim();
+      row.createEl("span", {
+        text: stem.length > 30 ? stem.slice(0, 30) + "\u2026" : stem,
+        cls: "csv-quiz-progress-stem"
+      });
+      if (a === void 0) {
+        row.createEl("span", {
+          text: "\u672A\u7B54",
+          cls: "csv-quiz-progress-status csv-quiz-progress-unanswered"
+        });
+      } else if (normalizeAnswerValue(a) === normalizeAnswerValue(q.answer)) {
+        row.createEl("span", {
+          text: `\u2713 \u5DF2\u7B54${a}`,
+          cls: "csv-quiz-progress-status csv-quiz-progress-correct"
+        });
+      } else {
+        row.createEl("span", {
+          text: `\u2717 \u7B54\u9519${a}`,
+          cls: "csv-quiz-progress-status csv-quiz-progress-wrong"
+        });
+      }
+      const card = memoryCards[q.id];
+      if (card) {
+        const dueT = new Date(card.due).getTime();
+        const dueText = Number.isNaN(dueT) ? "\u2014" : dueT <= now ? "\u5DF2\u5230\u671F" : `${Math.max(1, Math.ceil((dueT - now) / 864e5))} \u5929\u540E`;
+        const memCls = "csv-quiz-progress-memory" + (dueT <= now ? " csv-quiz-progress-memory-due" : "");
+        row.createEl("span", {
+          text: `${(_a = stateNames[card.state]) != null ? _a : card.state} ${dueText}`,
+          cls: memCls
+        });
+      } else {
+        row.createEl("span", { text: "\u2014", cls: "csv-quiz-progress-memory" });
+      }
+      const flags = [];
+      if (q.favorite === "1") flags.push("\u2605");
+      if (q.mastered === "1") flags.push("\u2713");
+      if (q.wrong === "1") flags.push("\u2717");
+      if (flags.length > 0) {
+        row.createEl("span", {
+          text: flags.join(" "),
+          cls: "csv-quiz-progress-flags"
+        });
+      }
+      row.addEventListener("click", () => {
+        this.close();
+        this.opts.onJump(q.id);
+      });
+    }
+    if (questions.length > RENDER_LIMIT) {
+      list.createEl("p", {
+        text: `\u4EC5\u663E\u793A\u524D ${RENDER_LIMIT} \u9898\uFF0C\u8BF7\u4F7F\u7528\u7B5B\u9009\u7F29\u5C0F\u8303\u56F4`,
+        cls: "csv-quiz-empty"
+      });
+    }
+    if (questions.length === 0) {
+      list.createEl("p", { text: "\u5F53\u524D\u5217\u8868\u6CA1\u6709\u9898\u76EE", cls: "csv-quiz-empty" });
+    }
+    list.appendChild(frag);
+    summary.setText(
+      `\u5171 ${questions.length} \u9898 \xB7 \u5DF2\u7B54 ${answered} \xB7 \u672A\u7B54 ${questions.length - answered} \xB7 \u7B54\u5BF9 ${correct} \xB7 \u7B54\u9519 ${answered - correct}` + (answered > 0 ? ` \xB7 \u6B63\u786E\u7387 ${(correct / answered * 100).toFixed(1)}%` : "")
+    );
+  }
+};
 
 // node_modules/ts-fsrs/dist/index.mjs
 var FSRSError = class _FSRSError extends Error {
@@ -3186,7 +3309,7 @@ var fsrs = (params) => {
 
 // src/quizView.ts
 var memoryScheduler = fsrs();
-var _QuizView = class _QuizView extends import_obsidian4.ItemView {
+var _QuizView = class _QuizView extends import_obsidian5.ItemView {
   constructor(leaf, plugin, stateManager, vault, csvWriteQueue) {
     super(leaf);
     this.allQuestions = [];
@@ -3254,6 +3377,14 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     this.practiceSource = {};
     /** 记忆卡片信息栏折叠状态（默认收起，仅影响本栏显示，不重渲染题目）。 */
     this.cardPanelOpen = false;
+    /** 滑动切题手势状态 */
+    this.swipeX0 = 0;
+    this.swipeY0 = 0;
+    this.swipeActive = false;
+    this.swipeDecided = false;
+    this.swipeHorizontal = false;
+    this.swipeLastTrigger = 0;
+    this.swipeBound = false;
     this.plugin = plugin;
     this.stateManager = stateManager;
     this.vault = vault;
@@ -3308,9 +3439,47 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
   }
   buildLayout() {
     this.contentEl.empty();
+    this.syncSwipeNavigation();
+    if (!this.swipeBound) {
+      this.swipeBound = true;
+      this.registerDomEvent(
+        this.contentEl,
+        "touchstart",
+        (e) => this.handleSwipeStart(e),
+        { capture: true, passive: true }
+      );
+      this.registerDomEvent(
+        this.contentEl,
+        "touchmove",
+        (e) => this.handleSwipeMove(e),
+        { capture: true, passive: false }
+      );
+      this.registerDomEvent(
+        this.contentEl,
+        "touchend",
+        (e) => this.handleSwipeEnd(e),
+        { capture: true, passive: true }
+      );
+      this.registerDomEvent(
+        this.contentEl,
+        "touchcancel",
+        () => {
+          this.swipeActive = false;
+          this.swipeDecided = false;
+        },
+        { capture: true }
+      );
+    }
     const infoBar = this.contentEl.createDiv("csv-quiz-info-bar");
-    this.progressEl = infoBar.createDiv("csv-quiz-progress");
+    const progressIcon = infoBar.createSpan({
+      text: "\u{1F4CB}",
+      cls: "csv-quiz-progress-icon"
+    });
+    this.progressEl = infoBar.createDiv(
+      "csv-quiz-progress csv-quiz-progress-clickable"
+    );
     this.statsEl = infoBar.createDiv("csv-quiz-stats");
+    this.progressEl.addEventListener("click", () => this.openProgressModal());
     this.questionArea = this.contentEl.createDiv("csv-quiz-question-area");
     this.feedbackArea = this.contentEl.createDiv("csv-quiz-feedback");
     this.checkboxArea = this.contentEl.createDiv("csv-quiz-checkbox-area");
@@ -3423,7 +3592,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     }
     if (dups.size > 0) {
       const list = [...dups].map((d) => d === "" ? "\uFF08\u7A7A\u9898\u53F7\uFF09" : d).join(", ");
-      new import_obsidian4.Notice(`\u9898\u5E93\u4E2D\u5B58\u5728\u91CD\u590D\u9898\u53F7: ${list}\uFF0C\u7B54\u9898\u8BB0\u5F55\u53EF\u80FD\u4E0D\u51C6\u786E\uFF0C\u8BF7\u68C0\u67E5 CSV`);
+      new import_obsidian5.Notice(`\u9898\u5E93\u4E2D\u5B58\u5728\u91CD\u590D\u9898\u53F7: ${list}\uFF0C\u7B54\u9898\u8BB0\u5F55\u53EF\u80FD\u4E0D\u51C6\u786E\uFF0C\u8BF7\u68C0\u67E5 CSV`);
     }
   }
   /** Fresh start: keep filters from savedState if present (else defaults), reset progress. */
@@ -3804,7 +3973,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
       (q) => this.answeredQuestions[q.id] === void 0
     );
     if (unanswered.length === 0) {
-      new import_obsidian4.Notice("\u6CA1\u6709\u672A\u7B54\u9898\uFF0C\u65E0\u6CD5\u5F00\u59CB\u968F\u673A\u7EC3\u4E60");
+      new import_obsidian5.Notice("\u6CA1\u6709\u672A\u7B54\u9898\uFF0C\u65E0\u6CD5\u5F00\u59CB\u968F\u673A\u7EC3\u4E60");
       return;
     }
     const picked = shuffle(unanswered).slice(0, 100);
@@ -3820,7 +3989,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     this.cancelAutoNext();
     this.renderQuestion();
     this.saveState();
-    new import_obsidian4.Notice(`\u968F\u673A\u7EC3\u4E60\u5F00\u59CB\uFF1A${picked.length} \u9898`);
+    new import_obsidian5.Notice(`\u968F\u673A\u7EC3\u4E60\u5F00\u59CB\uFF1A${picked.length} \u9898`);
   }
   /** 退出练习模式：恢复常规筛选结果并定位到进入前的位置。不渲染、不保存，由调用方决定。 */
   exitRandomPractice() {
@@ -3852,7 +4021,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
       this.exitRandomPractice();
       this.renderQuestion();
       this.saveState();
-      new import_obsidian4.Notice("\u5DF2\u9000\u51FA\u968F\u673A\u7EC3\u4E60");
+      new import_obsidian5.Notice("\u5DF2\u9000\u51FA\u968F\u673A\u7EC3\u4E60");
     } else {
       this.enableRandomPractice();
     }
@@ -3864,7 +4033,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
   async enableMemoryPractice() {
     var _a, _b;
     if (!this.getSettings().memoryEnabled) {
-      new import_obsidian4.Notice("\u8BB0\u5FC6\u7EC3\u4E60\u5DF2\u5173\u95ED\uFF0C\u8BF7\u5728\u8BBE\u7F6E\u4E2D\u5F00\u542F");
+      new import_obsidian5.Notice("\u8BB0\u5FC6\u7EC3\u4E60\u5DF2\u5173\u95ED\uFF0C\u8BF7\u5728\u8BBE\u7F6E\u4E2D\u5F00\u542F");
       return;
     }
     if (this.memoryActive || this.memoryEnabling) return;
@@ -3934,7 +4103,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
       this.memoryNewCountToday = (this.memoryNewCountToday || 0) + freshNew.length;
       this.memoryPendingNew = fresh.map((q) => q.id);
       if (due.length === 0 && fresh.length === 0) {
-        new import_obsidian4.Notice("\u4ECA\u65E5\u6CA1\u6709\u5F85\u590D\u4E60\u6216\u53EF\u5B66\u4E60\u7684\u65B0\u9898");
+        new import_obsidian5.Notice("\u4ECA\u65E5\u6CA1\u6709\u5F85\u590D\u4E60\u6216\u53EF\u5B66\u4E60\u7684\u65B0\u9898");
         return;
       }
       this.practiceFocusId = (_b = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id) != null ? _b : null;
@@ -3952,7 +4121,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
       this.cancelAutoNext();
       this.renderQuestion();
       this.saveState();
-      new import_obsidian4.Notice(`\u8BB0\u5FC6\u7EC3\u4E60\uFF1A\u5230\u671F ${due.length} \u9898 + \u65B0\u9898 ${fresh.length} \u9898`);
+      new import_obsidian5.Notice(`\u8BB0\u5FC6\u7EC3\u4E60\uFF1A\u5230\u671F ${due.length} \u9898 + \u65B0\u9898 ${fresh.length} \u9898`);
     } finally {
       this.memoryEnabling = false;
     }
@@ -3988,7 +4157,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
       this.exitMemoryPractice();
       this.renderQuestion();
       this.saveState();
-      new import_obsidian4.Notice("\u5DF2\u9000\u51FA\u8BB0\u5FC6\u7EC3\u4E60");
+      new import_obsidian5.Notice("\u5DF2\u9000\u51FA\u8BB0\u5FC6\u7EC3\u4E60");
     } else {
       void this.enableMemoryPractice();
     }
@@ -4126,9 +4295,10 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
   }
   /** 忽略字母顺序与重复，归一化答案字符串用于比较。 */
   normalizeAnswer(value) {
-    return [...new Set(value.toUpperCase().replace(/[^A-D]/g, ""))].sort().join("");
+    return normalizeAnswerValue(value);
   }
   renderQuestion() {
+    this.syncSwipeNavigation();
     this.questionArea.empty();
     this.feedbackArea.empty();
     this.editArea.empty();
@@ -4173,7 +4343,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
       });
     }
     const stemDiv = this.questionArea.createDiv("csv-quiz-stem");
-    import_obsidian4.MarkdownRenderer.render(this.app, question.stem, stemDiv, "", this).catch(
+    import_obsidian5.MarkdownRenderer.render(this.app, question.stem, stemDiv, "", this).catch(
       (e) => console.error("CSV Quiz: markdown render failed", e)
     );
     this.renderCardPanel(question);
@@ -4360,7 +4530,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
         );
         this.renderQuestion();
         this.saveState();
-        new import_obsidian4.Notice("\u9898\u76EE\u5DF2\u56E0\u7B5B\u9009\u6761\u4EF6\u53D8\u5316\u88AB\u79FB\u51FA\u5F53\u524D\u5217\u8868\uFF0C\u7B54\u6848\u5DF2\u8BB0\u5F55");
+        new import_obsidian5.Notice("\u9898\u76EE\u5DF2\u56E0\u7B5B\u9009\u6761\u4EF6\u53D8\u5316\u88AB\u79FB\u51FA\u5F53\u524D\u5217\u8868\uFF0C\u7B54\u6848\u5DF2\u8BB0\u5F55");
         return;
       }
     }
@@ -4430,7 +4600,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     const saved = this.memoryCards[id];
     if (saved && (![0, 1, 2, 3].includes(saved.state) || saved.lastReview !== "" && Number.isNaN(new Date(saved.lastReview).getTime()) || saved.due && Number.isNaN(new Date(saved.due).getTime()))) {
       console.warn(`CSV Quiz: memory card data invalid for question "${id}", skipped`);
-      new import_obsidian4.Notice("\u8BB0\u5FC6\u7EC3\u4E60\uFF1A\u5361\u7247\u6570\u636E\u5F02\u5E38\uFF0C\u5DF2\u8DF3\u8FC7\u8BE5\u9898");
+      new import_obsidian5.Notice("\u8BB0\u5FC6\u7EC3\u4E60\uFF1A\u5361\u7247\u6570\u636E\u5F02\u5E38\uFF0C\u5DF2\u8DF3\u8FC7\u8BE5\u9898");
       return;
     }
     try {
@@ -4480,7 +4650,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
           void this.saveQuestionToCSV(q).then((ok) => {
             if (!ok) {
               q.wrong = old;
-              new import_obsidian4.Notice("\u8BB0\u5FC6\u7EC3\u4E60\uFF1A\u9519\u9898\u6807\u8BB0\u4FDD\u5B58\u5931\u8D25");
+              new import_obsidian5.Notice("\u8BB0\u5FC6\u7EC3\u4E60\uFF1A\u9519\u9898\u6807\u8BB0\u4FDD\u5B58\u5931\u8D25");
             }
           });
         }
@@ -4489,7 +4659,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
       (_c = (_b = this.plugin).refreshMemoryReminder) == null ? void 0 : _c.call(_b);
     } catch (e) {
       console.error("CSV Quiz: applyMemoryReview failed", e);
-      new import_obsidian4.Notice("\u8BB0\u5FC6\u5361\u7247\u66F4\u65B0\u5931\u8D25\uFF0C\u5DF2\u8DF3\u8FC7\u8BE5\u9898");
+      new import_obsidian5.Notice("\u8BB0\u5FC6\u5361\u7247\u66F4\u65B0\u5931\u8D25\uFF0C\u5DF2\u8DF3\u8FC7\u8BE5\u9898");
     }
   }
   /** 「下一题」按钮：多选题未判定时先判定，否则跳转。 */
@@ -4561,7 +4731,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
         }
         await this.stateManager.saveStateImmediately(state);
       }
-      new import_obsidian4.Notice(
+      new import_obsidian5.Notice(
         choice === "all" ? "\u8FDB\u5EA6\u5DF2\u91CD\u7F6E" : choice === "order" ? "\u9898\u76EE\u987A\u5E8F\u5DF2\u91CD\u7F6E\uFF0C\u91CD\u65B0\u6253\u5F00\u9762\u677F\u65F6\u751F\u6548" : choice === "records" ? "\u5237\u9898\u8BB0\u5F55\u5DF2\u6E05\u7406" : "\u8BB0\u5FC6\u5361\u7247\u5DF2\u5220\u9664"
       );
       return;
@@ -4581,7 +4751,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
       this.cancelAutoNext();
       this.renderQuestion();
       this.saveState();
-      new import_obsidian4.Notice(
+      new import_obsidian5.Notice(
         autoOff ? "\u9898\u76EE\u987A\u5E8F\u5DF2\u91CD\u7F6E\u4E3A CSV \u539F\u59CB\u987A\u5E8F\uFF0C\u5E76\u5DF2\u81EA\u52A8\u5173\u95ED\u968F\u673A\u9898\u76EE\u987A\u5E8F" : "\u9898\u76EE\u987A\u5E8F\u5DF2\u91CD\u7F6E\u4E3A CSV \u539F\u59CB\u987A\u5E8F"
       );
       return;
@@ -4611,7 +4781,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     this.renderQuestion();
     this.saveState();
     (_f = (_e = this.plugin).refreshMemoryReminder) == null ? void 0 : _f.call(_e);
-    new import_obsidian4.Notice(
+    new import_obsidian5.Notice(
       choice === "all" ? "\u8FDB\u5EA6\u5DF2\u91CD\u7F6E" : choice === "records" ? "\u5237\u9898\u8BB0\u5F55\u5DF2\u6E05\u7406" : "\u8BB0\u5FC6\u5361\u7247\u5DF2\u5220\u9664"
     );
   }
@@ -4693,7 +4863,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
       if (this.filteredQuestions.length > 0) {
         this.renderQuestion();
       }
-      new import_obsidian4.Notice("\u6807\u7B7E\u5DF2\u4FDD\u5B58");
+      new import_obsidian5.Notice("\u6807\u7B7E\u5DF2\u4FDD\u5B58");
     }
   }
   renderEditArea(question) {
@@ -4781,7 +4951,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
         );
         this.renderQuestion();
         this.saveState();
-        new import_obsidian4.Notice("\u9898\u76EE\u5DF2\u56E0\u7B5B\u9009\u6761\u4EF6\u53D8\u5316\u88AB\u79FB\u51FA\u5F53\u524D\u5217\u8868\uFF0C\u7B54\u6848\u5DF2\u8BB0\u5F55");
+        new import_obsidian5.Notice("\u9898\u76EE\u5DF2\u56E0\u7B5B\u9009\u6761\u4EF6\u53D8\u5316\u88AB\u79FB\u51FA\u5F53\u524D\u5217\u8868\uFF0C\u7B54\u6848\u5DF2\u8BB0\u5F55");
         return;
       }
     }
@@ -4828,7 +4998,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
         } else {
           this.currentIndex = newIdx;
           if ((this.practiceActive || this.memoryActive) && this.filteredQuestions.every((q) => this.practiceAnswered.has(q.id))) {
-            new import_obsidian4.Notice(`\u7EC3\u4E60\u5B8C\u6210\uFF01\u5171 ${this.filteredQuestions.length} \u9898`);
+            new import_obsidian5.Notice(`\u7EC3\u4E60\u5B8C\u6210\uFF01\u5171 ${this.filteredQuestions.length} \u9898`);
           }
           return;
         }
@@ -4907,7 +5077,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
           if (!targetStr) return;
           const targetNum = parseInt(targetStr, 10);
           if (isNaN(targetNum) || targetNum < 1 || targetNum > this.filteredQuestions.length) {
-            new import_obsidian4.Notice("\u9898\u53F7\u4E0D\u5B58\u5728\u6216\u5DF2\u88AB\u7B5B\u9009");
+            new import_obsidian5.Notice("\u9898\u53F7\u4E0D\u5B58\u5728\u6216\u5DF2\u88AB\u7B5B\u9009");
             return;
           }
           this.currentIndex = targetNum - 1;
@@ -4965,10 +5135,103 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
       }
     }
     if ((this.practiceActive || this.memoryActive) && this.filteredQuestions.every((q) => this.practiceAnswered.has(q.id))) {
-      new import_obsidian4.Notice(`\u7EC3\u4E60\u5B8C\u6210\uFF01\u5171 ${this.filteredQuestions.length} \u9898`);
+      new import_obsidian5.Notice(`\u7EC3\u4E60\u5B8C\u6210\uFF01\u5171 ${this.filteredQuestions.length} \u9898`);
     } else {
-      new import_obsidian4.Notice("\u6CA1\u6709\u66F4\u591A\u672A\u7B54\u9898");
+      new import_obsidian5.Notice("\u6CA1\u6709\u66F4\u591A\u672A\u7B54\u9898");
     }
+  }
+  /** 同步 data-ignore-swipe 属性（Obsidian 手势识别器对该区域跳过）；设置页开关变更后即时调用。 */
+  syncSwipeNavigation() {
+    if (this.getSettings().swipeNavigation) {
+      this.contentEl.setAttribute("data-ignore-swipe", "true");
+    } else {
+      this.contentEl.removeAttribute("data-ignore-swipe");
+    }
+  }
+  /** 滑动切题：touchstart 记录起点；边缘让位、可交互元素豁免。 */
+  handleSwipeStart(e) {
+    this.swipeActive = false;
+    this.swipeDecided = false;
+    if (!this.getSettings().swipeNavigation) return;
+    if (e.touches.length !== 1) return;
+    const tc = e.touches[0];
+    if (Math.min(tc.clientX, window.innerWidth - tc.clientX) < 12) return;
+    const target = e.target;
+    if (target && target.closest(
+      "a, button, input, textarea, select, label, [contenteditable]"
+    )) {
+      return;
+    }
+    this.swipeX0 = tc.clientX;
+    this.swipeY0 = tc.clientY;
+    this.swipeActive = true;
+    this.swipeDecided = false;
+    this.swipeHorizontal = false;
+  }
+  /** 滑动切题：方向判定；确定为水平后拦截事件（Obsidian 手势识别器不看 preventDefault，需 stopPropagation）。 */
+  handleSwipeMove(e) {
+    if (!this.swipeActive) return;
+    if (e.touches.length !== 1) {
+      this.swipeActive = false;
+      return;
+    }
+    const tc = e.touches[0];
+    const dx = tc.clientX - this.swipeX0;
+    const dy = tc.clientY - this.swipeY0;
+    if (!this.swipeDecided) {
+      if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
+      if (Math.abs(dy) > Math.abs(dx)) {
+        this.swipeActive = false;
+        return;
+      }
+      this.swipeDecided = true;
+      this.swipeHorizontal = true;
+    }
+    if (this.swipeHorizontal) {
+      e.stopPropagation();
+      if (e.cancelable) e.preventDefault();
+    }
+  }
+  /** 滑动切题：touchend 判定是否触发切题（阈值 45px、横向 > 纵向 1.5 倍、400ms 冷却）。 */
+  handleSwipeEnd(e) {
+    if (!this.swipeActive) return;
+    this.swipeActive = false;
+    if (!this.swipeDecided) return;
+    const tc = e.changedTouches[0];
+    const dx = tc.clientX - this.swipeX0;
+    const dy = tc.clientY - this.swipeY0;
+    if (Math.abs(dx) < 45 || Math.abs(dx) <= Math.abs(dy) * 1.5) return;
+    const now = Date.now();
+    if (now - this.swipeLastTrigger < 400) return;
+    this.swipeLastTrigger = now;
+    if (dx < 0) {
+      void this.nextQuestion();
+    } else {
+      void this.prevQuestion();
+    }
+  }
+  /** 打开刷题进度弹窗：列表顺序/筛选与当前视图一致，点击行跳转。 */
+  openProgressModal() {
+    var _a, _b;
+    const modal = new ProgressModal(this.app, {
+      questions: this.filteredQuestions,
+      answeredQuestions: this.answeredQuestions,
+      memoryCards: this.memoryCards,
+      currentId: (_b = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id) != null ? _b : null,
+      onJump: (id) => {
+        const idx = this.filteredQuestions.findIndex((q) => q.id === id);
+        if (idx < 0) {
+          new import_obsidian5.Notice("\u8BE5\u9898\u4E0D\u5728\u5F53\u524D\u5217\u8868");
+          return;
+        }
+        this.currentIndex = idx;
+        this.currentShuffledQId = null;
+        this.cancelAutoNext();
+        this.renderQuestion();
+        this.saveState();
+      }
+    });
+    modal.open();
   }
   updateProgress() {
     const total = this.filteredQuestions.length;
@@ -5035,7 +5298,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     }
     this.reFilterAndLocate(previousId);
     this.saveState();
-    new import_obsidian4.Notice("\u4FEE\u6539\u5DF2\u4FDD\u5B58");
+    new import_obsidian5.Notice("\u4FEE\u6539\u5DF2\u4FDD\u5B58");
   }
   /** 写回 CSV；成功返回 true，失败返回 false（已提示用户）。 */
   async saveQuestionToCSV(question) {
@@ -5052,9 +5315,9 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
     } catch (e) {
       console.error("CSV Quiz: Failed to save question to CSV", e);
       if (e instanceof Error && e.message === "CSV \u4E2D\u672A\u627E\u5230\u5BF9\u5E94\u9898\u53F7") {
-        new import_obsidian4.Notice("CSV \u4E2D\u672A\u627E\u5230\u5BF9\u5E94\u9898\u53F7\uFF0C\u4FEE\u6539\u672A\u4FDD\u5B58");
+        new import_obsidian5.Notice("CSV \u4E2D\u672A\u627E\u5230\u5BF9\u5E94\u9898\u53F7\uFF0C\u4FEE\u6539\u672A\u4FDD\u5B58");
       } else {
-        new import_obsidian4.Notice(`\u4FDD\u5B58\u5230 CSV \u5931\u8D25: ${e instanceof Error ? e.message : String(e)}`);
+        new import_obsidian5.Notice(`\u4FDD\u5B58\u5230 CSV \u5931\u8D25: ${e instanceof Error ? e.message : String(e)}`);
       }
       return false;
     }
@@ -5129,7 +5392,7 @@ var _QuizView = class _QuizView extends import_obsidian4.ItemView {
       this.renderQuestion();
       this.saveState();
       this.startAutoSave();
-      new import_obsidian4.Notice("\u5DF2\u5237\u65B0\uFF0C\u91CD\u65B0\u5F00\u59CB");
+      new import_obsidian5.Notice("\u5DF2\u5237\u65B0\uFF0C\u91CD\u65B0\u5F00\u59CB");
     } catch (e) {
       console.error("CSV Quiz: Refresh failed", e);
       this.showError(`\u5237\u65B0\u5931\u8D25: ${e instanceof Error ? e.message : String(e)}`);
@@ -5198,7 +5461,7 @@ _QuizView.openViewCount = 0;
 var QuizView = _QuizView;
 
 // src/stateManager.ts
-var import_obsidian5 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 var StateWriteQueue = class {
   constructor(plugin) {
     this.queue = [];
@@ -5318,7 +5581,7 @@ var StateManager = class {
       this.writeQueue.enqueue({ quizState: state }).catch((e) => {
         console.error("CSV Quiz: Failed to save state", e);
         const message = e instanceof Error ? e.message : String(e);
-        new import_obsidian5.Notice("\u5237\u9898\u8FDB\u5EA6\u4FDD\u5B58\u5931\u8D25: " + message);
+        new import_obsidian6.Notice("\u5237\u9898\u8FDB\u5EA6\u4FDD\u5B58\u5931\u8D25: " + message);
       });
     }, delay);
   }
@@ -5372,7 +5635,7 @@ var StateManager = class {
 };
 
 // src/main.ts
-var CSVQuizPlugin = class extends import_obsidian6.Plugin {
+var CSVQuizPlugin = class extends import_obsidian7.Plugin {
   constructor() {
     super(...arguments);
     this.memoryReminderTimer = null;
@@ -5465,7 +5728,7 @@ var CSVQuizPlugin = class extends import_obsidian6.Plugin {
     this.updateMemoryReminder();
   }
   async loadSettings() {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l;
     const data = await this.loadData() || {
       settings: {
         csvPath: "\u9898\u5E93.csv",
@@ -5481,7 +5744,8 @@ var CSVQuizPlugin = class extends import_obsidian6.Plugin {
         memoryEnabled: true,
         memoryDailyNew: 20,
         memoryReminder: true,
-        memoryMarkRating: true
+        memoryMarkRating: true,
+        swipeNavigation: true
       },
       quizState: null
     };
@@ -5505,7 +5769,8 @@ var CSVQuizPlugin = class extends import_obsidian6.Plugin {
       memoryEnabled: (_i = rawSettings.memoryEnabled) != null ? _i : true,
       memoryDailyNew: toNumber(rawSettings.memoryDailyNew, 20),
       memoryReminder: (_j = rawSettings.memoryReminder) != null ? _j : true,
-      memoryMarkRating: (_k = rawSettings.memoryMarkRating) != null ? _k : true
+      memoryMarkRating: (_k = rawSettings.memoryMarkRating) != null ? _k : true,
+      swipeNavigation: (_l = rawSettings.swipeNavigation) != null ? _l : true
     };
   }
   async saveSettings() {
@@ -5549,7 +5814,7 @@ var CSVQuizPlugin = class extends import_obsidian6.Plugin {
             state.memoryPendingNew = [];
           }
           await this.stateManager.saveStateImmediately(state);
-          new import_obsidian6.Notice(
+          new import_obsidian7.Notice(
             choice === "order" ? autoOff ? "\u9898\u76EE\u987A\u5E8F\u5DF2\u91CD\u7F6E\uFF0C\u91CD\u65B0\u6253\u5F00\u9762\u677F\u65F6\u751F\u6548\uFF0C\u5E76\u5DF2\u81EA\u52A8\u5173\u95ED\u968F\u673A\u9898\u76EE\u987A\u5E8F" : "\u9898\u76EE\u987A\u5E8F\u5DF2\u91CD\u7F6E\uFF0C\u91CD\u65B0\u6253\u5F00\u9762\u677F\u65F6\u751F\u6548" : choice === "records" ? "\u5237\u9898\u8BB0\u5F55\u5DF2\u6E05\u7406" : "\u8BB0\u5FC6\u5361\u7247\u5DF2\u5220\u9664"
           );
         }
@@ -5576,6 +5841,14 @@ var CSVQuizPlugin = class extends import_obsidian6.Plugin {
         state.displayOrder = [];
         await this.stateManager.saveStateImmediately(state);
       }
+    }
+  }
+  /** 「左右滑动切题」开关变更后同步视图（即时生效）。 */
+  syncSwipeNavigation() {
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
+    const view = leaf == null ? void 0 : leaf.view;
+    if (view) {
+      view.syncSwipeNavigation();
     }
   }
 };
