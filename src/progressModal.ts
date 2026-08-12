@@ -10,9 +10,6 @@ export interface ProgressModalOptions {
   onJump: (id: string) => void; // 点击跳转回调
 }
 
-/** 列表渲染上限：超限时提示使用筛选缩小范围，避免大量题目卡顿弹窗。 */
-const RENDER_LIMIT = 500;
-
 /** 刷题进度弹窗：展示当前列表每道题的答题/记忆状态，点击行跳转。 */
 export class ProgressModal extends Modal {
   private opts: ProgressModalOptions;
@@ -28,7 +25,7 @@ export class ProgressModal extends Modal {
     const { questions, answeredQuestions, memoryCards, currentId } = this.opts;
     const now = new Date().getTime();
 
-    // 汇总统计容器先创建（文本在构建循环累计完成后设置）；列表在 summary 之后
+    // 汇总统计容器先创建（文本在统计循环累计完成后设置）；列表在 summary 之后
     const summary = this.contentEl.createDiv("csv-quiz-progress-summary");
     const list = this.contentEl.createDiv("csv-quiz-progress-list");
     const stateNames: Record<number, string> = {
@@ -38,26 +35,38 @@ export class ProgressModal extends Modal {
       3: "再学习",
     };
 
-    // 用 DocumentFragment 批量构建行（避免逐行插入触发布局），统计在循环内累计
-    const frag = document.createDocumentFragment();
+    // 用 DocumentFragment 批量构建行（避免逐行插入触发布局）。createFragment 为 Obsidian 全局辅助函数
+    // （非 document.createElement 原生调用，符合 prefer-create-el 规则）。
+    const frag = createFragment();
     let answered = 0;
     let correct = 0;
-    const renderCount = Math.min(questions.length, RENDER_LIMIT);
-    for (let i = 0; i < renderCount; i++) {
-      const q = questions[i];
+
+    // 修复 1+2b：统计与渲染解耦——单独全量遍历所有题目累计 answered/correct（基数与列表长度一致），
+    // 同时把每题的用户答案与标准答案的归一化结果存入 Map（统计时填充、渲染时读取，避免重复 normalizeAnswerValue）
+    const normCache = new Map<string, string>();
+    for (const q of questions) {
       const a = answeredQuestions[q.id];
       if (a !== undefined) {
         answered++;
-        if (normalizeAnswerValue(a) === normalizeAnswerValue(q.answer)) {
+        const normA = normalizeAnswerValue(a);
+        const normAns = normalizeAnswerValue(q.answer);
+        normCache.set(`u:${q.id}`, normA);
+        normCache.set(`c:${q.id}`, normAns);
+        if (normA === normAns) {
           correct++;
         }
       }
+    }
+
+    // 渲染全部题目（不再截断）
+    for (const q of questions) {
+      const a = answeredQuestions[q.id];
 
       const row = frag.createEl("div", { cls: "csv-quiz-progress-row" });
       if (q.id === currentId) row.addClass("csv-quiz-progress-row-current");
       row.createEl("span", { text: q.id, cls: "csv-quiz-progress-id" });
       // 题干(去 Markdown 符号截断 30 字)
-      const stem = q.stem.replace(/[#*`_~[\]()>!-]/g, "").trim();
+      const stem = q.stem.replace(/[#*`_~\[\]()>!-]/g, "").trim();
       row.createEl("span", {
         text: stem.length > 30 ? stem.slice(0, 30) + "…" : stem,
         cls: "csv-quiz-progress-stem",
@@ -68,14 +77,16 @@ export class ProgressModal extends Modal {
           text: "未答",
           cls: "csv-quiz-progress-status csv-quiz-progress-unanswered",
         });
-      } else if (normalizeAnswerValue(a) === normalizeAnswerValue(q.answer)) {
+      } else if (
+        normCache.get(`u:${q.id}`) === normCache.get(`c:${q.id}`)
+      ) {
         row.createEl("span", {
-          text: `✓ 已答${a}`,
+          text: a ? `✓ 已答${a}` : "✓ 已答",
           cls: "csv-quiz-progress-status csv-quiz-progress-correct",
         });
       } else {
         row.createEl("span", {
-          text: `✗ 答错${a}`,
+          text: a ? `✗ 答错${a}` : "✗ 答错",
           cls: "csv-quiz-progress-status csv-quiz-progress-wrong",
         });
       }
@@ -92,7 +103,7 @@ export class ProgressModal extends Modal {
           "csv-quiz-progress-memory" +
           (dueT <= now ? " csv-quiz-progress-memory-due" : "");
         row.createEl("span", {
-          text: `${stateNames[card.state] ?? card.state} ${dueText}`,
+          text: `${stateNames[card.state] ?? "未知"} ${dueText}`,
           cls: memCls,
         });
       } else {
@@ -115,13 +126,7 @@ export class ProgressModal extends Modal {
       });
     }
 
-    // 超限/空列表提示在 frag 之前追加到 list（显示在列表上方）
-    if (questions.length > RENDER_LIMIT) {
-      list.createEl("p", {
-        text: `仅显示前 ${RENDER_LIMIT} 题，请使用筛选缩小范围`,
-        cls: "csv-quiz-empty",
-      });
-    }
+    // 空列表提示在 frag 之前追加到 list（显示在列表上方）
     if (questions.length === 0) {
       list.createEl("p", { text: "当前列表没有题目", cls: "csv-quiz-empty" });
     }
@@ -134,5 +139,15 @@ export class ProgressModal extends Modal {
           ? ` · 正确率 ${((correct / answered) * 100).toFixed(1)}%`
           : "")
     );
+
+    // 弹窗打开后滚动到当前题目（延时等待布局稳定）
+    if (currentId) {
+      const currentRow = list.querySelector(".csv-quiz-progress-row-current");
+      if (currentRow) {
+        window.setTimeout(() => {
+          currentRow.scrollIntoView({ block: "center", behavior: "auto" });
+        }, 80);
+      }
+    }
   }
 }

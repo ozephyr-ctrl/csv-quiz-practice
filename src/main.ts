@@ -12,6 +12,7 @@ export default class CSVQuizPlugin extends Plugin {
   csvWriteQueue: CSVWriteQueue;
   statusBar: HTMLElement;
   memoryReminderTimer: number | null = null;
+  private settingTab: CSVQuizSettingTab | null = null;
 
   async onload(): Promise<void> {
     this.stateManager = new StateManager(this);
@@ -42,7 +43,8 @@ export default class CSVQuizPlugin extends Plugin {
       },
     });
 
-    this.addSettingTab(new CSVQuizSettingTab(this.app, this));
+    this.settingTab = new CSVQuizSettingTab(this.app, this);
+    this.addSettingTab(this.settingTab);
 
     this.statusBar = this.addStatusBarItem();
     this.updateMemoryReminder();
@@ -165,7 +167,10 @@ export default class CSVQuizPlugin extends Plugin {
       memoryDailyNew: toNumber(rawSettings.memoryDailyNew, 20),
       memoryReminder: rawSettings.memoryReminder ?? true,
       memoryMarkRating: rawSettings.memoryMarkRating ?? true,
-      swipeNavigation: rawSettings.swipeNavigation ?? true,
+      swipeNavigation:
+        typeof rawSettings.swipeNavigation === "boolean"
+          ? rawSettings.swipeNavigation
+          : true,
     };
   }
 
@@ -205,6 +210,8 @@ export default class CSVQuizPlugin extends Plugin {
               this.settings.randomOrder = false;
               await this.saveSettings();
               autoOff = true;
+              // M-2: auto-off 后重建设置页 UI，同步随机顺序开关的显示值
+              this.syncSettingsUI();
             }
           } else if (choice === "records") {
             state.correctCount = 0;
@@ -264,5 +271,10 @@ export default class CSVQuizPlugin extends Plugin {
     if (view) {
       view.syncSwipeNavigation();
     }
+  }
+
+  /** 设置被外部（如重置顺序时的 auto-off）改动后，重建设置页 UI 以同步控件显示值。 */
+  syncSettingsUI(): void {
+    this.settingTab?.display();
   }
 }

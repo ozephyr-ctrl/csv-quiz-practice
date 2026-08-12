@@ -34,7 +34,7 @@ import {
 } from "./utils";
 import { ChoiceModal, TagPickerModal, askResetChoice } from "./modals";
 import { ProgressModal } from "./progressModal";
-import { fsrs, createEmptyCard, Rating, State, type Card } from "ts-fsrs";
+import { fsrs, createEmptyCard, Rating, type Card } from "ts-fsrs";
 
 /** FSRS 调度器单例：纯函数调度、不持有状态，可跨会话复用（模块级）。 */
 const memoryScheduler = fsrs();
@@ -74,6 +74,8 @@ export class QuizView extends ItemView {
   private selectedOption: string | null = null;
   private selectedOptions: string[] = [];
   private autoNextTimer: number | null = null;
+  /** M1: autoNext 计时器对应的作答题 id（用于在滑动/手动切题后校验题目是否已变化，防"幽灵自动跳题"）。 */
+  private autoNextQuestionId: string | null = null;
   private autoSaveTimer: number | null = null;
   private navigating: boolean = false;
   private isClosed: boolean = false;
@@ -174,7 +176,7 @@ export class QuizView extends ItemView {
 
     // 滑动切题：同步 data-ignore-swipe 屏蔽 Obsidian 原生手势（值须为字面量 "true"）
     this.syncSwipeNavigation();
-    // 手势监听只注册一次（registerDomEvent 随视图卸载自动清理；buildLayout 会被 refresh 多次调用）
+    // 手势监听只注册一次（buildLayout 仅在 onOpen 调用一次；registerDomEvent 随视图卸载自动清理，守卫防止重复注册）
     if (!this.swipeBound) {
       this.swipeBound = true;
       this.registerDomEvent(
@@ -209,11 +211,13 @@ export class QuizView extends ItemView {
 
     // Progress & stats
     const infoBar = this.contentEl.createDiv("csv-quiz-info-bar");
-    const progressIcon = infoBar.createSpan({
+    // 左侧组：图标 + 进度文本 紧贴对齐
+    const leftGroup = infoBar.createDiv("csv-quiz-info-left");
+    leftGroup.createSpan({
       text: "📋",
       cls: "csv-quiz-progress-icon",
     });
-    this.progressEl = infoBar.createDiv(
+    this.progressEl = leftGroup.createDiv(
       "csv-quiz-progress csv-quiz-progress-clickable"
     );
     this.statsEl = infoBar.createDiv("csv-quiz-stats");
@@ -248,6 +252,46 @@ export class QuizView extends ItemView {
 
     // Bottom spacer to avoid iOS toolbar overlap
     this.contentEl.createDiv("csv-quiz-bottom-spacer");
+
+    // 键盘导航：左右方向键切换上/下一题
+    this.contentEl.setAttribute("tabindex", "-1");
+    this.registerDomEvent(this.contentEl, "click", (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      if (
+        target.closest(
+          "a, button, input, textarea, select, label, [contenteditable]"
+        )
+      ) {
+        return;
+      }
+      this.contentEl.focus();
+    });
+    this.registerDomEvent(document, "keydown", (e: KeyboardEvent) => {
+      if (this.answering || this.navigating) return;
+      const active = document.activeElement as HTMLElement | null;
+      if (!active) return;
+      const focusedInPanel =
+        active === this.contentEl || this.contentEl.contains(active);
+      if (!focusedInPanel) return;
+      // 焦点在可编辑元素内时放行，避免干扰输入
+      if (
+        active.tagName === "INPUT" ||
+        active.tagName === "TEXTAREA" ||
+        active.tagName === "SELECT" ||
+        active.isContentEditable ||
+        active.closest("[contenteditable]")
+      ) {
+        return;
+      }
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        void this.prevQuestion();
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        void this.nextQuestion();
+      }
+    });
   }
 
   private async initializeFromState(): Promise<void> {
@@ -797,6 +841,8 @@ export class QuizView extends ItemView {
   private swipeHorizontal: boolean = false;
   private swipeLastTrigger: number = 0;
   private swipeBound: boolean = false;
+  /** L4: 刷题进度弹窗是否已打开（防重入：连续点击不重复弹窗）。 */
+  private progressModalOpen: boolean = false;
 
   private updateFilterUI(): void {
     if (!this.cat1Select) return;
@@ -823,22 +869,25 @@ export class QuizView extends ItemView {
     if (this.textFilterTimer !== null) {
       window.clearTimeout(this.textFilterTimer);
     }
-    this.textFilterTimer = window.setTimeout(async () => {
-      this.textFilterTimer = null;
-      if (this.isClosed) return;
-      try {
-        // F5: 先保存编辑区未提交的标签/分类修改，避免筛选时静默丢失。
-        // saveCurrentEdit 无变化时立即返回；有变化时写 CSV 并 reFilter，
-        // 之后 applyFiltersAndReset 会再以新 filterText 重筛（与其它筛选入口一致）。
-        await this.saveCurrentEdit();
-      } catch (e) {
-        // L-1: 捕获保存失败，避免 setTimeout 回调产生未处理的 Promise rejection
-        console.error("CSV Quiz: 文本筛选前保存编辑失败", e);
-        return;
-      }
-      if (this.isClosed) return;
-      this.filterText = this.filterTextInput.value;
-      this.applyFiltersAndReset();
+    this.textFilterTimer = window.setTimeout(() => {
+      // 回调不得返回 Promise（setTimeout 期望 void 回调），用 IIFE + void 包裹
+      void (async () => {
+        this.textFilterTimer = null;
+        if (this.isClosed) return;
+        try {
+          // F5: 先保存编辑区未提交的标签/分类修改，避免筛选时静默丢失。
+          // saveCurrentEdit 无变化时立即返回；有变化时写 CSV 并 reFilter，
+          // 之后 applyFiltersAndReset 会再以新 filterText 重筛（与其它筛选入口一致）。
+          await this.saveCurrentEdit();
+        } catch (e) {
+          // L-1: 捕获保存失败，避免 setTimeout 回调产生未处理的 Promise rejection
+          console.error("CSV Quiz: 文本筛选前保存编辑失败", e);
+          return;
+        }
+        if (this.isClosed) return;
+        this.filterText = this.filterTextInput.value;
+        this.applyFiltersAndReset();
+      })();
     }, 200);
   }
 
@@ -1612,7 +1661,18 @@ export class QuizView extends ItemView {
     const settings = this.getSettings();
     if (isCorrect) {
       if (settings.autoNextDelay > 0) {
+        // M1: 记录本次作答题 id，计时器回调校验题目未变化才跳转，防止
+        // saveCurrentEdit 的 await 窗口内用户滑动切题后出现"幽灵自动跳题"
+        this.autoNextQuestionId = question.id;
         this.autoNextTimer = window.setTimeout(() => {
+          if (
+            this.filteredQuestions[this.currentIndex]?.id !==
+            this.autoNextQuestionId
+          ) {
+            this.autoNextQuestionId = null;
+            return;
+          }
+          this.autoNextQuestionId = null;
           void this.nextQuestion();
         }, settings.autoNextDelay * 1000);
       } else {
@@ -1701,7 +1761,8 @@ export class QuizView extends ItemView {
           reps: saved.reps,
           lapses: saved.lapses,
           learning_steps: saved.learningSteps,
-          state: saved.state as State,
+          // ts-fsrs 的 State 为数字枚举，可直接赋值 number（已在 applyMemoryReview 校验过 0-3 范围）
+          state: saved.state,
           elapsed_days: 0,
           scheduled_days: 0,
           // B1: 必须 round-trip last_review，否则 FSRS 认为从未复习，间隔不会增长
@@ -1798,6 +1859,16 @@ export class QuizView extends ItemView {
 
   /** 随机题目顺序开关变更：保留答题进度，按当前设置重建显示顺序并重新定位当前题。 */
   async reorderForRandomSetting(): Promise<void> {
+    // L7: 视图未就绪（已关闭/初始化中止）时回退到清空磁盘顺序，
+    // 由 main.ts 的重建兜底处理，避免未就绪时重建+渲染导致状态不一致
+    if (this.isClosed || !this.canPersistState) {
+      const st = this.stateManager.getState();
+      if (st) {
+        st.displayOrder = [];
+        void this.stateManager.saveStateImmediately(st);
+      }
+      return;
+    }
     if (this.practiceActive) this.exitRandomPractice();
     if (this.memoryActive) this.exitMemoryPractice();
     const currentId = this.filteredQuestions[this.currentIndex]?.id ?? null;
@@ -1824,6 +1895,10 @@ export class QuizView extends ItemView {
             await (this.plugin as unknown as {
               saveSettings?: () => Promise<void>;
             }).saveSettings?.();
+            // M-2: auto-off 后同步设置页开关显示值（声明式设置路径不会自动跟随）
+            (this.plugin as unknown as {
+              syncSettingsUI?: () => void;
+            }).syncSettingsUI?.();
           }
         } else {
           if (choice !== "cards") {
@@ -1864,6 +1939,10 @@ export class QuizView extends ItemView {
         await (this.plugin as unknown as {
           saveSettings?: () => Promise<void>;
         }).saveSettings?.();
+        // M-2: auto-off 后同步设置页开关显示值（声明式设置路径不会自动跟随）
+        (this.plugin as unknown as {
+          syncSettingsUI?: () => void;
+        }).syncSettingsUI?.();
         autoOff = true;
       }
       this.rebuildOrderAndLocate(false, null);
@@ -2128,7 +2207,9 @@ export class QuizView extends ItemView {
         await this.recordAnswer(
           origQuestion,
           selectedKey,
-          selectedKey === origQuestion.answer
+          // L3: 与弹窗统计口径一致（normalizeAnswerValue 大小写不敏感）
+          normalizeAnswerValue(selectedKey) ===
+            normalizeAnswerValue(origQuestion.answer)
         );
         this.renderQuestion();
         this.saveState();
@@ -2137,7 +2218,10 @@ export class QuizView extends ItemView {
       }
     }
 
-    const isCorrect = selectedKey === question.answer;
+    // L3: 单选判分统一用 normalizeAnswerValue（大小写不敏感），与弹窗统计口径一致
+    const isCorrect =
+      normalizeAnswerValue(selectedKey) ===
+      normalizeAnswerValue(question.answer);
     this.showingAnswer = true;
     await this.recordAnswer(question, selectedKey, isCorrect);
     // 任意模式判分都更新 FSRS 卡片（记忆练习/随机练习/常规模式一致）
@@ -2149,7 +2233,20 @@ export class QuizView extends ItemView {
     const settings = this.getSettings();
     if (isCorrect) {
       if (settings.autoNextDelay > 0) {
+        // M1: 记录本次作答题 id，计时器回调校验题目未变化才跳转。
+        // 注意：此调度位于 saveCurrentEdit 的 await 之后，若用户在等待窗口内
+        // 滑动切题，nextQuestion 的 cancelAutoNext 会先于计时器创建执行（空操作），
+        // 因此必须用 autoNextQuestionId 兜底校验，防止刚滑到的新题被自动跳过。
+        this.autoNextQuestionId = question.id;
         this.autoNextTimer = window.setTimeout(() => {
+          if (
+            this.filteredQuestions[this.currentIndex]?.id !==
+            this.autoNextQuestionId
+          ) {
+            this.autoNextQuestionId = null;
+            return;
+          }
+          this.autoNextQuestionId = null;
           void this.nextQuestion();
         }, settings.autoNextDelay * 1000);
       } else {
@@ -2166,6 +2263,8 @@ export class QuizView extends ItemView {
       window.clearTimeout(this.autoNextTimer);
       this.autoNextTimer = null;
     }
+    // M1: 同时清空对应作答题 id，保证取消后残留的计时器回调校验必然失败
+    this.autoNextQuestionId = null;
   }
 
   private async nextQuestion(): Promise<void> {
@@ -2400,14 +2499,17 @@ export class QuizView extends ItemView {
     const dx = tc.clientX - this.swipeX0;
     const dy = tc.clientY - this.swipeY0;
     if (!this.swipeDecided) {
-      if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
-      // 纵向位移更大 → 视为滚动，放行
-      if (Math.abs(dy) > Math.abs(dx)) {
+      // M3: 判定为水平滑动的条件：dx 超过 10px 且为 |dy| 的 1.5 倍以上
+      // （与 handleSwipeEnd 口径统一）。45° 斜向滚动 dx≈dy 不会被劫持，
+      // 避免中断页面滚动。
+      if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+        this.swipeDecided = true;
+        this.swipeHorizontal = true;
+      } else if (Math.abs(dy) > Math.abs(dx)) {
+        // 纵向位移更大 → 视为滚动，放行
         this.swipeActive = false;
         return;
       }
-      this.swipeDecided = true;
-      this.swipeHorizontal = true;
     }
     if (this.swipeHorizontal) {
       e.stopPropagation();
@@ -2420,6 +2522,9 @@ export class QuizView extends ItemView {
     if (!this.swipeActive) return;
     this.swipeActive = false;
     if (!this.swipeDecided) return;
+    // M1/L9: 判分进行中（answering）或导航 in-flight（navigating）时忽略本次滑动
+    // —— 静默复位（swipeActive 已在上方复位，保持状态机一致，不弹 Notice 避免打扰）
+    if (this.answering || this.navigating) return;
     const tc = e.changedTouches[0];
     const dx = tc.clientX - this.swipeX0;
     const dy = tc.clientY - this.swipeY0;
@@ -2436,6 +2541,9 @@ export class QuizView extends ItemView {
 
   /** 打开刷题进度弹窗：列表顺序/筛选与当前视图一致，点击行跳转。 */
   private openProgressModal(): void {
+    // L4: 防重入——弹窗已打开时忽略再次点击
+    if (this.progressModalOpen) return;
+    this.progressModalOpen = true;
     const modal = new ProgressModal(this.app, {
       questions: this.filteredQuestions,
       answeredQuestions: this.answeredQuestions,
@@ -2454,6 +2562,11 @@ export class QuizView extends ItemView {
         this.saveState();
       },
     });
+    // L4: ProgressModal 未自定义 onClose（基类 onClose 无副作用），
+    // 覆盖实例 onClose 在任意关闭路径（点空白/Esc/点击行）后复位防重入标志
+    modal.onClose = () => {
+      this.progressModalOpen = false;
+    };
     modal.open();
   }
 

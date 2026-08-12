@@ -990,6 +990,9 @@ var CSVQuizSettingTab = class extends import_obsidian2.PluginSettingTab {
       return toggle.setValue(this.plugin.settings[key]).onChange((value) => {
         this.plugin.settings[key] = value;
         void this.plugin.saveSettings();
+        if (key === "swipeNavigation") {
+          this.plugin.syncSwipeNavigation();
+        }
       });
     });
   }
@@ -1388,7 +1391,6 @@ function normalizeAnswerValue(value) {
 
 // src/progressModal.ts
 var import_obsidian4 = require("obsidian");
-var RENDER_LIMIT = 500;
 var ProgressModal = class extends import_obsidian4.Modal {
   constructor(app, opts) {
     super(app);
@@ -1408,23 +1410,29 @@ var ProgressModal = class extends import_obsidian4.Modal {
       2: "\u590D\u4E60",
       3: "\u518D\u5B66\u4E60"
     };
-    const frag = document.createDocumentFragment();
+    const frag = createFragment();
     let answered = 0;
     let correct = 0;
-    const renderCount = Math.min(questions.length, RENDER_LIMIT);
-    for (let i = 0; i < renderCount; i++) {
-      const q = questions[i];
+    const normCache = /* @__PURE__ */ new Map();
+    for (const q of questions) {
       const a = answeredQuestions[q.id];
       if (a !== void 0) {
         answered++;
-        if (normalizeAnswerValue(a) === normalizeAnswerValue(q.answer)) {
+        const normA = normalizeAnswerValue(a);
+        const normAns = normalizeAnswerValue(q.answer);
+        normCache.set(`u:${q.id}`, normA);
+        normCache.set(`c:${q.id}`, normAns);
+        if (normA === normAns) {
           correct++;
         }
       }
+    }
+    for (const q of questions) {
+      const a = answeredQuestions[q.id];
       const row = frag.createEl("div", { cls: "csv-quiz-progress-row" });
       if (q.id === currentId) row.addClass("csv-quiz-progress-row-current");
       row.createEl("span", { text: q.id, cls: "csv-quiz-progress-id" });
-      const stem = q.stem.replace(/[#*`_~[\]()>!-]/g, "").trim();
+      const stem = q.stem.replace(/[#*`_~\[\]()>!-]/g, "").trim();
       row.createEl("span", {
         text: stem.length > 30 ? stem.slice(0, 30) + "\u2026" : stem,
         cls: "csv-quiz-progress-stem"
@@ -1434,14 +1442,14 @@ var ProgressModal = class extends import_obsidian4.Modal {
           text: "\u672A\u7B54",
           cls: "csv-quiz-progress-status csv-quiz-progress-unanswered"
         });
-      } else if (normalizeAnswerValue(a) === normalizeAnswerValue(q.answer)) {
+      } else if (normCache.get(`u:${q.id}`) === normCache.get(`c:${q.id}`)) {
         row.createEl("span", {
-          text: `\u2713 \u5DF2\u7B54${a}`,
+          text: a ? `\u2713 \u5DF2\u7B54${a}` : "\u2713 \u5DF2\u7B54",
           cls: "csv-quiz-progress-status csv-quiz-progress-correct"
         });
       } else {
         row.createEl("span", {
-          text: `\u2717 \u7B54\u9519${a}`,
+          text: a ? `\u2717 \u7B54\u9519${a}` : "\u2717 \u7B54\u9519",
           cls: "csv-quiz-progress-status csv-quiz-progress-wrong"
         });
       }
@@ -1451,7 +1459,7 @@ var ProgressModal = class extends import_obsidian4.Modal {
         const dueText = Number.isNaN(dueT) ? "\u2014" : dueT <= now ? "\u5DF2\u5230\u671F" : `${Math.max(1, Math.ceil((dueT - now) / 864e5))} \u5929\u540E`;
         const memCls = "csv-quiz-progress-memory" + (dueT <= now ? " csv-quiz-progress-memory-due" : "");
         row.createEl("span", {
-          text: `${(_a = stateNames[card.state]) != null ? _a : card.state} ${dueText}`,
+          text: `${(_a = stateNames[card.state]) != null ? _a : "\u672A\u77E5"} ${dueText}`,
           cls: memCls
         });
       } else {
@@ -1472,12 +1480,6 @@ var ProgressModal = class extends import_obsidian4.Modal {
         this.opts.onJump(q.id);
       });
     }
-    if (questions.length > RENDER_LIMIT) {
-      list.createEl("p", {
-        text: `\u4EC5\u663E\u793A\u524D ${RENDER_LIMIT} \u9898\uFF0C\u8BF7\u4F7F\u7528\u7B5B\u9009\u7F29\u5C0F\u8303\u56F4`,
-        cls: "csv-quiz-empty"
-      });
-    }
     if (questions.length === 0) {
       list.createEl("p", { text: "\u5F53\u524D\u5217\u8868\u6CA1\u6709\u9898\u76EE", cls: "csv-quiz-empty" });
     }
@@ -1485,6 +1487,14 @@ var ProgressModal = class extends import_obsidian4.Modal {
     summary.setText(
       `\u5171 ${questions.length} \u9898 \xB7 \u5DF2\u7B54 ${answered} \xB7 \u672A\u7B54 ${questions.length - answered} \xB7 \u7B54\u5BF9 ${correct} \xB7 \u7B54\u9519 ${answered - correct}` + (answered > 0 ? ` \xB7 \u6B63\u786E\u7387 ${(correct / answered * 100).toFixed(1)}%` : "")
     );
+    if (currentId) {
+      const currentRow = list.querySelector(".csv-quiz-progress-row-current");
+      if (currentRow) {
+        window.setTimeout(() => {
+          currentRow.scrollIntoView({ block: "center", behavior: "auto" });
+        }, 80);
+      }
+    }
   }
 };
 
@@ -1505,12 +1515,12 @@ var FSRSValidationError = class _FSRSValidationError extends FSRSError {
     (_a = Error.captureStackTrace) == null ? void 0 : _a.call(Error, this, _FSRSValidationError);
   }
 };
-var State = /* @__PURE__ */ ((State22) => {
-  State22[State22["New"] = 0] = "New";
-  State22[State22["Learning"] = 1] = "Learning";
-  State22[State22["Review"] = 2] = "Review";
-  State22[State22["Relearning"] = 3] = "Relearning";
-  return State22;
+var State = /* @__PURE__ */ ((State2) => {
+  State2[State2["New"] = 0] = "New";
+  State2[State2["Learning"] = 1] = "Learning";
+  State2[State2["Review"] = 2] = "Review";
+  State2[State2["Relearning"] = 3] = "Relearning";
+  return State2;
 })(State || {});
 var Rating = /* @__PURE__ */ ((Rating2) => {
   Rating2[Rating2["Manual"] = 0] = "Manual";
@@ -3338,6 +3348,8 @@ var _QuizView = class _QuizView extends import_obsidian5.ItemView {
     this.selectedOption = null;
     this.selectedOptions = [];
     this.autoNextTimer = null;
+    /** M1: autoNext 计时器对应的作答题 id（用于在滑动/手动切题后校验题目是否已变化，防"幽灵自动跳题"）。 */
+    this.autoNextQuestionId = null;
     this.autoSaveTimer = null;
     this.navigating = false;
     this.isClosed = false;
@@ -3385,6 +3397,8 @@ var _QuizView = class _QuizView extends import_obsidian5.ItemView {
     this.swipeHorizontal = false;
     this.swipeLastTrigger = 0;
     this.swipeBound = false;
+    /** L4: 刷题进度弹窗是否已打开（防重入：连续点击不重复弹窗）。 */
+    this.progressModalOpen = false;
     this.plugin = plugin;
     this.stateManager = stateManager;
     this.vault = vault;
@@ -3471,11 +3485,12 @@ var _QuizView = class _QuizView extends import_obsidian5.ItemView {
       );
     }
     const infoBar = this.contentEl.createDiv("csv-quiz-info-bar");
-    const progressIcon = infoBar.createSpan({
+    const leftGroup = infoBar.createDiv("csv-quiz-info-left");
+    leftGroup.createSpan({
       text: "\u{1F4CB}",
       cls: "csv-quiz-progress-icon"
     });
-    this.progressEl = infoBar.createDiv(
+    this.progressEl = leftGroup.createDiv(
       "csv-quiz-progress csv-quiz-progress-clickable"
     );
     this.statsEl = infoBar.createDiv("csv-quiz-stats");
@@ -3491,6 +3506,34 @@ var _QuizView = class _QuizView extends import_obsidian5.ItemView {
     );
     this.editArea = this.contentEl.createDiv("csv-quiz-edit-area");
     this.contentEl.createDiv("csv-quiz-bottom-spacer");
+    this.contentEl.setAttribute("tabindex", "-1");
+    this.registerDomEvent(this.contentEl, "click", (e) => {
+      const target = e.target;
+      if (!target) return;
+      if (target.closest(
+        "a, button, input, textarea, select, label, [contenteditable]"
+      )) {
+        return;
+      }
+      this.contentEl.focus();
+    });
+    this.registerDomEvent(document, "keydown", (e) => {
+      if (this.answering || this.navigating) return;
+      const active = document.activeElement;
+      if (!active) return;
+      const focusedInPanel = active === this.contentEl || this.contentEl.contains(active);
+      if (!focusedInPanel) return;
+      if (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT" || active.isContentEditable || active.closest("[contenteditable]")) {
+        return;
+      }
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        void this.prevQuestion();
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        void this.nextQuestion();
+      }
+    });
   }
   async initializeFromState() {
     const inMemoryState = this.stateManager.getState();
@@ -3923,18 +3966,20 @@ var _QuizView = class _QuizView extends import_obsidian5.ItemView {
     if (this.textFilterTimer !== null) {
       window.clearTimeout(this.textFilterTimer);
     }
-    this.textFilterTimer = window.setTimeout(async () => {
-      this.textFilterTimer = null;
-      if (this.isClosed) return;
-      try {
-        await this.saveCurrentEdit();
-      } catch (e) {
-        console.error("CSV Quiz: \u6587\u672C\u7B5B\u9009\u524D\u4FDD\u5B58\u7F16\u8F91\u5931\u8D25", e);
-        return;
-      }
-      if (this.isClosed) return;
-      this.filterText = this.filterTextInput.value;
-      this.applyFiltersAndReset();
+    this.textFilterTimer = window.setTimeout(() => {
+      void (async () => {
+        this.textFilterTimer = null;
+        if (this.isClosed) return;
+        try {
+          await this.saveCurrentEdit();
+        } catch (e) {
+          console.error("CSV Quiz: \u6587\u672C\u7B5B\u9009\u524D\u4FDD\u5B58\u7F16\u8F91\u5931\u8D25", e);
+          return;
+        }
+        if (this.isClosed) return;
+        this.filterText = this.filterTextInput.value;
+        this.applyFiltersAndReset();
+      })();
     }, 200);
   }
   syncBoolChips() {
@@ -4544,7 +4589,14 @@ var _QuizView = class _QuizView extends import_obsidian5.ItemView {
     const settings = this.getSettings();
     if (isCorrect) {
       if (settings.autoNextDelay > 0) {
+        this.autoNextQuestionId = question.id;
         this.autoNextTimer = window.setTimeout(() => {
+          var _a;
+          if (((_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id) !== this.autoNextQuestionId) {
+            this.autoNextQuestionId = null;
+            return;
+          }
+          this.autoNextQuestionId = null;
           void this.nextQuestion();
         }, settings.autoNextDelay * 1e3);
       } else {
@@ -4614,6 +4666,7 @@ var _QuizView = class _QuizView extends import_obsidian5.ItemView {
           reps: saved.reps,
           lapses: saved.lapses,
           learning_steps: saved.learningSteps,
+          // ts-fsrs 的 State 为数字枚举，可直接赋值 number（已在 applyMemoryReview 校验过 0-3 范围）
           state: saved.state,
           elapsed_days: 0,
           scheduled_days: 0,
@@ -4695,6 +4748,14 @@ var _QuizView = class _QuizView extends import_obsidian5.ItemView {
   /** 随机题目顺序开关变更：保留答题进度，按当前设置重建显示顺序并重新定位当前题。 */
   async reorderForRandomSetting() {
     var _a, _b;
+    if (this.isClosed || !this.canPersistState) {
+      const st = this.stateManager.getState();
+      if (st) {
+        st.displayOrder = [];
+        void this.stateManager.saveStateImmediately(st);
+      }
+      return;
+    }
     if (this.practiceActive) this.exitRandomPractice();
     if (this.memoryActive) this.exitMemoryPractice();
     const currentId = (_b = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id) != null ? _b : null;
@@ -4706,7 +4767,7 @@ var _QuizView = class _QuizView extends import_obsidian5.ItemView {
   }
   /** 按用户选择清理进度：records=刷题记录，cards=记忆卡片，order=仅重置题目顺序，all=全部。保留筛选条件。 */
   async applyResetChoice(choice) {
-    var _a, _b, _c, _d, _e, _f;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j;
     if (this.isClosed || !this.canPersistState) {
       const state = this.stateManager.getState();
       if (state) {
@@ -4715,6 +4776,7 @@ var _QuizView = class _QuizView extends import_obsidian5.ItemView {
           if (this.getSettings().randomOrder) {
             this.getSettings().randomOrder = false;
             await ((_b = (_a = this.plugin).saveSettings) == null ? void 0 : _b.call(_a));
+            (_d = (_c = this.plugin).syncSettingsUI) == null ? void 0 : _d.call(_c);
           }
         } else {
           if (choice !== "cards") {
@@ -4743,7 +4805,8 @@ var _QuizView = class _QuizView extends import_obsidian5.ItemView {
       let autoOff = false;
       if (this.getSettings().randomOrder) {
         this.getSettings().randomOrder = false;
-        await ((_d = (_c = this.plugin).saveSettings) == null ? void 0 : _d.call(_c));
+        await ((_f = (_e = this.plugin).saveSettings) == null ? void 0 : _f.call(_e));
+        (_h = (_g = this.plugin).syncSettingsUI) == null ? void 0 : _h.call(_g);
         autoOff = true;
       }
       this.rebuildOrderAndLocate(false, null);
@@ -4780,7 +4843,7 @@ var _QuizView = class _QuizView extends import_obsidian5.ItemView {
     this.cancelAutoNext();
     this.renderQuestion();
     this.saveState();
-    (_f = (_e = this.plugin).refreshMemoryReminder) == null ? void 0 : _f.call(_e);
+    (_j = (_i = this.plugin).refreshMemoryReminder) == null ? void 0 : _j.call(_i);
     new import_obsidian5.Notice(
       choice === "all" ? "\u8FDB\u5EA6\u5DF2\u91CD\u7F6E" : choice === "records" ? "\u5237\u9898\u8BB0\u5F55\u5DF2\u6E05\u7406" : "\u8BB0\u5FC6\u5361\u7247\u5DF2\u5220\u9664"
     );
@@ -4947,7 +5010,8 @@ var _QuizView = class _QuizView extends import_obsidian5.ItemView {
         await this.recordAnswer(
           origQuestion,
           selectedKey,
-          selectedKey === origQuestion.answer
+          // L3: 与弹窗统计口径一致（normalizeAnswerValue 大小写不敏感）
+          normalizeAnswerValue(selectedKey) === normalizeAnswerValue(origQuestion.answer)
         );
         this.renderQuestion();
         this.saveState();
@@ -4955,7 +5019,7 @@ var _QuizView = class _QuizView extends import_obsidian5.ItemView {
         return;
       }
     }
-    const isCorrect = selectedKey === question.answer;
+    const isCorrect = normalizeAnswerValue(selectedKey) === normalizeAnswerValue(question.answer);
     this.showingAnswer = true;
     await this.recordAnswer(question, selectedKey, isCorrect);
     this.applyMemoryReview(question.id, isCorrect);
@@ -4964,7 +5028,14 @@ var _QuizView = class _QuizView extends import_obsidian5.ItemView {
     const settings = this.getSettings();
     if (isCorrect) {
       if (settings.autoNextDelay > 0) {
+        this.autoNextQuestionId = question.id;
         this.autoNextTimer = window.setTimeout(() => {
+          var _a;
+          if (((_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id) !== this.autoNextQuestionId) {
+            this.autoNextQuestionId = null;
+            return;
+          }
+          this.autoNextQuestionId = null;
           void this.nextQuestion();
         }, settings.autoNextDelay * 1e3);
       } else {
@@ -4980,6 +5051,7 @@ var _QuizView = class _QuizView extends import_obsidian5.ItemView {
       window.clearTimeout(this.autoNextTimer);
       this.autoNextTimer = null;
     }
+    this.autoNextQuestionId = null;
   }
   async nextQuestion() {
     var _a;
@@ -5179,13 +5251,13 @@ var _QuizView = class _QuizView extends import_obsidian5.ItemView {
     const dx = tc.clientX - this.swipeX0;
     const dy = tc.clientY - this.swipeY0;
     if (!this.swipeDecided) {
-      if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
-      if (Math.abs(dy) > Math.abs(dx)) {
+      if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+        this.swipeDecided = true;
+        this.swipeHorizontal = true;
+      } else if (Math.abs(dy) > Math.abs(dx)) {
         this.swipeActive = false;
         return;
       }
-      this.swipeDecided = true;
-      this.swipeHorizontal = true;
     }
     if (this.swipeHorizontal) {
       e.stopPropagation();
@@ -5197,6 +5269,7 @@ var _QuizView = class _QuizView extends import_obsidian5.ItemView {
     if (!this.swipeActive) return;
     this.swipeActive = false;
     if (!this.swipeDecided) return;
+    if (this.answering || this.navigating) return;
     const tc = e.changedTouches[0];
     const dx = tc.clientX - this.swipeX0;
     const dy = tc.clientY - this.swipeY0;
@@ -5213,6 +5286,8 @@ var _QuizView = class _QuizView extends import_obsidian5.ItemView {
   /** 打开刷题进度弹窗：列表顺序/筛选与当前视图一致，点击行跳转。 */
   openProgressModal() {
     var _a, _b;
+    if (this.progressModalOpen) return;
+    this.progressModalOpen = true;
     const modal = new ProgressModal(this.app, {
       questions: this.filteredQuestions,
       answeredQuestions: this.answeredQuestions,
@@ -5231,6 +5306,9 @@ var _QuizView = class _QuizView extends import_obsidian5.ItemView {
         this.saveState();
       }
     });
+    modal.onClose = () => {
+      this.progressModalOpen = false;
+    };
     modal.open();
   }
   updateProgress() {
@@ -5639,6 +5717,7 @@ var CSVQuizPlugin = class extends import_obsidian7.Plugin {
   constructor() {
     super(...arguments);
     this.memoryReminderTimer = null;
+    this.settingTab = null;
   }
   async onload() {
     this.stateManager = new StateManager(this);
@@ -5664,7 +5743,8 @@ var CSVQuizPlugin = class extends import_obsidian7.Plugin {
         void this.activateView();
       }
     });
-    this.addSettingTab(new CSVQuizSettingTab(this.app, this));
+    this.settingTab = new CSVQuizSettingTab(this.app, this);
+    this.addSettingTab(this.settingTab);
     this.statusBar = this.addStatusBarItem();
     this.updateMemoryReminder();
     this.memoryReminderTimer = window.setInterval(
@@ -5728,7 +5808,7 @@ var CSVQuizPlugin = class extends import_obsidian7.Plugin {
     this.updateMemoryReminder();
   }
   async loadSettings() {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k;
     const data = await this.loadData() || {
       settings: {
         csvPath: "\u9898\u5E93.csv",
@@ -5770,7 +5850,7 @@ var CSVQuizPlugin = class extends import_obsidian7.Plugin {
       memoryDailyNew: toNumber(rawSettings.memoryDailyNew, 20),
       memoryReminder: (_j = rawSettings.memoryReminder) != null ? _j : true,
       memoryMarkRating: (_k = rawSettings.memoryMarkRating) != null ? _k : true,
-      swipeNavigation: (_l = rawSettings.swipeNavigation) != null ? _l : true
+      swipeNavigation: typeof rawSettings.swipeNavigation === "boolean" ? rawSettings.swipeNavigation : true
     };
   }
   async saveSettings() {
@@ -5802,6 +5882,7 @@ var CSVQuizPlugin = class extends import_obsidian7.Plugin {
               this.settings.randomOrder = false;
               await this.saveSettings();
               autoOff = true;
+              this.syncSettingsUI();
             }
           } else if (choice === "records") {
             state.correctCount = 0;
@@ -5850,6 +5931,11 @@ var CSVQuizPlugin = class extends import_obsidian7.Plugin {
     if (view) {
       view.syncSwipeNavigation();
     }
+  }
+  /** 设置被外部（如重置顺序时的 auto-off）改动后，重建设置页 UI 以同步控件显示值。 */
+  syncSettingsUI() {
+    var _a;
+    (_a = this.settingTab) == null ? void 0 : _a.display();
   }
 };
 /*! Bundled license information:

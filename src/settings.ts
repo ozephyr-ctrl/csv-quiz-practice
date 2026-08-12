@@ -399,8 +399,9 @@ export class CSVQuizSettingTab extends PluginSettingTab {
       .addToggle((toggle) => {
         if (key === "randomOrder") {
           // 开启随机顺序需要用户确认重置进度（取消时回滚开关 UI）
+          // key 已窄化为 "randomOrder"，settings[key] 类型即 boolean，无需断言
           return toggle
-            .setValue(this.plugin.settings[key] as boolean)
+            .setValue(this.plugin.settings[key])
             .onChange((value) => {
               void this.handleRandomOrderToggle(value, toggle);
             });
@@ -410,6 +411,11 @@ export class CSVQuizSettingTab extends PluginSettingTab {
           .onChange((value) => {
             (this.plugin.settings as unknown as Record<string, boolean | string>)[key] = value;
             void this.plugin.saveSettings();
+            // L-8: 左右滑动切题开关变更时即时同步视图的 data-ignore-swipe 属性，
+            // 避免关闭后原生手势被压制到下次渲染
+            if (key === "swipeNavigation") {
+              this.plugin.syncSwipeNavigation();
+            }
           });
       });
   }

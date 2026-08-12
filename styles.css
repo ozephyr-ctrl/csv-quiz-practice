@@ -267,6 +267,13 @@
   gap: 4px;
 }
 
+.csv-quiz-info-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
 .csv-quiz-stats {
   font-variant-numeric: tabular-nums;
 }
@@ -893,18 +900,26 @@
 /* 点击进度文本打开刷题进度弹窗 */
 .csv-quiz-progress-icon {
   font-size: 12px;
-  margin-right: 4px;
   opacity: 0.8;
 }
 .csv-quiz-progress-clickable {
   cursor: pointer;
-  text-decoration: underline dotted;
+  /* 使用分解属性（text-decoration-line/style）替代简写，兼容 Obsidian 1.11.x 的部分支持 */
+  text-decoration-line: underline;
+  text-decoration-style: dotted;
   text-underline-offset: 3px;
   border-radius: 4px;
   padding: 0 4px;
 }
 .csv-quiz-progress-clickable:hover {
   background: var(--background-modifier-hover);
-  text-decoration: underline;
+  text-decoration-line: underline;
+  text-decoration-style: solid;
   color: var(--text-accent);
+}
+
+/* 进度弹窗：全量列表渲染性能优化——视口外行跳过渲染，滚动时按需生成 */
+.csv-quiz-progress-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 2.6em;
 }
