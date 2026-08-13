@@ -1,7 +1,7 @@
 {
   "id": "csv-quiz-practice",
   "name": "csv quiz practice",
-  "version": "3.1.1",
+  "version": "3.1.2",
   "minAppVersion": "1.12.7",
   "description": "CSV-based quiz practice with sidecar state management.",
   "author": "Kong",
