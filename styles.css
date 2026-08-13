@@ -916,6 +916,15 @@
   color: var(--text-accent);
 }
 
+/* 刷题 ribbon 图标：自定义「题」字，常驻柔和彩色 */
+.side-dock-ribbon-action.cqv-ribbon-icon {
+  color: var(--color-accent);
+}
+.side-dock-ribbon-action.cqv-ribbon-icon:hover {
+  color: var(--text-accent);
+  background: color-mix(in srgb, var(--color-accent) 15%, transparent);
+}
+
 /* 进度弹窗：全量列表渲染性能优化——视口外行跳过渲染，滚动时按需生成 */
 .csv-quiz-progress-row {
   content-visibility: auto;

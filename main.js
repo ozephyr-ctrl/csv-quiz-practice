@@ -6716,9 +6716,14 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
       }
       return new QuizView(leaf, this, this.stateManager, this.app.vault, this.csvWriteQueue);
     });
-    this.addRibbonIcon("book-open", "\u5237\u9898\u554A", () => {
+    (0, import_obsidian8.addIcon)(
+      "cqv-ti",
+      '<text x="50" y="70" text-anchor="middle" font-size="76" font-weight="700" font-family="sans-serif" fill="currentColor">\u9898</text>'
+    );
+    const ribbonIconEl = this.addRibbonIcon("cqv-ti", "\u5237\u9898\u554A", () => {
       void this.activateView();
     });
+    ribbonIconEl.addClass("cqv-ribbon-icon");
     this.addCommand({
       id: "open-quiz-practice",
       name: "\u6253\u5F00\u5237\u9898\u9762\u677F",

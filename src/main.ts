@@ -1,4 +1,4 @@
-import { Plugin, Notice } from "obsidian";
+import { Plugin, Notice, addIcon } from "obsidian";
 import {
   PluginSettings,
   PluginData,
@@ -63,9 +63,16 @@ export default class CSVQuizPlugin extends Plugin {
       return new QuizView(leaf, this, this.stateManager, this.app.vault, this.csvWriteQueue);
     });
 
-    this.addRibbonIcon("book-open", "刷题啊", () => {
+    // 自定义「题」字图标（addIcon 注册的 SVG 随主题 currentColor 着色）
+    addIcon(
+      "cqv-ti",
+      '<text x="50" y="70" text-anchor="middle" font-size="76" font-weight="700" font-family="sans-serif" fill="currentColor">题</text>'
+    );
+    const ribbonIconEl = this.addRibbonIcon("cqv-ti", "刷题啊", () => {
       void this.activateView();
     });
+    // 常驻柔和彩色（styles.css 中 .cqv-ribbon-icon 定义）
+    ribbonIconEl.addClass("cqv-ribbon-icon");
 
     this.addCommand({
       id: "open-quiz-practice",
