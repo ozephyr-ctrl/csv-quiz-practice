@@ -6517,6 +6517,7 @@ var StateManager = class {
     await this.persistNow();
   }
   scheduleSave(state, delay = 300) {
+    this.currentState = state;
     const scheduledPath = this.contentPath;
     if (this.saveTimer !== null) {
       window.clearTimeout(this.saveTimer);
@@ -6524,7 +6525,6 @@ var StateManager = class {
     this.saveTimer = window.setTimeout(() => {
       this.saveTimer = null;
       if (this.contentPath !== scheduledPath) return;
-      this.currentState = state;
       this.persistNow().catch((e) => {
         console.error("CSV Quiz: Failed to save state", e);
         const now = Date.now();

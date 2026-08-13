@@ -451,6 +451,10 @@ export class StateManager {
   }
 
   scheduleSave(state: QuizSessionState, delay: number = 300): void {
+    // H-1: 立即同步 currentState（内存），保证切题库 flush（unloadSidecar 的
+    // persistNow）与状态栏刷新等读到最新状态，避免 300ms 窗口内丢最近进度；
+    // 回调内仍保留路径检查，防止挂起回调把旧题库状态写回。
+    this.currentState = state;
     // M1: 快照入队时的 contentPath；定时器回调执行时若路径已切换（切换题库/
     // unloadSidecar 后）则丢弃本次写入，避免挂起回调把旧题库状态写回
     // （含兼容模式复活 data.json.quizState 导致下次启动重复迁移）
@@ -464,8 +468,6 @@ export class StateManager {
       // 兼容模式（contentPath 恒为 null）下 scheduledPath 恒为 null，null !== null 恒 false，
       // 校验恒通过，不影响旧行为。
       if (this.contentPath !== scheduledPath) return;
-      // M1: 校验通过后才赋值 currentState，避免复活已清空/已切换的状态
-      this.currentState = state;
       this.persistNow().catch((e: unknown) => {
         console.error("CSV Quiz: Failed to save state", e);
         // T3: 30 秒内只弹一次失败提示，避免连续失败时 Notice 刷屏
