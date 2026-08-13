@@ -11,6 +11,7 @@ import {
 } from "obsidian";
 import { PluginSettings, DEFAULT_SETTINGS } from "./types";
 import { askResetChoice } from "./modals";
+import { sidecarPathFor } from "./sidecar";
 
 interface PluginHandle {
   settings: PluginSettings;
@@ -20,6 +21,9 @@ interface PluginHandle {
   resetQuizProgress(choice?: "records" | "cards" | "order" | "all"): Promise<void>;
   reorderQuestions(): Promise<void>;
   syncSwipeNavigation(): void;
+  changeQuizPath(path: string): Promise<void>;
+  compileQuizToCqv(): Promise<void>;
+  exportQuizMetaToCsv(): Promise<void>;
 }
 
 export class CSVQuizSettingTab extends PluginSettingTab {
@@ -43,12 +47,15 @@ export class CSVQuizSettingTab extends PluginSettingTab {
       { name: "刷题啊 - 设置" },
       {
         name: "CSV 文件路径",
-        desc: "题库 CSV 文件相对于库根目录的路径",
+        desc:
+          "题库文件相对于库根目录的路径（.csv 或编译产物 .cqv）；状态文件: " +
+          sidecarPathFor(this.plugin.settings.csvPath),
         control: {
           type: "file",
           key: "csvPath",
           defaultValue: DEFAULT_SETTINGS.csvPath,
-          filter: (file: TFile) => file.extension === "csv",
+          filter: (file: TFile) =>
+            file.extension === "csv" || file.extension === "cqv",
         },
       },
       {
@@ -172,6 +179,20 @@ export class CSVQuizSettingTab extends PluginSettingTab {
               void this.handleResetProgress();
             },
           },
+          {
+            name: "优化题库",
+            desc: "把当前 CSV 题库编译为分发产物 .cqv（需面板已打开）",
+            action: () => {
+              void this.plugin.compileQuizToCqv();
+            },
+          },
+          {
+            name: "导出修改到 CSV",
+            desc: "把题库状态中的标签/分类/重复标记写回 CSV（需面板已打开）",
+            action: () => {
+              void this.plugin.exportQuizMetaToCsv();
+            },
+          },
         ],
       },
     ];
@@ -191,6 +212,11 @@ export class CSVQuizSettingTab extends PluginSettingTab {
    * 从而覆盖整个 data.json 并丢失 quizState。
    */
   async setControlValue(key: string, value: unknown): Promise<void> {
+    if (key === "csvPath") {
+      // 3C: 题库路径变更走切换流程（有 sidecar 状态时弹轻量确认）
+      await this.plugin.changeQuizPath(String(value));
+      return;
+    }
     if (key === "randomOrder") {
       await this.handleRandomOrderToggle(value === true);
       return;
@@ -345,21 +371,45 @@ export class CSVQuizSettingTab extends PluginSettingTab {
           void this.handleResetProgress();
         })
       );
+    new Setting(containerEl)
+      .setName("优化题库")
+      .setDesc("把当前 CSV 题库编译为分发产物 .cqv（需面板已打开）")
+      .addButton((btn) =>
+        btn.setButtonText("编译").onClick(() => {
+          void this.plugin.compileQuizToCqv();
+        })
+      );
+    new Setting(containerEl)
+      .setName("导出修改到 CSV")
+      .setDesc("把题库状态中的标签/分类/重复标记写回 CSV（需面板已打开）")
+      .addButton((btn) =>
+        btn.setButtonText("导出").onClick(() => {
+          void this.plugin.exportQuizMetaToCsv();
+        })
+      );
   }
 
   private addCSVPathSetting(containerEl: HTMLElement): void {
     new Setting(containerEl)
       .setName("CSV 文件路径")
-      .setDesc("题库 CSV 文件相对于库根目录的路径")
-      .addText((text) =>
-        text
-          .setPlaceholder("题库.csv")
-          .setValue(this.plugin.settings.csvPath)
-          .onChange((value) => {
-            this.plugin.settings.csvPath = value;
-            void this.plugin.saveSettings();
-          })
+      .setDesc(
+        "题库文件相对于库根目录的路径（.csv 或编译产物 .cqv）；状态文件: " +
+          sidecarPathFor(this.plugin.settings.csvPath)
       )
+      .addText((text) => {
+        const originalPath = this.plugin.settings.csvPath;
+        text.setPlaceholder("题库.csv").setValue(originalPath);
+        // M4: 文本输入不再在 onChange 击键时直接写 settings.csvPath/saveSettings
+        // —— 预写会令 changeQuizPath 的等值早退误触发，吞掉确认弹窗/卸载/刷新。
+        // 输入框值即缓冲；失焦/回车（change 事件）时由 changeQuizPath 统一处理
+        // 写入设置 + 确认 + 切换。
+        text.inputEl.addEventListener("change", () => {
+          const finalValue = text.inputEl.value;
+          if (finalValue !== originalPath) {
+            void this.plugin.changeQuizPath(finalValue);
+          }
+        });
+      })
       .addButton((btn) => {
         btn.setButtonText("从库中选择").onClick(() => this.pickCSVFile());
       });
@@ -368,11 +418,11 @@ export class CSVQuizSettingTab extends PluginSettingTab {
   private pickCSVFile(): void {
     const csvFiles = this.app.vault
       .getFiles()
-      .filter((f) => f.extension === "csv")
+      .filter((f) => f.extension === "csv" || f.extension === "cqv")
       .map((f) => f.path);
 
     if (csvFiles.length === 0) {
-      new Notice("库中没有找到 CSV 文件");
+      new Notice("库中没有找到题库文件（.csv / .cqv）");
       return;
     }
 
@@ -380,8 +430,8 @@ export class CSVQuizSettingTab extends PluginSettingTab {
       this.app,
       csvFiles,
       (selectedPath: string) => {
-        this.plugin.settings.csvPath = selectedPath;
-        void this.plugin.saveSettings();
+        // 3C: 文件选择器选定即走切换流程（有 sidecar 状态时弹轻量确认）
+        void this.plugin.changeQuizPath(selectedPath);
       }
     );
     modal.open();

@@ -1,5 +1,10 @@
 import { Plugin, Notice } from "obsidian";
-import { PluginSettings, PluginData, VIEW_TYPE_QUIZ } from "./types";
+import {
+  PluginSettings,
+  PluginData,
+  VIEW_TYPE_QUIZ,
+  DEFAULT_SETTINGS,
+} from "./types";
 import { CSVQuizSettingTab } from "./settings";
 import { QuizView } from "./quizView";
 import { StateManager } from "./stateManager";
@@ -20,6 +25,33 @@ export default class CSVQuizPlugin extends Plugin {
 
     await this.loadSettings();
     await this.stateManager.loadPluginData(this.settings);
+
+    // 阶段 4：迁移旧版进度——data.json.quizState → 当前 csvPath 的 sidecar（无视图场景）
+    try {
+      const result = await this.stateManager.migrateLegacyState(
+        this.settings.csvPath,
+        {
+          favorite: this.settings.defaultFilterFavorite,
+          mastered: this.settings.defaultFilterMastered,
+          repeat: this.settings.defaultFilterRepeat,
+          wrong: this.settings.defaultFilterWrong,
+        }
+      );
+      if (result.status === "migrated") {
+        new Notice("旧版刷题进度已迁移至新格式");
+      } else if (result.status === "rejected") {
+        const tips: Record<string, string> = {
+          "csv-missing": "题库文件不存在，无法迁移旧进度",
+          "csv-read-error": "题库文件读取失败，无法迁移旧进度",
+          "bad-id": "题库文件存在空题号或重复题号，无法迁移旧进度，请修正后重试",
+          "path-mismatch": "旧进度所属题库与当前设置不一致，无法迁移（可恢复旧路径后重试）",
+          "bad-state": "旧版进度数据损坏，无法迁移，已跳过",
+        };
+        new Notice(`旧版刷题进度迁移被拒绝：${tips[result.reason]}`);
+      }
+    } catch (e) {
+      console.error("CSV Quiz: 迁移旧进度失败", e);
+    }
 
     this.registerView(VIEW_TYPE_QUIZ, (leaf) => {
       const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ);
@@ -52,6 +84,9 @@ export default class CSVQuizPlugin extends Plugin {
       () => this.updateMemoryReminder(),
       5 * 60 * 1000,
     );
+    // L7: 迁移会清空内存状态（currentState 为 null）；异步载入当前题库 sidecar
+    // 后刷新状态栏提醒，避免迁移后提醒失效直到首次打开面板
+    void this.ensureSidecarLoaded().then(() => this.updateMemoryReminder());
   }
 
   onunload(): void {
@@ -95,6 +130,37 @@ export default class CSVQuizPlugin extends Plugin {
   }
 
   /**
+   * 题库路径变更入口：当前视图有 sidecar 状态时弹轻量确认（信息性，防误切），
+   * 确认后切换（切换即落盘：unloadSidecar flush 当前 sidecar 再重载新题库）。
+   * 无状态（新题库首次使用）直接切换。未变化时直接忽略。
+   */
+  async changeQuizPath(newPath: string): Promise<void> {
+    if (newPath === this.settings.csvPath) return;
+    const prevPath = this.settings.csvPath;
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
+    const view = leaf?.view as QuizView | undefined;
+    if (view && view.hasLoadedState()) {
+      const confirmed = await view.confirmQuizSwitch(newPath);
+      if (!confirmed) return;
+    }
+    this.settings.csvPath = newPath;
+    await this.saveSettings();
+    // 切换即落盘：flush 当前 sidecar 并清空 contentPath，避免刷新时误清旧题库状态
+    try {
+      await this.stateManager.unloadSidecar();
+    } catch (e) {
+      // T1: 旧题库状态保存失败时中止切换并回滚设置，避免「设置指向新路径、
+      // 视图停留旧题库」的不一致状态
+      console.error("CSV Quiz: 切换题库前保存当前进度失败", e);
+      new Notice("当前进度保存失败，已中止切换题库");
+      this.settings.csvPath = prevPath;
+      await this.saveSettings();
+      return;
+    }
+    this.refreshQuiz();
+  }
+
+  /**
    * 根据当前状态栏显示「待复习」卡片数提醒；无到期卡片、
    * 无状态或设置关闭时清空文本。
    */
@@ -120,31 +186,16 @@ export default class CSVQuizPlugin extends Plugin {
   async loadSettings(): Promise<void> {
     const data: PluginData =
       ((await this.loadData()) as PluginData | null) || {
-        settings: {
-          csvPath: "题库.csv",
-          randomOrder: false,
-          randomOptions: false,
-          autoNextDelay: 1,
-          filterPanelOpen: true,
-          editPanelOpen: true,
-          defaultFilterFavorite: "",
-          defaultFilterMastered: "",
-          defaultFilterRepeat: "",
-          defaultFilterWrong: "",
-          memoryEnabled: true,
-          memoryDailyNew: 20,
-          memoryReminder: true,
-          memoryMarkRating: true,
-          swipeNavigation: true,
-        },
+        settings: { ...DEFAULT_SETTINGS },
         quizState: null,
       };
 
-    const rawSettings = (
-      data.settings && typeof data.settings === "object" ? data.settings : {}
-    ) as Partial<PluginSettings>;
+    const raw = (data.settings &&
+      typeof data.settings === "object"
+      ? data.settings
+      : {}) as Partial<PluginSettings>;
 
-    // 数字字段用 Number() + isNaN 校验，类型错误（如 "abc"）回退默认值；
+    // 数值字段用 Number() + isNaN 校验，类型错误（如 "abc"）回退默认值；
     // null/undefined 保持原有 ?? 语义回退默认值。
     const toNumber = (v: unknown, fallback: number): number => {
       if (v === null || v === undefined) return fallback;
@@ -152,25 +203,29 @@ export default class CSVQuizPlugin extends Plugin {
       return Number.isNaN(n) ? fallback : n;
     };
 
+    // L3: 以 DEFAULT_SETTINGS 为基座合并（单一默认值来源）；过滤 null/undefined
+    // 值，使布尔/字符串字段保持原有「?? 默认值」语义（与手写默认值行为等价）。
+    const clean: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(raw)) {
+      if (v !== null && v !== undefined) clean[k] = v;
+    }
+
     this.settings = {
-      csvPath: rawSettings.csvPath || "题库.csv",
-      randomOrder: rawSettings.randomOrder ?? false,
-      randomOptions: rawSettings.randomOptions ?? false,
-      autoNextDelay: toNumber(rawSettings.autoNextDelay, 1),
-      filterPanelOpen: rawSettings.filterPanelOpen ?? true,
-      editPanelOpen: rawSettings.editPanelOpen ?? true,
-      defaultFilterFavorite: rawSettings.defaultFilterFavorite ?? "",
-      defaultFilterMastered: rawSettings.defaultFilterMastered ?? "",
-      defaultFilterRepeat: rawSettings.defaultFilterRepeat ?? "",
-      defaultFilterWrong: rawSettings.defaultFilterWrong ?? "",
-      memoryEnabled: rawSettings.memoryEnabled ?? true,
-      memoryDailyNew: toNumber(rawSettings.memoryDailyNew, 20),
-      memoryReminder: rawSettings.memoryReminder ?? true,
-      memoryMarkRating: rawSettings.memoryMarkRating ?? true,
+      ...DEFAULT_SETTINGS,
+      ...(clean as Partial<PluginSettings>),
+      csvPath: (raw.csvPath as string | undefined) || DEFAULT_SETTINGS.csvPath,
+      autoNextDelay: toNumber(
+        raw.autoNextDelay,
+        DEFAULT_SETTINGS.autoNextDelay
+      ),
+      memoryDailyNew: toNumber(
+        raw.memoryDailyNew,
+        DEFAULT_SETTINGS.memoryDailyNew
+      ),
       swipeNavigation:
-        typeof rawSettings.swipeNavigation === "boolean"
-          ? rawSettings.swipeNavigation
-          : true,
+        typeof raw.swipeNavigation === "boolean"
+          ? raw.swipeNavigation
+          : DEFAULT_SETTINGS.swipeNavigation,
     };
   }
 
@@ -181,6 +236,23 @@ export default class CSVQuizPlugin extends Plugin {
 
   async flushSettingsSave(): Promise<void> {
     await this.stateManager.flushSettingsSave();
+  }
+
+  /** 确保当前题库的 sidecar 状态已载入内存（无视图时面板未载入）。返回是否可用。 */
+  private async ensureSidecarLoaded(): Promise<boolean> {
+    const st = this.stateManager.getState();
+    if (st !== null && this.stateManager.getContentPath() === this.settings.csvPath) {
+      return true;
+    }
+    // 未载入或路径不匹配（含面板从未打开 contentPath=null）：按当前设置载入。
+    // loadSidecar 会正确设置 contentPath/currentState；corrupt 仍安全拒绝。
+    const res = await this.stateManager.loadSidecar(this.settings.csvPath, {
+      favorite: this.settings.defaultFilterFavorite,
+      mastered: this.settings.defaultFilterMastered,
+      repeat: this.settings.defaultFilterRepeat,
+      wrong: this.settings.defaultFilterWrong,
+    });
+    return res.status !== "corrupt";
   }
 
   /**
@@ -199,6 +271,11 @@ export default class CSVQuizPlugin extends Plugin {
       if (view) {
         await view.applyResetChoice(choice);
       } else {
+        // M5: 无视图时 sidecar 状态未载入（currentState 为 null），先确保载入
+        if (!(await this.ensureSidecarLoaded())) {
+          new Notice("无法加载题库状态，请先打开刷题面板");
+          return;
+        }
         const state = this.stateManager.getState();
         // 重置顺序时若随机设置开启,自动关闭（避免与 CSV 原始顺序语义冲突）
         let autoOff = false;
@@ -239,9 +316,16 @@ export default class CSVQuizPlugin extends Plugin {
       }
       return;
     }
-    // 全部重置（choice 省略或 "all"）：清空 data.json 并刷新面板（重读题库），
+    // 全部重置（choice 省略或 "all"）：清空 sidecar 并刷新面板（重读题库），
     // 供设置页「全部重置」使用
+    // W1: 无视图时先确保 sidecar 状态已载入，否则 clearState() 走兼容分支
+    // 写 data.json.quizState（而非 sidecar），磁盘 sidecar 原样保留、静默无效
+    if (!(await this.ensureSidecarLoaded())) {
+      new Notice("无法加载题库状态，请先打开刷题面板");
+      return;
+    }
     await this.stateManager.clearState();
+    this.refreshMemoryReminder();
     this.refreshQuiz();
   }
 
@@ -256,6 +340,11 @@ export default class CSVQuizPlugin extends Plugin {
     if (view) {
       await view.reorderForRandomSetting();
     } else {
+      // M5: 无视图时先确保 sidecar 状态已载入，避免静默 no-op
+      if (!(await this.ensureSidecarLoaded())) {
+        new Notice("无法加载题库状态，请先打开刷题面板");
+        return;
+      }
       const state = this.stateManager.getState();
       if (state) {
         state.displayOrder = [];
@@ -276,5 +365,27 @@ export default class CSVQuizPlugin extends Plugin {
   /** 设置被外部（如重置顺序时的 auto-off）改动后，重建设置页 UI 以同步控件显示值。 */
   syncSettingsUI(): void {
     this.settingTab?.display();
+  }
+
+  /** 编译当前题库为 .cqv 分发产物（需面板已打开）。 */
+  async compileQuizToCqv(): Promise<void> {
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
+    const view = leaf?.view as QuizView | undefined;
+    if (!view) {
+      new Notice("请先打开刷题面板再编译题库");
+      return;
+    }
+    await view.compileToCqv();
+  }
+
+  /** 导出 sidecar B 类覆盖到 CSV（需面板已打开）。 */
+  async exportQuizMetaToCsv(): Promise<void> {
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
+    const view = leaf?.view as QuizView | undefined;
+    if (!view) {
+      new Notice("请先打开刷题面板再导出");
+      return;
+    }
+    await view.exportMetaToCsv();
   }
 }

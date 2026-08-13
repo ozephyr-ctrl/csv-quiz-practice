@@ -111,7 +111,8 @@ export function askResetChoice(
       {
         label: "全部重置",
         value: "all",
-        description: "同时清理刷题记录与记忆卡片",
+        description:
+          "清除答题记录、记忆卡片与状态标记（收藏/掌握/错题/标签覆盖），并重新加载题库",
         cta: true,
       },
       { label: "取消", value: "cancel" },
@@ -233,4 +234,96 @@ export class TagPickerModal extends Modal {
     this.close();
     this.resolveFn(null);
   }
+}
+
+export interface PromptModalOptions {
+  title: string;
+  message?: string;
+  placeholder?: string;
+}
+
+/**
+ * Promise-based 文本输入弹窗：单行输入 + 确认/取消按钮。
+ * resolve 输入值（trim 后；空串是合法值）或 null（取消/关闭/Esc）。
+ */
+export class PromptModal extends Modal {
+  readonly promise: Promise<string | null>;
+  private resolveFn!: (value: string | null) => void;
+  private resolved = false;
+  private readonly opts: PromptModalOptions;
+  private inputEl!: HTMLInputElement;
+
+  constructor(app: App, opts: PromptModalOptions) {
+    super(app);
+    this.opts = opts;
+    this.promise = new Promise<string | null>((resolve) => {
+      this.resolveFn = resolve;
+    });
+  }
+
+  onOpen(): void {
+    this.titleEl.setText(this.opts.title);
+    this.contentEl.empty();
+
+    if (this.opts.message) {
+      this.contentEl.createEl("p", {
+        text: this.opts.message,
+        cls: "csv-quiz-modal-message",
+      });
+    }
+
+    this.inputEl = this.contentEl.createEl("input", {
+      type: "text",
+      cls: "csv-quiz-modal-input",
+      attr: { placeholder: this.opts.placeholder ?? "" },
+    });
+    // Enter 确认
+    this.inputEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") this.choose();
+    });
+
+    const actions = this.contentEl.createDiv("csv-quiz-modal-options");
+    const confirmBtn = actions.createEl("button", {
+      text: "确认",
+      cls: "csv-quiz-btn csv-quiz-modal-btn csv-quiz-btn-primary",
+    });
+    confirmBtn.addEventListener("click", () => this.choose());
+    const cancelBtn = actions.createEl("button", {
+      text: "取消",
+      cls: "csv-quiz-btn csv-quiz-modal-btn",
+    });
+    cancelBtn.addEventListener("click", () => this.cancel());
+  }
+
+  onClose(): void {
+    if (!this.resolved) {
+      this.resolved = true;
+      this.resolveFn(null);
+    }
+  }
+
+  private choose(): void {
+    if (this.resolved) return;
+    this.resolved = true;
+    this.close();
+    // 空串是合法值（允许空备注）；仅取消/关闭返回 null
+    this.resolveFn(this.inputEl.value.trim());
+  }
+
+  private cancel(): void {
+    if (this.resolved) return;
+    this.resolved = true;
+    this.close();
+    this.resolveFn(null);
+  }
+}
+
+/** 弹文本输入框；返回输入值（trim 后，空串合法）或 null（取消）。 */
+export function askPrompt(
+  app: App,
+  opts: PromptModalOptions
+): Promise<string | null> {
+  const modal = new PromptModal(app, opts);
+  modal.open();
+  return modal.promise;
 }

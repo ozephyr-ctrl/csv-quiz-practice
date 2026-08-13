@@ -15,16 +15,18 @@ import {
 } from "./types";
 import {
   parseCSV,
-  generateCSVRow,
-  findAndUpdateRow,
   readCSVFile,
   filterQuestions,
   getUniqueTags,
   getUniqueCategories,
   buildDisplayOrder,
+  checkIdQuality,
   CSVWriteQueue,
 } from "./csvHandler";
 import { StateManager } from "./stateManager";
+import { createBackupTimer } from "./sidecar";
+import type { SidecarMeta } from "./sidecar";
+import { decodeCqv, encodeCqv } from "./cqvHandler";
 import {
   shuffle,
   sortByDisplayOrder,
@@ -32,9 +34,10 @@ import {
   countDueCards,
   normalizeAnswerValue,
 } from "./utils";
-import { ChoiceModal, TagPickerModal, askResetChoice } from "./modals";
+import { ChoiceModal, TagPickerModal, askResetChoice, askPrompt } from "./modals";
 import { ProgressModal } from "./progressModal";
 import { fsrs, createEmptyCard, Rating, type Card } from "ts-fsrs";
+import Papa from "papaparse";
 
 /** FSRS 调度器单例：纯函数调度、不持有状态，可跨会话复用（模块级）。 */
 const memoryScheduler = fsrs();
@@ -77,6 +80,15 @@ export class QuizView extends ItemView {
   /** M1: autoNext 计时器对应的作答题 id（用于在滑动/手动切题后校验题目是否已变化，防"幽灵自动跳题"）。 */
   private autoNextQuestionId: string | null = null;
   private autoSaveTimer: number | null = null;
+  /** 活跃备份定时器（面板打开期间每 30 分钟备份当前 sidecar 到 .bak）。 */
+  private backupTimer = createBackupTimer();
+  /** 内容源 mtime 快照：首次加载只记录；再次加载对比，变化则提示「题库已更新」。 */
+  private contentMtimeMs: number | null = null;
+  /**
+   * M2: 加载世代号——每次初始化/刷新自增，旧流程（多个 await 点之间用户改路径触发新加载）
+   * 在任意 await 后检测世代号变化即中止，防止旧题库状态写入新题库 sidecar。
+   */
+  private loadEpoch: number = 0;
   private navigating: boolean = false;
   private isClosed: boolean = false;
   /** 题库加载成功前禁止写入状态，避免加载失败后用空进度覆盖磁盘进度。 */
@@ -154,6 +166,8 @@ export class QuizView extends ItemView {
       window.clearInterval(this.autoSaveTimer);
       this.autoSaveTimer = null;
     }
+    // 4B: 面板关闭停止活跃备份定时器
+    this.backupTimer.stop();
     this.stateManager.cancelScheduledSave();
     // 练习模式为临时会话：关闭前恢复常规位置，避免保存练习内的索引
     this.exitRandomPractice();
@@ -164,9 +178,15 @@ export class QuizView extends ItemView {
     }
     if (this.stateManager.getState() && this.canPersistState) {
       const state = this.buildCurrentState();
-      await this.stateManager.saveStateImmediately(state);
-      // F4: 保存后同步脏检查基准，保证 lastSavedState 反映已落盘状态
-      this.lastSavedState = state;
+      try {
+        await this.stateManager.saveStateImmediately(state);
+        // F4: 保存后同步脏检查基准，保证 lastSavedState 反映已落盘状态
+        this.lastSavedState = state;
+      } catch (e: unknown) {
+        // T1: 保存失败不阻断 onClose 后续清理（csvWriteQueue.drain 仍须执行）
+        console.error("CSV Quiz: Failed to save state on close", e);
+        new Notice("进度保存失败，请检查题库状态文件");
+      }
     }
     await this.csvWriteQueue.drain();
   }
@@ -268,7 +288,9 @@ export class QuizView extends ItemView {
       this.contentEl.focus();
     });
     this.registerDomEvent(document, "keydown", (e: KeyboardEvent) => {
-      if (this.answering || this.navigating) return;
+      // 已答题显示答案时 answering=true 但方向键切题应恢复（与 handleSwipeEnd 口径统一）；
+      // 仅真正作答中（未显示答案）或导航切换中才拦截键盘导航
+      if ((this.answering && !this.showingAnswer) || this.navigating) return;
       const active = document.activeElement as HTMLElement | null;
       if (!active) return;
       const focusedInPanel =
@@ -295,18 +317,18 @@ export class QuizView extends ItemView {
   }
 
   private async initializeFromState(): Promise<void> {
-    // Capture in-memory progress BEFORE loadPluginData overwrites it with the
-    // disk value. This is the "current progress" used to detect external edits.
-    const inMemoryState = this.stateManager.getState();
-    const pluginData = await this.stateManager.loadPluginData(this.getSettings());
-    // V2: 加载过程中视图被关闭 → 中止整个初始化流程，不再写盘
-    if (this.isClosed) return;
+    // M2: 记录本次加载世代号（新流程开始会自增，使本流程过期）
+    const epoch = ++this.loadEpoch;
     // M5b: 使用内存中的最新设置（设置面板修改已写入内存并排队落盘），
-    // 避免读到尚未落盘的旧磁盘设置导致竞态。
+    // 避免读到尚未落盘的旧磁盘设置导致竞态。settings 已由 main 的 loadSettings 加载，
+    // 不再调用 loadPluginData（外部修改检测留到阶段 3 处理）。
     const settings = this.getSettings();
-    const diskState = pluginData.quizState;
-
     this.csvPath = settings.csvPath;
+
+    // 3A: 捕获加载前的内存进度（用于 sidecar 外部修改检测；loadSidecar 会覆盖 currentState）
+    const inMemoryState = this.stateManager.getState();
+    // M6: 一并捕获内存 meta 覆盖层（选择「使用当前」时恢复，避免本地未落盘 meta 丢失）
+    const inMemoryMeta = this.stateManager.getMeta();
 
     // Build filter panel
     this.buildFilterPanel(settings);
@@ -316,115 +338,251 @@ export class QuizView extends ItemView {
     // 成功加载路径末尾的 saveState() 会重新设置正确的 currentState。
     this.stateManager.setState(null);
 
-    // --- 检测刷题进度被外部修改 (data.json) ---
-    // 当内存中的当前进度与磁盘进度不一致时，说明 data.json 被外部编辑或同步。
-    let effectiveSavedState: QuizSessionState | null = diskState;
-    if (inMemoryState && !quizStateEquals(inMemoryState, diskState)) {
-      const choice = await this.askExternalModificationChoice(diskState === null);
-      // V2: 弹窗期间视图被关闭 → 中止（磁盘进度保持不变）
-      if (this.isClosed) return;
-      if (choice === "current") {
-        effectiveSavedState = inMemoryState;
-      } else if (choice === "external") {
-        effectiveSavedState = diskState;
-      } else {
-        // 用户取消：不加载题库（currentState 已在弹窗前清空，onClose 不会覆盖磁盘）
-        this.showError("已取消加载题库。请重新打开刷题面板。");
-        return;
-      }
-    }
-
-    // --- 检测题库路径变更，需要重置刷题进度 ---
-    if (effectiveSavedState && effectiveSavedState.csvPath !== this.csvPath) {
-      const reset = await this.askResetChoice();
-      // V2: 弹窗期间视图被关闭 → 中止
-      if (this.isClosed) return;
-      if (reset === null) {
-        this.showError("已取消加载题库。请重新打开刷题面板。");
-        return;
-      }
-      if (reset === "keep") {
-        // 保留旧进度会造成运行异常（题号属于另一个题库）→ 拒绝打开并再次询问
-        const again = await this.askResetOrAbort();
-        // V2: 弹窗期间视图被关闭 → 中止
-        if (this.isClosed) return;
-        if (again !== "reset") {
-          this.showError(
-            "题库路径已变更，未重置进度无法正常打开题库。请在设置中点击「重置刷题进度」后重试。"
-          );
-          return;
-        }
-      }
-      // 执行重置：重新开始刷题，保留筛选条件
-      const status = await this.loadQuestions();
-      // V2: 加载期间视图被关闭 → 中止
-      if (this.isClosed) return;
-      if (status !== "ok") {
-        if (status === "error") this.restoreFiltersOnly(effectiveSavedState);
-        this.startAutoSave();
-        return;
-      }
-      this.applyFreshStart(settings, effectiveSavedState);
-      this.updateFilterUI();
-      this.renderQuestion();
-      this.saveState();
-      this.startAutoSave();
-      return;
-    }
-
-    // --- 正常加载：恢复进度 或 首次使用 ---
+    // 载入题库（loadQuestions 内部含 id 质量门槛：空/重复题号拒绝加载）
     const status = await this.loadQuestions();
     // V2: 加载期间视图被关闭 → 中止
     if (this.isClosed) return;
+    // M2: 期间已开始新加载流程 → 本流程过期，丢弃结果
+    if (epoch !== this.loadEpoch) return;
     if (status !== "ok") {
-      if (status === "error") this.restoreFiltersOnly(effectiveSavedState);
+      // sidecar 化后无可恢复的磁盘 state，筛选恢复逻辑已移除，直接跳过
       this.startAutoSave();
       return;
     }
 
-    if (effectiveSavedState && effectiveSavedState.csvPath === this.csvPath) {
-      this.applyRestore(settings, effectiveSavedState);
+    // 载入当前题库的 sidecar 状态（缺失时初始化空状态，含 defaultFilter* 默认筛选）
+    const loadResult = await this.stateManager.loadSidecar(this.csvPath, {
+      favorite: settings.defaultFilterFavorite,
+      mastered: settings.defaultFilterMastered,
+      repeat: settings.defaultFilterRepeat,
+      wrong: settings.defaultFilterWrong,
+    });
+    // V2: 加载期间视图被关闭 → 中止
+    if (this.isClosed) return;
+    // M2: 期间已开始新加载流程 → 本流程过期，丢弃结果
+    if (epoch !== this.loadEpoch) return;
+    if (loadResult.status === "corrupt") {
+      // 级联损坏：不自动清空，提示用户重建（可手动重置或删除状态文件）
+      this.showError("状态文件与备份均损坏，请重置刷题进度或删除状态文件后重试");
+      this.canPersistState = false;
+      return;
+    }
+
+    // 3A: sidecar 外部修改检测——内存状态（若与当前题库同源）与 sidecar 加载结果
+    // 不一致时弹窗选择（复用「使用当前 / 使用外部」模式，仅存储对象换为 sidecar）。
+    // M6: 条件扩展为 state 或 meta 任一不一致；选择 current 时 state 与 meta 一并恢复。
+    let effectiveState: QuizSessionState = loadResult.state;
+    if (
+      inMemoryState &&
+      this.stateManager.getContentPath() === this.csvPath &&
+      inMemoryState.csvPath === this.csvPath
+    ) {
+      const loaded = this.stateManager.getState();
+      const metaDiffers =
+        JSON.stringify(inMemoryMeta) !==
+        JSON.stringify(this.stateManager.getMeta());
+      if (loaded && (!quizStateEquals(inMemoryState, loaded) || metaDiffers)) {
+        const choice = await this.askExternalModificationChoice(false);
+        if (this.isClosed) return;
+        // M2: 弹窗期间已开始新加载流程 → 中止
+        if (epoch !== this.loadEpoch) return;
+        if (choice === "current") {
+          // 用内存状态覆盖并保存；meta 逐字段恢复（getMeta 返回内部引用，无法整体替换）
+          this.stateManager.setState(inMemoryState);
+          this.restoreMetaFrom(inMemoryMeta);
+          await this.stateManager.saveStateImmediately(inMemoryState);
+          // M2: 落盘期间已开始新加载流程 → 中止
+          if (epoch !== this.loadEpoch) return;
+          effectiveState = inMemoryState;
+        } else if (choice === "external") {
+          // 已加载 sidecar 状态，保持
+        } else {
+          // 用户取消：禁止后续写盘，避免空状态覆盖外部进度。
+          // （弹窗前虽已 setState(null)，但 loadSidecar 已重新设置 currentState，
+          //  若不清 canPersistState，onClose 会用实例默认值（空状态）覆盖外部 sidecar）
+          this.canPersistState = false;
+          this.showError("已取消加载题库。请重新打开刷题面板。");
+          return;
+        }
+      }
+    }
+
+    // 对齐清理 sidecar meta 中已不存在于题库的僵尸条目（替换产物后 id 变化时）
+    this.pruneMetaEntries();
+
+    // 把 sidecar meta 覆盖层的 B/C 类字段合并到题目（meta 优先，永久遮蔽语义）
+    this.applyMetaToQuestions();
+
+    // 恢复进度或首次使用（sidecar 无 csvPath，stateFromSidecar 已补为 contentPath，恒匹配）
+    if (effectiveState.csvPath === this.csvPath) {
+      this.applyRestore(settings, effectiveState);
     } else {
-      this.applyFreshStart(settings, effectiveSavedState);
+      this.applyFreshStart(settings, effectiveState);
     }
     this.updateFilterUI();
     this.renderQuestion();
+    // M2: saveState 前最后检查，防止过期流程写入已切换的题库
+    if (epoch !== this.loadEpoch) return;
     this.saveState();
     this.startAutoSave();
+    // 3D: 状态栏立即刷新为新题库的待复习数
+    (this.plugin as unknown as { refreshMemoryReminder?: () => void })
+      .refreshMemoryReminder?.();
   }
 
-  /** Read and parse the CSV. Returns "ok", "empty" (no questions), or "error". */
+  /** Read and parse the content source. Returns "ok", "empty" (no questions), or "error". */
   private async loadQuestions(): Promise<"ok" | "empty" | "error"> {
     try {
-      const csvContent = await readCSVFile(this.vault, this.csvPath);
-      this.allQuestions = parseCSV(csvContent);
-      this.checkDuplicateIds();
+      const questions = await this.readQuestionsFromSource();
+      if (!questions) {
+        // 读取失败：readQuestionsFromSource 已提示
+        this.canPersistState = false;
+        return "error";
+      }
+      this.allQuestions = questions;
+      // id 质量门槛：空/重复题号拒绝加载（保护已有 sidecar 状态不被错位覆盖）
+      const { emptyIds, duplicateIds } = checkIdQuality(this.allQuestions);
+      if (emptyIds.length > 0 || duplicateIds.length > 0) {
+        this.canPersistState = false;
+        const parts: string[] = [];
+        if (emptyIds.length > 0) parts.push(`空题号 ${emptyIds.length} 个`);
+        if (duplicateIds.length > 0) {
+          parts.push(
+            `重复题号: ${duplicateIds.slice(0, 5).join(", ")}${duplicateIds.length > 5 ? "…" : ""}`
+          );
+        }
+        this.showError(`题库存在${parts.join("、")}，请修改 CSV 后重试`);
+        return "error";
+      }
       if (this.allQuestions.length === 0) {
         this.canPersistState = false;
-        this.showError("CSV 文件中没有找到题目数据");
+        this.showError("题库文件中没有找到题目数据");
         return "empty";
       }
       this.canPersistState = true;
+      // 3B: 内容源 mtime 变更检测——首次加载只记录；再次加载（refresh/重开）对比，
+      // 变化则提示。id 对齐由 applyMetaToQuestions 天然处理（新题库不存在的 meta 无效果）。
+      const stat = await this.vault.adapter.stat(this.csvPath);
+      const newMtime = stat?.mtime ?? null;
+      if (
+        this.contentMtimeMs !== null &&
+        newMtime !== null &&
+        newMtime !== this.contentMtimeMs
+      ) {
+        new Notice("题库文件已更新，状态已按题目对齐");
+      }
+      this.contentMtimeMs = newMtime;
       return "ok";
     } catch (e: unknown) {
       this.canPersistState = false;
-      console.error("CSV Quiz: Failed to load CSV", e);
-      this.showError(`无法加载 CSV 文件: ${e instanceof Error ? e.message : String(e)}`);
+      console.error("CSV Quiz: Failed to load questions", e);
+      this.showError(`无法加载题库文件: ${e instanceof Error ? e.message : String(e)}`);
       return "error";
     }
   }
 
-  /** 检测题库中重复/空题号并提示，避免答题记录与 CSV 更新错乱。 */
-  private checkDuplicateIds(): void {
-    const seen = new Set<string>();
-    const dups = new Set<string>();
-    for (const q of this.allQuestions) {
-      if (seen.has(q.id)) dups.add(q.id);
-      else seen.add(q.id);
+  /**
+   * 按内容源类型读取题目：.cqv 走二进制解码（decodeCqv 含四重解析防御），
+   * 其余按 CSV（readCSVFile + parseCSV）。失败返回 null（已 showError 提示）。
+   */
+  private async readQuestionsFromSource(): Promise<Question[] | null> {
+    if (this.csvPath.toLowerCase().endsWith(".cqv")) {
+      try {
+        const buf = await this.vault.adapter.readBinary(this.csvPath);
+        const result = decodeCqv(buf);
+        return result.questions;
+      } catch (e: unknown) {
+        console.error("CSV Quiz: Failed to load .cqv", e);
+        this.showError(
+          `无法加载题库产物: ${e instanceof Error ? e.message : String(e)}`
+        );
+        return null;
+      }
     }
-    if (dups.size > 0) {
-      const list = [...dups].map((d) => (d === "" ? "（空题号）" : d)).join(", ");
-      new Notice(`题库中存在重复题号: ${list}，答题记录可能不准确，请检查 CSV`);
+    try {
+      const csvContent = await readCSVFile(this.vault, this.csvPath);
+      return parseCSV(csvContent);
+    } catch (e: unknown) {
+      console.error("CSV Quiz: Failed to load CSV", e);
+      this.showError(`无法加载 CSV 文件: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    }
+  }
+
+  /**
+   * 清理 sidecar meta 中已不存在于题库的僵尸条目（替换产物/CSV 后 id 变化时）。
+   * getMeta() 返回内部引用，delete 后调度保存落盘。
+   */
+  private pruneMetaEntries(): void {
+    const ids = new Set(this.allQuestions.map((q) => q.id));
+    const meta = this.stateManager.getMeta();
+    let changed = false;
+    for (const k of Object.keys(meta)) {
+      if (!ids.has(k)) {
+        delete meta[k];
+        changed = true;
+      }
+    }
+    if (changed) {
+      const st = this.stateManager.getState();
+      if (st) this.stateManager.scheduleSave(st, 0);
+    }
+  }
+
+  /** 把 sidecar meta 覆盖层的 B/C 类字段合并到 allQuestions（meta 优先，永久遮蔽语义）。 */
+  private applyMetaToQuestions(): void {
+    const meta = this.stateManager.getMeta();
+    for (const q of this.allQuestions) {
+      const m = meta[q.id];
+      if (!m) continue;
+      if (m.favorite !== undefined) q.favorite = m.favorite;
+      if (m.mastered !== undefined) q.mastered = m.mastered;
+      if (m.wrong !== undefined) q.wrong = m.wrong;
+      if (m.repeat !== undefined) q.repeat = m.repeat;
+      if (m.tags !== undefined) q.tags = m.tags;
+      if (m.category1 !== undefined) q.category1 = m.category1;
+      if (m.category2 !== undefined) q.category2 = m.category2;
+      if (m.category3 !== undefined) q.category3 = m.category3;
+    }
+  }
+
+  /**
+   * 把题目的指定 B/C 类状态字段写入 sidecar meta（不再写 CSV）。无失败路径（内存操作 + 调度保存）。
+   * 只写调用方明确修改过的字段，避免内容源默认值被烘焙进覆盖层（永久遮蔽误触发 + 导出反向覆盖作者更新）。
+   */
+  private saveQuestionMeta(
+    question: Question,
+    fields: Array<
+      | "repeat"
+      | "tags"
+      | "category1"
+      | "category2"
+      | "category3"
+      | "favorite"
+      | "mastered"
+      | "wrong"
+    >
+  ): void {
+    for (const f of fields) {
+      this.stateManager.setMetaField(question.id, f, question[f]);
+    }
+  }
+
+  /**
+   * M6: 把内存中捕获的 meta 覆盖层逐字段写回 StateManager。
+   * getMeta() 返回内部引用无法整体替换，故逐条 setMetaField 重建；
+   * 磁盘上有而内存中不存在的条目保留（外部新增），内存有而磁盘无的条目会被写回。
+   */
+  private restoreMetaFrom(source: Record<string, SidecarMeta>): void {
+    for (const [id, entry] of Object.entries(source)) {
+      if (!entry) continue;
+      for (const [field, value] of Object.entries(entry) as Array<
+        [keyof SidecarMeta, string]
+      >) {
+        if (value !== undefined) {
+          this.stateManager.setMetaField(id, field, value);
+        }
+      }
     }
   }
 
@@ -533,22 +691,6 @@ export class QuizView extends ItemView {
     }
   }
 
-  /** On CSV load failure: keep filters from saved state so the UI is not blank. */
-  private restoreFiltersOnly(savedState: QuizSessionState | null): void {
-    if (!savedState) return;
-    this.filterText = savedState.filterText || "";
-    this.filterTags = savedState.filterTags || "";
-    this.filterCat1 = savedState.filterCat1 || "";
-    this.filterCat2 = savedState.filterCat2 || "";
-    this.filterCat3 = savedState.filterCat3 || "";
-    this.filterFavorite = savedState.filterFavorite || "";
-    this.filterMastered = savedState.filterMastered || "";
-    this.filterRepeat = savedState.filterRepeat || "";
-    this.filterWrong = savedState.filterWrong || "";
-    this.filterUnanswered = savedState.filterUnanswered || "";
-    this.updateFilterUI();
-  }
-
   /** Periodic auto-save every 5s to protect against sudden app close. */
   private startAutoSave(): void {
     // V2: 视图已关闭时不再启动心跳（onClose 只执行一次，关闭后重启的心跳将无法被清除）
@@ -571,6 +713,11 @@ export class QuizView extends ItemView {
         this.stateManager.scheduleSave(state, 0);
       }
     }, 5000);
+    // 4B: 面板活跃期间每 30 分钟备份当前 sidecar 到 .bak
+    // （BackupTimer.start 内部先 stop 再 start，refresh 重复调用安全）
+    this.backupTimer.start(() => {
+      void this.stateManager.backupCurrentSidecar();
+    }, 30 * 60 * 1000);
   }
 
   /** Ask the user whether to keep the in-memory progress or the externally-modified one. */
@@ -580,7 +727,7 @@ export class QuizView extends ItemView {
     const modal = new ChoiceModal(this.app, {
       title: "检测到刷题进度被外部修改",
       message:
-        "刷题进度数据（data.json）已被外部编辑或同步，与当前进度不一致。请选择要使用的进度。",
+        "刷题进度数据（题库状态文件）已被外部编辑或同步，与当前进度不一致。请选择要使用的进度。",
       options: [
         {
           label: "使用当前进度",
@@ -602,59 +749,37 @@ export class QuizView extends ItemView {
     return null;
   }
 
-  /** Ask the user whether to reset progress after a csvPath change. */
-  private async askResetChoice(): Promise<"reset" | "keep" | null> {
-    const modal = new ChoiceModal(this.app, {
-      title: "题库路径已变更",
-      message:
-        "已保存的刷题进度属于另一个题库（路径不同）。保留旧进度会导致程序运行异常。是否重置刷题进度？",
-      options: [
-        {
-          label: "重置进度",
-          value: "reset",
-          description: "清除旧进度，重新开始刷题",
-          cta: true,
-        },
-        {
-          label: "保留进度",
-          value: "keep",
-          description: "尝试保留旧进度（可能导致运行异常）",
-        },
-      ],
-    });
-    modal.open();
-    const res = await modal.promise;
-    if (res === "reset") return "reset";
-    if (res === "keep") return "keep";
-    return null;
+  /**
+   * 当前题库是否已载入「有实际进度」的状态（用于切换确认判断）。
+   * 无状态/新题库首次使用（空计数、无答题记录、无 meta 覆盖）直接切换不弹确认。
+   */
+  hasLoadedState(): boolean {
+    if (!this.canPersistState) return false;
+    const st = this.stateManager.getState();
+    if (!st) return false;
+    return (
+      Object.keys(st.answeredQuestions).length > 0 ||
+      (st.correctCount ?? 0) > 0 ||
+      (st.wrongCount ?? 0) > 0 ||
+      // L2: 纯记忆练习进度（有卡片但无答题记录/计数）也视为「有状态」，切换弹确认
+      Object.keys(st.memoryCards || {}).length > 0 ||
+      Object.keys(this.stateManager.getMeta()).length > 0
+    );
   }
 
-  /** Re-ask after the user insisted on keeping incompatible progress. */
-  private async askResetOrAbort(): Promise<"reset" | "abort" | null> {
+  /** 轻量确认弹窗：信息性确认防误切（确认后才切换题库）。 */
+  async confirmQuizSwitch(newPath: string): Promise<boolean> {
     const modal = new ChoiceModal(this.app, {
-      title: "无法保留旧进度",
-      message:
-        "旧进度对应的是另一个题库，保留会导致程序运行异常。请重置进度，或取消打开题库。",
+      title: "切换题库",
+      message: `当前题库的进度已保存，确定切换到「${newPath}」吗？`,
       options: [
-        {
-          label: "重置进度",
-          value: "reset",
-          description: "清除旧进度，重新开始刷题",
-          cta: true,
-        },
-        {
-          label: "取消打开",
-          value: "abort",
-          description: "不加载题库，保持当前状态",
-          danger: true,
-        },
+        { label: "确认切换", value: "confirm", cta: true },
+        { label: "取消", value: "cancel" },
       ],
     });
     modal.open();
     const res = await modal.promise;
-    if (res === "reset") return "reset";
-    if (res === "abort") return "abort";
-    return null;
+    return res === "confirm";
   }
 
   private buildFilterPanel(settings: PluginSettings): void {
@@ -1032,6 +1157,8 @@ export class QuizView extends ItemView {
         // 确认后退出它，由记忆练习接管（与"进入任一练习模式前互斥退出另一个"语义一致）
         if (this.practiceActive) this.exitRandomPractice();
         // 清空进度（与 resetProgress 的清空逻辑等价；不弹提示、不退出面板）
+        // L5: 此重置仅清内存进度字段；sidecar 中历史 wrong 覆盖保留（这些题确实答错过，
+        // 错题筛选仍应命中），如需全清请用设置页「全部重置」
         this.correctCount = 0;
         this.wrongCount = 0;
         this.answeredQuestions = {};
@@ -1684,7 +1811,7 @@ export class QuizView extends ItemView {
     this.saveState();
   }
 
-  /** 记录答题结果：计数、答题记录、错题标记（答对清除、答错置位），写 CSV 失败时回滚标记。不负责渲染。 */
+  /** 记录答题结果：计数、答题记录、错题标记（答对清除、答错置位）写入 sidecar meta。不负责渲染。 */
   private async recordAnswer(
     question: Question,
     selectedStr: string,
@@ -1704,10 +1831,8 @@ export class QuizView extends ItemView {
         this.correctCount++;
       }
       if (question.wrong === "1") {
-        const prevWrong = question.wrong;
         question.wrong = "";
-        const ok = await this.saveQuestionToCSV(question);
-        if (!ok) question.wrong = prevWrong;
+        this.saveQuestionMeta(question, ["wrong"]);
       }
     } else {
       if (this.practiceActive || this.memoryActive) {
@@ -1716,10 +1841,8 @@ export class QuizView extends ItemView {
         this.wrongCount++;
       }
       if (question.wrong !== "1") {
-        const prevWrong = question.wrong;
         question.wrong = "1";
-        const ok = await this.saveQuestionToCSV(question);
-        if (!ok) question.wrong = prevWrong;
+        this.saveQuestionMeta(question, ["wrong"]);
       }
     }
   }
@@ -1801,16 +1924,10 @@ export class QuizView extends ItemView {
         lastReview: c.last_review ? c.last_review.toISOString() : "",
       };
       if (!correct) {
-        // 答错计入 wrong 标记并写回 CSV（通过现有异步队列；失败时回滚内存标记）
+        // 答错计入 wrong 标记并写入 sidecar meta（内存操作 + 调度保存，无失败路径）
         if (q && q.wrong !== "1") {
-          const old = q.wrong;
           q.wrong = "1";
-          void this.saveQuestionToCSV(q).then((ok) => {
-            if (!ok) {
-              q.wrong = old;
-              new Notice("记忆练习：错题标记保存失败");
-            }
-          });
+          this.saveQuestionMeta(q, ["wrong"]);
         }
       }
       this.saveState();
@@ -1912,6 +2029,10 @@ export class QuizView extends ItemView {
             state.memoryNewCountToday = 0;
             state.memoryPendingNew = [];
           }
+          // L6: 全部重置语义与就绪分支一致——复位「已初始化」标记，避免再次触发首次启用提示
+          if (choice === "all") {
+            state.memoryInitialized = false;
+          }
         }
         await this.stateManager.saveStateImmediately(state);
       }
@@ -1960,6 +2081,14 @@ export class QuizView extends ItemView {
     // 重置进度时退出练习模式（记忆/随机均为临时会话），避免残留练习集状态
     if (this.practiceActive) this.exitRandomPractice();
     if (this.memoryActive) this.exitMemoryPractice();
+    // M2: 全部重置对齐设置页语义（main.ts clearState + refreshQuiz）：清 sidecar 的
+    // state 与 meta（保留文件）并重读内容源，meta 覆盖失效、筛选回默认值。
+    // refresh 内部已含 clearState → loadSidecar → applyMetaToQuestions → applyFreshStart
+    // 完整重置流；确认弹窗仅存在于 resetProgress/enableMemoryPractice，此处不会重复弹出。
+    if (choice === "all") {
+      await this.refresh();
+      return;
+    }
     if (choice !== "cards") {
       this.correctCount = 0;
       this.wrongCount = 0;
@@ -1970,10 +2099,6 @@ export class QuizView extends ItemView {
       this.memoryNewDate = "";
       this.memoryNewCountToday = 0;
       this.memoryPendingNew = [];
-    }
-    // C-1: 仅删除记忆卡片保留"已初始化"标记（避免再次触发首次启用重置提示）；全部重置才复位
-    if (choice === "all") {
-      this.memoryInitialized = false;
     }
     // 重置后按当前设置重建题目顺序（随机开启则重排，关闭则恢复 CSV 默认顺序）
     this.rebuildOrderAndLocate(this.getSettings().randomOrder, null);
@@ -1987,13 +2112,7 @@ export class QuizView extends ItemView {
     // 清理卡片后立即刷新状态栏提醒
     (this.plugin as unknown as { refreshMemoryReminder?: () => void })
       .refreshMemoryReminder?.();
-    new Notice(
-      choice === "all"
-        ? "进度已重置"
-        : choice === "records"
-          ? "刷题记录已清理"
-          : "记忆卡片已删除"
-    );
+    new Notice(choice === "records" ? "刷题记录已清理" : "记忆卡片已删除");
   }
 
   /** 重置答题进度：让用户选择清理刷题记录/记忆卡片，保留筛选条件。 */
@@ -2025,21 +2144,16 @@ export class QuizView extends ItemView {
 
       cb.addEventListener("change", () => {
         const q = question as unknown as Record<string, string>;
-        const prevValue = q[f.key];
         const newValue = cb.checked ? "1" : "";
         q[f.key] = newValue;
-        void this.saveQuestionToCSV(question).then((ok) => {
-          if (!ok) {
-            // M2: 写失败回滚
-            q[f.key] = prevValue;
-            cb.checked = prevValue === "1";
-            return;
-          }
-          // M7: 标记变化可能影响筛选（如「错题=是」），重新筛选并定位当前题
-          this.reFilterAndLocate(question.id);
-          this.renderQuestion();
-          this.saveState();
-        });
+        // 只写用户改动的这一个字段（f.key 为 favorite/mastered/repeat/wrong 之一）
+        this.saveQuestionMeta(question, [
+          f.key as "favorite" | "mastered" | "repeat" | "wrong",
+        ]);
+        // M7: 标记变化可能影响筛选（如「错题=是」），重新筛选并定位当前题
+        this.reFilterAndLocate(question.id);
+        this.renderQuestion();
+        this.saveState();
       });
     }
   }
@@ -2059,14 +2173,8 @@ export class QuizView extends ItemView {
 
     if (result !== null) {
       // Save selected tags to the question (always the original question, even if user navigated away)
-      const oldTags = question.tags;
       question.tags = result;
-      const ok = await this.saveQuestionToCSV(question);
-      if (!ok) {
-        // M2: 写失败回滚
-        question.tags = oldTags;
-        return;
-      }
+      this.saveQuestionMeta(question, ["tags"]);
 
       // Remember which question is currently displayed before re-filtering
       const currentDisplayedId = this.filteredQuestions[this.currentIndex]?.id;
@@ -2522,9 +2630,11 @@ export class QuizView extends ItemView {
     if (!this.swipeActive) return;
     this.swipeActive = false;
     if (!this.swipeDecided) return;
-    // M1/L9: 判分进行中（answering）或导航 in-flight（navigating）时忽略本次滑动
-    // —— 静默复位（swipeActive 已在上方复位，保持状态机一致，不弹 Notice 避免打扰）
-    if (this.answering || this.navigating) return;
+    // M1/L9: 判分进行中（answering 且尚未展示答案——handleAnswer/evaluateMultiAnswer
+    // 的 await saveCurrentEdit 窗口）或导航 in-flight（navigating）时忽略本次滑动。
+    // 注意：已答题展示答案状态下 answering 恒为 true（renderQuestion 恢复已答时置位，
+    // 语义是"禁止再选选项"），必须用 !showingAnswer 排除，否则已答题无法滑动切题。
+    if ((this.answering && !this.showingAnswer) || this.navigating) return;
     const tc = e.changedTouches[0];
     const dx = tc.clientX - this.swipeX0;
     const dy = tc.clientY - this.swipeY0;
@@ -2641,14 +2751,21 @@ export class QuizView extends ItemView {
 
     if (changedFields.length === 0) return;
 
-    const ok = await this.saveQuestionToCSV(question);
-    if (!ok) {
-      // M2: 写 CSV 失败时回滚内存修改，保持与磁盘一致（输入框保留用户输入以便重试）
-      for (const c of changedFields) {
-        q[c.field] = c.oldValue;
-      }
-      return;
-    }
+    // 写入 sidecar meta（内存操作 + 调度保存，无失败路径）；只写实际变更的字段
+    // （编辑区字段均为 tags/category1-3，属于合法 meta 字段名）
+    this.saveQuestionMeta(
+      question,
+      changedFields.map((c) => c.field) as Array<
+        | "repeat"
+        | "tags"
+        | "category1"
+        | "category2"
+        | "category3"
+        | "favorite"
+        | "mastered"
+        | "wrong"
+      >
+    );
 
     // Re-apply filters since tags/categories may have changed
     this.reFilterAndLocate(previousId);
@@ -2657,30 +2774,196 @@ export class QuizView extends ItemView {
     new Notice("修改已保存");
   }
 
-  /** 写回 CSV；成功返回 true，失败返回 false（已提示用户）。 */
-  private async saveQuestionToCSV(question: Question): Promise<boolean> {
-    const newRow = generateCSVRow(question);
-    try {
-      await this.csvWriteQueue.enqueue(this.csvPath, (csvContent: string) => {
-        const updatedContent = findAndUpdateRow(csvContent, question.id, newRow);
-        if (updatedContent === null) {
-          throw new Error("CSV 中未找到对应题号");
-        }
-        return updatedContent;
-      });
-      return true;
-    } catch (e: unknown) {
-      console.error("CSV Quiz: Failed to save question to CSV", e);
-      if (e instanceof Error && e.message === "CSV 中未找到对应题号") {
-        new Notice("CSV 中未找到对应题号，修改未保存");
-      } else {
-        new Notice(`保存到 CSV 失败: ${e instanceof Error ? e.message : String(e)}`);
-      }
+  /**
+   * 导出合并：把 sidecar meta 中 B 类覆盖（repeat/tags/category1-3）下沉写回 CSV 列，
+   * 写成功后清除对应 sidecar 的 B 类覆盖（合并即同步）。C 类（favorite/mastered/wrong）
+   * 永不导出（无 CSV 落点，只存 sidecar）。仅 CSV 模式可用。返回成功与否。
+   */
+  async exportMetaToCsv(): Promise<boolean> {
+    // 1. 仅 CSV 模式
+    if (this.csvPath.toLowerCase().endsWith(".cqv")) {
+      new Notice("编译产物模式不支持导出合并");
       return false;
     }
+
+    // 2. 收集含 B 类覆盖（repeat/tags/category1-3 任一存在）且存在于当前题库的题
+    const meta = this.stateManager.getMeta();
+    const exported: Array<{ id: string; question: Question }> = [];
+    for (const [id, entry] of Object.entries(meta)) {
+      if (!entry) continue;
+      const hasB =
+        entry.repeat !== undefined ||
+        entry.tags !== undefined ||
+        entry.category1 !== undefined ||
+        entry.category2 !== undefined ||
+        entry.category3 !== undefined;
+      if (!hasB) continue;
+      const q = this.allQuestions.find((x) => x.id === id);
+      if (!q) continue; // 当前题库不存在的题跳过
+      exported.push({ id, question: q });
+    }
+    if (exported.length === 0) {
+      new Notice("没有需要导出的修改");
+      return true;
+    }
+
+    // 3. 单次入队：解析当前 CSV，仅下沉 B 类列（tags=7/cat1=8/cat2=9/cat3=10/repeat=13），
+    //    C 类列（favorite=11/mastered=12/wrong=14）保持原样，不写入。
+    try {
+      await this.csvWriteQueue.enqueue(this.csvPath, (csvContent: string) => {
+        const result = Papa.parse(csvContent, {
+          header: false,
+          skipEmptyLines: true,
+        });
+        if (result.errors.length > 0) {
+          console.warn(
+            "CSV 解析警告: 检测到解析错误",
+            result.errors.slice(0, 3)
+          );
+        }
+        const rows = result.data as string[][];
+        if (rows.length < 2) throw new Error("CSV 中未找到对应题号");
+        const header = rows[0];
+        if (header.length > 0) {
+          header[0] = header[0].replace(/^\uFEFF/, "");
+        }
+        const dataRows = rows.slice(1);
+        const rowById = new Map<string, number>();
+        for (let i = 0; i < dataRows.length; i++) {
+          const id = String(dataRows[i][0] || "").trim();
+          if (id === "") continue;
+          if (rowById.has(id)) {
+            throw new Error("CSV 中题号重复，已拒绝写入，请检查题库");
+          }
+          rowById.set(id, i);
+        }
+        for (const { id, question } of exported) {
+          const idx = rowById.get(id);
+          if (idx === undefined) {
+            throw new Error(`CSV 中未找到对应题号: ${id}`);
+          }
+          const row = dataRows[idx];
+          if (row.length < 14) row.length = 14; // 补齐缺失列，避免写入越界
+          row[7] = question.tags;
+          row[8] = question.category1;
+          row[9] = question.category2;
+          row[10] = question.category3;
+          row[13] = question.repeat;
+        }
+        return Papa.unparse([header, ...dataRows], { delimiter: "," });
+      });
+    } catch (e: unknown) {
+      console.error("CSV Quiz: Failed to export meta to CSV", e);
+      new Notice(`导出失败: ${e instanceof Error ? e.message : String(e)}`);
+      return false;
+    }
+
+    // 4. 成功后清除 B 类覆盖（保留 C 类）；条目为空则删除整条。直接改 meta 内部引用。
+    let cleared = 0;
+    for (const { id } of exported) {
+      const entry = meta[id];
+      if (!entry) continue;
+      delete entry.repeat;
+      delete entry.tags;
+      delete entry.category1;
+      delete entry.category2;
+      delete entry.category3;
+      if (Object.keys(entry).length === 0) {
+        delete meta[id];
+      }
+      cleared++;
+    }
+    // 落盘（绕过视图守卫，确保 meta 清理持久化）
+    this.stateManager.scheduleSave(this.buildCurrentState(), 0);
+
+    new Notice(`已导出 ${cleared} 题的修改到 CSV`);
+    return true;
+  }
+
+  /**
+   * 编译当前 CSV 题库为 .cqv 分发产物（编辑者工具）。校验失败拒编。
+   * 需先输入备注（随产物头部分发，可为空）。返回成功与否。
+   */
+  async compileToCqv(): Promise<boolean> {
+    // 1. 仅 CSV 模式
+    if (this.csvPath.toLowerCase().endsWith(".cqv")) {
+      new Notice("仅 CSV 题库可编译为产物");
+      return false;
+    }
+
+    // 2. 读当前 CSV（直接读文件，不做 meta 合并——产物含 A + B 类默认值）
+    let questions: Question[];
+    try {
+      const csvContent = await readCSVFile(this.vault, this.csvPath);
+      questions = parseCSV(csvContent);
+    } catch (e: unknown) {
+      console.error("CSV Quiz: Failed to read CSV for compile", e);
+      new Notice(`读取题库失败: ${e instanceof Error ? e.message : String(e)}`);
+      return false;
+    }
+
+    // 3. 校验 id 质量：空/重复题号拒编
+    const { emptyIds, duplicateIds } = checkIdQuality(questions);
+    if (emptyIds.length > 0 || duplicateIds.length > 0) {
+      const parts: string[] = [];
+      if (emptyIds.length > 0) parts.push(`空题号 ${emptyIds.length} 个`);
+      if (duplicateIds.length > 0) {
+        parts.push(
+          `重复题号: ${duplicateIds.slice(0, 5).join(", ")}${duplicateIds.length > 5 ? "…" : ""}`
+        );
+      }
+      new Notice(`编译已拒绝：题库存在${parts.join("、")}，请修改 CSV 后重试`);
+      return false;
+    }
+    if (questions.length === 0) {
+      new Notice("题库为空，无法编译");
+      return false;
+    }
+
+    // 4. 请求备注（可为空；取消则中止）
+    const note = await askPrompt(this.app, {
+      title: "优化题库",
+      message: "为编译产物添加一句备注（随产物分发，可为空）：",
+      placeholder: "例如：v2 修订部分答案",
+    });
+    if (note === null) return false;
+
+    // 5. 产物路径：扩展名 .csv（大小写不敏感，如 .CSV/.Csv）替换为 .cqv；
+    //    无扩展名路径直接拼接（"题库" → "题库.cqv"）
+    const lower = this.csvPath.toLowerCase();
+    const cqvPath = lower.endsWith(".csv")
+      ? this.csvPath.slice(0, this.csvPath.length - 4) + ".cqv"
+      : this.csvPath + ".cqv";
+
+    // 6. 编码 + 7. 写入（原子写：先写 tmp，rename 覆盖；Obsidian rename 不覆盖目标，需先删旧文件）
+    try {
+      const buffer = encodeCqv(questions, {
+        sourceCsv: this.csvPath,
+        note,
+      });
+      const tmpPath = cqvPath + ".tmp";
+      await this.vault.adapter.writeBinary(tmpPath, buffer);
+      // L10: remove 后 rename 失败的极端窗口内旧产物丢失（产物无 .bak 兜底，
+      // 与 sidecar 写路径同款风险，接受）
+      if (await this.vault.adapter.exists(cqvPath)) {
+        await this.vault.adapter.remove(cqvPath);
+      }
+      await this.vault.adapter.rename(tmpPath, cqvPath);
+    } catch (e: unknown) {
+      console.error("CSV Quiz: Failed to compile .cqv", e);
+      new Notice(`编译失败: ${e instanceof Error ? e.message : String(e)}`);
+      return false;
+    }
+
+    new Notice(
+      `已生成 ${cqvPath}（${questions.length} 题），可在设置中选择该文件切换为题库来源`
+    );
+    return true;
   }
 
   async refresh(): Promise<void> {
+    // M2: 记录本次加载世代号（新流程开始会自增，使本流程过期）
+    const epoch = ++this.loadEpoch;
     this.canPersistState = false;
     await this.saveCurrentEdit();
     // F1: 保存编辑期间视图被关闭 → 中止。onClose 已保存进度；恢复
@@ -2689,6 +2972,8 @@ export class QuizView extends ItemView {
       this.canPersistState = true;
       return;
     }
+    // M2: 期间已开始新加载流程 → 本流程过期
+    if (epoch !== this.loadEpoch) return;
     this.cancelAutoNext();
     if (this.autoSaveTimer !== null) {
       window.clearInterval(this.autoSaveTimer);
@@ -2698,19 +2983,51 @@ export class QuizView extends ItemView {
     const settings = this.getSettings();
     this.csvPath = settings.csvPath;
 
+    // S1: 判定本次刷新语义——切换题库（内容源变了，含 changeQuizPath 已 unloadSidecar
+    // 使 contentPath 为 null 的情况）或同一题库的重置刷新。
+    // 注意：不能用 task 提示的 `!== null && !== csvPath` 公式——changeQuizPath 先调用
+    // unloadSidecar 把 contentPath 置 null，按旧公式会漏判主切换流导致目标题库进度被清空。
+    const wasSwitching =
+      this.stateManager.getContentPath() !== this.csvPath;
+    // T4: 切换题库时 contentMtimeMs 是旧题库的 mtime，先清空避免跨文件误报
+    // 「题库文件已更新」；切换后首次加载只记录新题库 mtime（不对比）。
+    if (wasSwitching) {
+      this.contentMtimeMs = null;
+    }
+
     try {
-      const csvContent = await readCSVFile(this.vault, this.csvPath);
+      const questions = await this.readQuestionsFromSource();
       // F1: 读文件期间视图被关闭 → 中止，阻止后续 clearState 覆盖 onClose 已保存的进度
       if (this.isClosed) {
         this.canPersistState = true;
         return;
       }
-      this.allQuestions = parseCSV(csvContent);
-      this.checkDuplicateIds();
+      // M2: 读文件期间已切换 → 本流程过期
+      if (epoch !== this.loadEpoch) return;
+      if (!questions) {
+        // 读取失败：readQuestionsFromSource 已提示；保持只读 + 重启心跳
+        this.startAutoSave();
+        return;
+      }
+      this.allQuestions = questions;
+      // id 质量门槛：空/重复题号拒绝刷新（不清除已有 sidecar 状态）
+      const { emptyIds, duplicateIds } = checkIdQuality(this.allQuestions);
+      if (emptyIds.length > 0 || duplicateIds.length > 0) {
+        const parts: string[] = [];
+        if (emptyIds.length > 0) parts.push(`空题号 ${emptyIds.length} 个`);
+        if (duplicateIds.length > 0) {
+          parts.push(
+            `重复题号: ${duplicateIds.slice(0, 5).join(", ")}${duplicateIds.length > 5 ? "…" : ""}`
+          );
+        }
+        this.showError(`题库存在${parts.join("、")}，请修改 CSV 后重试`);
+        this.startAutoSave();
+        return;
+      }
       if (this.allQuestions.length === 0) {
         // V1: 题库为空时不清除已保存的进度（与 loadQuestions 的空题库路径保持一致），
         // 避免用户误触「重置」或更换到空文件时静默清空旧进度。
-        this.showError("CSV 文件中没有找到题目数据");
+        this.showError("题库文件中没有找到题目数据");
         // F6: 空题库 early-return 路径也重启心跳（canPersistState 仍为 false，保持只读，
         // 避免把半重置状态写回磁盘；startAutoSave 内部有 isClosed/canPersistState 守卫）
         this.startAutoSave();
@@ -2718,62 +3035,85 @@ export class QuizView extends ItemView {
       }
       this.canPersistState = true;
 
-      // Clear state completely
-      await this.stateManager.clearState();
-      // F1: clearState 期间视图被关闭 → 中止（onClose 已保存进度）
+      // 3B: 内容源 mtime 变更检测（refresh 同样记录/对比，变化则提示）
+      const stat = await this.vault.adapter.stat(this.csvPath);
+      const newMtime = stat?.mtime ?? null;
+      if (
+        this.contentMtimeMs !== null &&
+        newMtime !== null &&
+        newMtime !== this.contentMtimeMs
+      ) {
+        new Notice("题库文件已更新，状态已按题目对齐");
+      }
+      this.contentMtimeMs = newMtime;
+      // M2: stat 期间已切换 → 本流程过期
+      if (epoch !== this.loadEpoch) return;
+
+      // 载入目标题库的 sidecar 状态（切换语义：恢复其已有进度；重置语义：重新载入空状态）。
+      // 切换时旧题库状态已在 changeQuizPath 的 unloadSidecar 落盘，无需 clearState。
+      if (!wasSwitching && this.stateManager.getContentPath() === this.csvPath) {
+        // 同一题库的重置刷新（全部重置语义）：写空 sidecar 保留文件 + 清 meta/state
+        await this.stateManager.clearState();
+        // F1: clearState 期间视图被关闭 → 中止（onClose 已保存进度）
+        if (this.isClosed) {
+          this.canPersistState = true;
+          return;
+        }
+        // M2: clearState 期间已切换 → 本流程过期
+        if (epoch !== this.loadEpoch) return;
+      }
+
+      const loadResult = await this.stateManager.loadSidecar(this.csvPath, {
+        favorite: settings.defaultFilterFavorite,
+        mastered: settings.defaultFilterMastered,
+        repeat: settings.defaultFilterRepeat,
+        wrong: settings.defaultFilterWrong,
+      });
+      // F1: loadSidecar 期间视图被关闭 → 中止
       if (this.isClosed) {
         this.canPersistState = true;
         return;
       }
+      // M2: loadSidecar 期间已切换 → 本流程过期
+      if (epoch !== this.loadEpoch) return;
+      // S3: corrupt 不静默重建（对齐 initializeFromState）：提示、保持只读、不落盘
+      if (loadResult.status === "corrupt") {
+        this.showError("状态文件与备份均损坏，请重置刷题进度或删除状态文件后重试");
+        this.canPersistState = false;
+        this.startAutoSave();
+        return;
+      }
 
-      // Fresh start
-      this.displayOrder = buildDisplayOrder(
-        this.allQuestions,
-        settings.randomOrder
-      );
-      this.orderedQuestions = sortByDisplayOrder(
-        this.allQuestions,
-        this.displayOrder
-      );
-
-      this.filterText = "";
-      this.filterTags = "";
-      this.filterCat1 = "";
-      this.filterCat2 = "";
-      this.filterCat3 = "";
-      this.filterFavorite = settings.defaultFilterFavorite;
-      this.filterMastered = settings.defaultFilterMastered;
-      this.filterRepeat = settings.defaultFilterRepeat;
-      this.filterWrong = settings.defaultFilterWrong;
-      this.filterUnanswered = "";
-
-      this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
+      // 对齐清理 sidecar meta 中已不存在的僵尸条目（替换产物后 id 变化时）
+      this.pruneMetaEntries();
+      // 合并 meta 覆盖层到题目（meta 优先，永久遮蔽语义）
+      this.applyMetaToQuestions();
 
       // H1: 刷新会重建题库与进度，必须复位练习模式标志，避免常规模式答题误写记忆卡片
       // （exit* 内部有 active 检查，未激活时无副作用；此处 orderedQuestions 已重建，applyFiltersTo 结果会被下方重置覆盖）
       this.exitRandomPractice();
       this.exitMemoryPractice();
 
-      this.currentIndex = 0;
-      this.correctCount = 0;
-      this.wrongCount = 0;
-      this.answeredQuestions = {};
-      this.memoryCards = {};
-      this.memoryNewDate = "";
-      this.memoryNewCountToday = 0;
-      this.memoryPendingNew = [];
-      this.memoryInitialized = false;
-      this.currentShuffledQId = null;
-      this.selectedOption = null;
-      this.selectedOptions = [];
+      if (wasSwitching) {
+        // S1: 切换题库 → 恢复新题库已存进度（含已存筛选；无 sidecar 时为空状态+默认筛选）
+        this.applyRestore(settings, loadResult.state);
+      } else {
+        // 同一题库重置刷新：Fresh start（重置进度，筛选回到默认值）
+        this.applyFreshStart(settings, loadResult.state);
+      }
 
       // Update filter UI
       this.updateFilterUI();
 
       this.renderQuestion();
+      // M2: saveState 前最后检查，防止过期流程把空状态写入已切换的题库
+      if (epoch !== this.loadEpoch) return;
       this.saveState();
       this.startAutoSave();
-      new Notice("已刷新，重新开始");
+      // 3D: 状态栏立即刷新为新题库的待复习数
+      (this.plugin as unknown as { refreshMemoryReminder?: () => void })
+        .refreshMemoryReminder?.();
+      new Notice(wasSwitching ? "已切换题库" : "已刷新，重新开始");
     } catch (e: unknown) {
       console.error("CSV Quiz: Refresh failed", e);
       this.showError(`刷新失败: ${e instanceof Error ? e.message : String(e)}`);

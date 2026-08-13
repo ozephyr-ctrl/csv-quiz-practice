@@ -18,7 +18,7 @@ export interface Question {
 
 /**
  * 单题的间隔重复记忆卡片（FSRS 状态快照，对应 ts-fsrs Card 的子集）。
- * 持久化到 data.json 的 quizState.memoryCards。
+ * 持久化到题库 sidecar 文件的 state.memoryCards。
  */
 export interface MemoryCard {
   state: number; // 0=新题 1=学习中 2=复习 3=再学习

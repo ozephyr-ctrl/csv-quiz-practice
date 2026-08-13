@@ -111,6 +111,8 @@ The CSV file must be **BOM-prefixed UTF-8** with 15 columns:
   Switching CSV path starts a fresh session
 - **分项重置进度**：重置时可选「仅清理刷题记录 / 仅删除记忆卡片 / 全部重置」，筛选条件保留
   **Selective reset**: choose to clear answer records only, memory cards only, or both (filters preserved)
+- **重置进度请使用设置页「重置刷题进度」按钮**；手动删除题库同目录的状态文件（`*.sidecar.json`）会被备份自动恢复
+  **Reset progress via the settings page "Reset Progress" button**; manually deleting the state file (`*.sidecar.json`) next to your question bank is auto-restored from backup
 
 ### 设置项 / Settings
 

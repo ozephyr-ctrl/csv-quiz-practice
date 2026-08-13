@@ -3,6 +3,9 @@ import { Question } from "./types";
 
 import { App, Editor, MarkdownView, Notice, Vault } from "obsidian";
 
+// 不变式：本函数为纯解析，不弹窗、不生成 id、不校验 id 质量。
+// 调用方（quizView 等）必须自行用 checkIdQuality 校验：若 row[0] 为空，
+// id 为空串是合法解析结果，由校验方拒绝加载。
 export function parseCSV(content: string): Question[] {
   const result = Papa.parse(content, { header: false, skipEmptyLines: true });
   const rows = result.data as string[][];
@@ -23,28 +26,6 @@ export function parseCSV(content: string): Question[] {
   // Skip header row
   const dataRows = rows.slice(1);
 
-  // 修复2: 为空题号自动生成唯一 id（__auto_<n>），避免空 id 导致答题记录互相覆盖。
-  // n 从 1 开始递增，若生成值与现有非空 id 冲突则继续递增。
-  const usedIds = new Set<string>();
-  for (const row of dataRows) {
-    const id = String(row[0] || "").trim();
-    if (id) usedIds.add(id);
-  }
-  let autoSeq = 1;
-  for (const row of dataRows) {
-    const id = String(row[0] || "").trim();
-    if (!id) {
-      let candidate = `__auto_${autoSeq}`;
-      autoSeq++;
-      while (usedIds.has(candidate)) {
-        candidate = `__auto_${autoSeq}`;
-        autoSeq++;
-      }
-      usedIds.add(candidate);
-      row[0] = candidate;
-    }
-  }
-
   return dataRows.map((row: string[]) => ({
     id: String(row[0] || "").trim(),
     stem: row[1] || "",
@@ -64,75 +45,16 @@ export function parseCSV(content: string): Question[] {
   }));
 }
 
-export function generateCSVRow(question: Question): string[] {
-  return [
-    question.id,
-    question.stem,
-    question.optionA,
-    question.optionB,
-    question.optionC,
-    question.optionD,
-    question.answer,
-    question.tags,
-    question.category1,
-    question.category2,
-    question.category3,
-    question.favorite,
-    question.mastered,
-    question.repeat,
-    question.wrong,
-  ];
-}
-
-export function findAndUpdateRow(
-  csvContent: string,
-  questionId: string,
-  newData: string[]
-): string | null {
-  const result = Papa.parse(csvContent, { header: false, skipEmptyLines: true });
-  const rows = result.data as string[][];
-
-  // 修复1: 解析错误可见化，避免错位数据被写回文件
-  if (result.errors.length > 0) {
-    console.warn("CSV 解析警告: 检测到解析错误", result.errors.slice(0, 3));
+/** 校验题目 id 质量：返回空 id 与重复 id 列表。两者皆空表示通过。 */
+export function checkIdQuality(questions: Question[]): { emptyIds: string[]; duplicateIds: string[] } {
+  const emptyIds: string[] = [];
+  const seen = new Map<string, number>();  // id → 出现次数
+  for (const q of questions) {
+    if (q.id.trim() === "") { emptyIds.push(q.id); continue; }
+    seen.set(q.id, (seen.get(q.id) ?? 0) + 1);
   }
-
-  if (rows.length < 2) return null;
-
-  const header = rows[0];
-  const dataRows = rows.slice(1);
-
-  // Remove BOM from header if present
-  if (header.length > 0) {
-    header[0] = header[0].replace(/^\uFEFF/, "");
-  }
-
-  // 修复2: 空题号拒绝写入；匹配到多行（题号重复）也拒绝写入，避免改错行
-  if (questionId.trim() === "") {
-    throw new Error("CSV 中题号重复或为空，已拒绝写入，请检查题库");
-  }
-
-  const matchedIndices: number[] = [];
-  dataRows.forEach((row: string[], i: number) => {
-    if (String(row[0] || "").trim() === questionId) matchedIndices.push(i);
-  });
-
-  // 0 行匹配保持原有语义：返回 null，由调用方提示"未找到对应题号"
-  if (matchedIndices.length === 0) return null;
-  if (matchedIndices.length > 1) {
-    throw new Error("CSV 中题号重复或为空，已拒绝写入，请检查题库");
-  }
-
-  const idx = matchedIndices[0];
-
-  // H3: 保留超过 15 列的多余列，避免编辑保存后数据丢失
-  const targetRow = dataRows[idx];
-  dataRows[idx] =
-    newData.length >= targetRow.length
-      ? newData
-      : [...newData, ...targetRow.slice(newData.length)];
-
-  return Papa.unparse([header, ...dataRows], { delimiter: "," });
+  const duplicateIds = [...seen.entries()].filter(([, n]) => n > 1).map(([id]) => id);
+  return { emptyIds, duplicateIds };
 }
 
 export function getUniqueTags(questions: Question[]): string[] {
