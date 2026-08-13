@@ -205,14 +205,16 @@ export default class CSVQuizPlugin extends Plugin {
 
     // L3: 以 DEFAULT_SETTINGS 为基座合并（单一默认值来源）；过滤 null/undefined
     // 值，使布尔/字符串字段保持原有「?? 默认值」语义（与手写默认值行为等价）。
-    const clean: Record<string, unknown> = {};
+    const clean: Partial<PluginSettings> = {};
     for (const [k, v] of Object.entries(raw)) {
-      if (v !== null && v !== undefined) clean[k] = v;
+      if (v !== null && v !== undefined) {
+        Object.assign(clean, { [k]: v });
+      }
     }
 
     this.settings = {
       ...DEFAULT_SETTINGS,
-      ...(clean as Partial<PluginSettings>),
+      ...clean,
       csvPath: (raw.csvPath as string | undefined) || DEFAULT_SETTINGS.csvPath,
       autoNextDelay: toNumber(
         raw.autoNextDelay,

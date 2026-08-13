@@ -66,7 +66,7 @@ export class ProgressModal extends Modal {
       if (q.id === currentId) row.addClass("csv-quiz-progress-row-current");
       row.createEl("span", { text: q.id, cls: "csv-quiz-progress-id" });
       // 题干(去 Markdown 符号截断 30 字)
-      const stem = q.stem.replace(/[#*`_~\[\]()>!-]/g, "").trim();
+      const stem = q.stem.replace(/[#*`_~[\]()>!-]/g, "").trim();
       row.createEl("span", {
         text: stem.length > 30 ? stem.slice(0, 30) + "…" : stem,
         cls: "csv-quiz-progress-stem",

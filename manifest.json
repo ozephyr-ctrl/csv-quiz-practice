@@ -3,7 +3,7 @@
   "name": "csv quiz practice",
   "version": "3.1.1",
   "minAppVersion": "1.12.7",
-  "description": "Obsidian plugin for CSV-based quiz practice with sidecar state management",
+  "description": "CSV-based quiz practice with sidecar state management.",
   "author": "Kong",
   "authorUrl": "",
   "fundingUrl": "",

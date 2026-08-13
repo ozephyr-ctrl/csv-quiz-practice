@@ -1885,7 +1885,7 @@ var ProgressModal = class extends import_obsidian5.Modal {
       const row = frag.createEl("div", { cls: "csv-quiz-progress-row" });
       if (q.id === currentId) row.addClass("csv-quiz-progress-row-current");
       row.createEl("span", { text: q.id, cls: "csv-quiz-progress-id" });
-      const stem = q.stem.replace(/[#*`_~\[\]()>!-]/g, "").trim();
+      const stem = q.stem.replace(/[#*`_~[\]()>!-]/g, "").trim();
       row.createEl("span", {
         text: stem.length > 30 ? stem.slice(0, 30) + "\u2026" : stem,
         cls: "csv-quiz-progress-stem"
@@ -6831,7 +6831,9 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
     };
     const clean = {};
     for (const [k, v] of Object.entries(raw)) {
-      if (v !== null && v !== void 0) clean[k] = v;
+      if (v !== null && v !== void 0) {
+        Object.assign(clean, { [k]: v });
+      }
     }
     this.settings = {
       ...DEFAULT_SETTINGS,

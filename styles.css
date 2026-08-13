@@ -904,17 +904,15 @@
 }
 .csv-quiz-progress-clickable {
   cursor: pointer;
-  /* 使用分解属性（text-decoration-line/style）替代简写，兼容 Obsidian 1.11.x 的部分支持 */
-  text-decoration-line: underline;
-  text-decoration-style: dotted;
-  text-underline-offset: 3px;
+  /* 用 border-bottom 模拟虚线下划线，避免 text-decoration 系列属性在旧版的部分支持问题 */
+  border-bottom: 1px dotted var(--text-muted);
   border-radius: 4px;
   padding: 0 4px;
 }
 .csv-quiz-progress-clickable:hover {
   background: var(--background-modifier-hover);
-  text-decoration-line: underline;
-  text-decoration-style: solid;
+  border-bottom-style: solid;
+  border-bottom-color: var(--text-accent);
   color: var(--text-accent);
 }
 
