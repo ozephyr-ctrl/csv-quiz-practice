@@ -827,7 +827,6 @@ function normalizeSidecar(raw) {
   };
   const toOptStrArray = (v) => Array.isArray(v) ? v.filter((x) => typeof x === "string") : void 0;
   const toOptBool = (v) => typeof v === "boolean" ? v : void 0;
-  const memoryCards = r.memoryCards === void 0 ? void 0 : r.memoryCards && typeof r.memoryCards === "object" ? r.memoryCards : {};
   const meta = {};
   if (r.meta && typeof r.meta === "object") {
     for (const [id, value] of Object.entries(r.meta)) {
@@ -837,6 +836,7 @@ function normalizeSidecar(raw) {
     }
   }
   const s = r.state && typeof r.state === "object" ? r.state : {};
+  const memoryCards = s.memoryCards === void 0 ? void 0 : s.memoryCards && typeof s.memoryCards === "object" ? s.memoryCards : {};
   return {
     version: 1,
     meta,

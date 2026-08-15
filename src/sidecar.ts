@@ -225,13 +225,6 @@ function normalizeSidecar(raw: unknown): SidecarData | null {
   const toOptBool = (v: unknown): boolean | undefined =>
     typeof v === "boolean" ? v : undefined;
 
-  const memoryCards =
-    r.memoryCards === undefined
-      ? undefined
-      : r.memoryCards && typeof r.memoryCards === "object"
-        ? (r.memoryCards as Record<string, MemoryCard>)
-        : {};
-
   // meta 层归一化：逐条校验可选字符串字段，非对象条目丢弃
   const meta: Record<string, SidecarMeta> = {};
   if (r.meta && typeof r.meta === "object") {
@@ -246,6 +239,15 @@ function normalizeSidecar(raw: unknown): SidecarData | null {
     r.state && typeof r.state === "object"
       ? (r.state as Record<string, unknown>)
       : {};
+
+  // 记忆卡片在 state 层（写入端 stateToSidecar 输出 state.memoryCards），
+  // 从顶层 r.memoryCards 读取会恒为 undefined 导致卡片读回丢失
+  const memoryCards =
+    s.memoryCards === undefined
+      ? undefined
+      : s.memoryCards && typeof s.memoryCards === "object"
+        ? (s.memoryCards as Record<string, MemoryCard>)
+        : {};
 
   return {
     version: 1,
