@@ -181,7 +181,7 @@ export class QuizView extends ItemView {
       try {
         await this.stateManager.saveStateImmediately(state);
         // F4: 保存后同步脏检查基准，保证 lastSavedState 反映已落盘状态
-        this.lastSavedState = state;
+        this.lastSavedState = this.snapshotState(state);
       } catch (e: unknown) {
         // T1: 保存失败不阻断 onClose 后续清理（csvWriteQueue.drain 仍须执行）
         console.error("CSV Quiz: Failed to save state on close", e);
@@ -382,11 +382,30 @@ export class QuizView extends ItemView {
         JSON.stringify(inMemoryMeta) !==
         JSON.stringify(this.stateManager.getMeta());
       if (loaded && (!quizStateEquals(inMemoryState, loaded) || metaDiffers)) {
-        const choice = await this.askExternalModificationChoice(false);
-        if (this.isClosed) return;
-        // M2: 弹窗期间已开始新加载流程 → 中止
-        if (epoch !== this.loadEpoch) return;
-        if (choice === "current") {
+        // 关闭面板随即重开：onClose 的异步写盘可能尚未落盘（磁盘滞后于内存），
+        // 此时内存与磁盘不一致属正常竞态而非外部修改。距上次本插件写盘 < 1.5s
+        // 时直接信任内存状态并写盘同步，避免误报。
+        const justSaved = Date.now() - this.stateManager.lastPersistAt < 1500;
+        let useInMemory = justSaved;
+        if (!justSaved) {
+          const choice = await this.askExternalModificationChoice(false);
+          if (this.isClosed) return;
+          // M2: 弹窗期间已开始新加载流程 → 中止
+          if (epoch !== this.loadEpoch) return;
+          if (choice === "current") {
+            useInMemory = true;
+          } else if (choice === "external") {
+            // 已加载 sidecar 状态，保持
+          } else {
+            // 用户取消：禁止后续写盘，避免空状态覆盖外部进度。
+            // （弹窗前虽已 setState(null)，但 loadSidecar 已重新设置 currentState，
+            //  若不清 canPersistState，onClose 会用实例默认值（空状态）覆盖外部 sidecar）
+            this.canPersistState = false;
+            this.showError("已取消加载题库。请重新打开刷题面板。");
+            return;
+          }
+        }
+        if (useInMemory) {
           // 用内存状态覆盖并保存；meta 逐字段恢复（getMeta 返回内部引用，无法整体替换）
           this.stateManager.setState(inMemoryState);
           this.restoreMetaFrom(inMemoryMeta);
@@ -394,15 +413,6 @@ export class QuizView extends ItemView {
           // M2: 落盘期间已开始新加载流程 → 中止
           if (epoch !== this.loadEpoch) return;
           effectiveState = inMemoryState;
-        } else if (choice === "external") {
-          // 已加载 sidecar 状态，保持
-        } else {
-          // 用户取消：禁止后续写盘，避免空状态覆盖外部进度。
-          // （弹窗前虽已 setState(null)，但 loadSidecar 已重新设置 currentState，
-          //  若不清 canPersistState，onClose 会用实例默认值（空状态）覆盖外部 sidecar）
-          this.canPersistState = false;
-          this.showError("已取消加载题库。请重新打开刷题面板。");
-          return;
         }
       }
     }
@@ -709,7 +719,7 @@ export class QuizView extends ItemView {
         ) {
           return;
         }
-        this.lastSavedState = state;
+        this.lastSavedState = this.snapshotState(state);
         this.stateManager.scheduleSave(state, 0);
       }
     }, 5000);
@@ -3177,6 +3187,19 @@ export class QuizView extends ItemView {
     };
   }
 
+  /** 引用字段浅拷贝快照：供脏检查基准使用。
+   *  buildCurrentState 对 memoryCards/answeredQuestions/displayOrder 是引用传递，
+   * 若基准直接保存引用会与实时状态共享对象，quizStateEquals 深比较同一对象恒等，
+   * 心跳兜底写盘将永远跳过（仅记忆卡片/答题记录变化时进度丢失且无法自愈）。 */
+  private snapshotState(state: QuizSessionState): QuizSessionState {
+    return {
+      ...state,
+      displayOrder: [...state.displayOrder],
+      answeredQuestions: { ...state.answeredQuestions },
+      memoryCards: state.memoryCards ? { ...state.memoryCards } : state.memoryCards,
+    };
+  }
+
   private saveState(): void {
     // V2: 视图关闭后（含 in-flight 的 initializeFromState 迟到完成）禁止写盘，
     // 避免用陈旧状态覆盖磁盘进度。onClose 走的是 saveStateImmediately，不受影响。
@@ -3184,7 +3207,7 @@ export class QuizView extends ItemView {
     if (!this.canPersistState) return;
     const state = this.buildCurrentState();
     // F4: 记录脏检查基准（已排队或已写入磁盘的状态快照）
-    this.lastSavedState = state;
+    this.lastSavedState = this.snapshotState(state);
     this.stateManager.scheduleSave(state, 300);
   }
 }

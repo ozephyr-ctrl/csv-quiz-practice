@@ -3912,7 +3912,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       const state = this.buildCurrentState();
       try {
         await this.stateManager.saveStateImmediately(state);
-        this.lastSavedState = state;
+        this.lastSavedState = this.snapshotState(state);
       } catch (e) {
         console.error("CSV Quiz: Failed to save state on close", e);
         new import_obsidian6.Notice("\u8FDB\u5EA6\u4FDD\u5B58\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u9898\u5E93\u72B6\u6001\u6587\u4EF6");
@@ -4038,20 +4038,27 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       const loaded = this.stateManager.getState();
       const metaDiffers = JSON.stringify(inMemoryMeta) !== JSON.stringify(this.stateManager.getMeta());
       if (loaded && (!quizStateEquals(inMemoryState, loaded) || metaDiffers)) {
-        const choice = await this.askExternalModificationChoice(false);
-        if (this.isClosed) return;
-        if (epoch !== this.loadEpoch) return;
-        if (choice === "current") {
+        const justSaved = Date.now() - this.stateManager.lastPersistAt < 1500;
+        let useInMemory = justSaved;
+        if (!justSaved) {
+          const choice = await this.askExternalModificationChoice(false);
+          if (this.isClosed) return;
+          if (epoch !== this.loadEpoch) return;
+          if (choice === "current") {
+            useInMemory = true;
+          } else if (choice === "external") {
+          } else {
+            this.canPersistState = false;
+            this.showError("\u5DF2\u53D6\u6D88\u52A0\u8F7D\u9898\u5E93\u3002\u8BF7\u91CD\u65B0\u6253\u5F00\u5237\u9898\u9762\u677F\u3002");
+            return;
+          }
+        }
+        if (useInMemory) {
           this.stateManager.setState(inMemoryState);
           this.restoreMetaFrom(inMemoryMeta);
           await this.stateManager.saveStateImmediately(inMemoryState);
           if (epoch !== this.loadEpoch) return;
           effectiveState = inMemoryState;
-        } else if (choice === "external") {
-        } else {
-          this.canPersistState = false;
-          this.showError("\u5DF2\u53D6\u6D88\u52A0\u8F7D\u9898\u5E93\u3002\u8BF7\u91CD\u65B0\u6253\u5F00\u5237\u9898\u9762\u677F\u3002");
-          return;
         }
       }
     }
@@ -4297,7 +4304,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         if (this.lastSavedState !== null && quizStateEquals(state, this.lastSavedState)) {
           return;
         }
-        this.lastSavedState = state;
+        this.lastSavedState = this.snapshotState(state);
         this.stateManager.scheduleSave(state, 0);
       }
     }, 5e3);
@@ -6188,11 +6195,23 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       memoryInitialized: this.memoryInitialized
     };
   }
+  /** 引用字段浅拷贝快照：供脏检查基准使用。
+   *  buildCurrentState 对 memoryCards/answeredQuestions/displayOrder 是引用传递，
+   * 若基准直接保存引用会与实时状态共享对象，quizStateEquals 深比较同一对象恒等，
+   * 心跳兜底写盘将永远跳过（仅记忆卡片/答题记录变化时进度丢失且无法自愈）。 */
+  snapshotState(state) {
+    return {
+      ...state,
+      displayOrder: [...state.displayOrder],
+      answeredQuestions: { ...state.answeredQuestions },
+      memoryCards: state.memoryCards ? { ...state.memoryCards } : state.memoryCards
+    };
+  }
   saveState() {
     if (this.isClosed) return;
     if (!this.canPersistState) return;
     const state = this.buildCurrentState();
-    this.lastSavedState = state;
+    this.lastSavedState = this.snapshotState(state);
     this.stateManager.scheduleSave(state, 300);
   }
 };
@@ -6253,6 +6272,9 @@ var StateManager = class {
     this.contentPath = null;
     /** 当前题库 meta 覆盖层（B/C 类），键为题 id。 */
     this.currentMeta = {};
+    /** 最近一次本插件提交写盘的时间戳（persistNow 入队时更新）。
+     *  供外部修改检测抑制"关闭面板随即重开"的竞态误报：写盘尚未落盘时磁盘滞后于内存。 */
+    this.lastPersistAt = 0;
     /** 默认筛选值（loadSidecar 入参保存），供「全部重置」时 emptySidecarState 复用，
      *  避免重置后默认筛选设置被清空（与首次打开 missing 路径的 emptySessionState 行为保持一致）。 */
     this.defaultFilters = { favorite: "", mastered: "", repeat: "", wrong: "" };
@@ -6502,6 +6524,7 @@ var StateManager = class {
    * - 兼容模式（contentPath 为 null）→ 写 data.json.quizState
    */
   async persistNow() {
+    this.lastPersistAt = Date.now();
     if (this.contentPath !== null) {
       await this.sidecarQueue.enqueue(
         this.contentPath,

@@ -120,6 +120,9 @@ export class StateManager {
   private contentPath: string | null = null;
   /** 当前题库 meta 覆盖层（B/C 类），键为题 id。 */
   private currentMeta: Record<string, SidecarMeta> = {};
+  /** 最近一次本插件提交写盘的时间戳（persistNow 入队时更新）。
+   *  供外部修改检测抑制"关闭面板随即重开"的竞态误报：写盘尚未落盘时磁盘滞后于内存。 */
+  lastPersistAt: number = 0;
   /** 默认筛选值（loadSidecar 入参保存），供「全部重置」时 emptySidecarState 复用，
    *  避免重置后默认筛选设置被清空（与首次打开 missing 路径的 emptySessionState 行为保持一致）。 */
   private defaultFilters: {
@@ -434,6 +437,8 @@ export class StateManager {
    * - 兼容模式（contentPath 为 null）→ 写 data.json.quizState
    */
   private async persistNow(): Promise<void> {
+    // 入队即视为本插件已提交该状态写盘（供外部修改检测抑制窗口使用）
+    this.lastPersistAt = Date.now();
     if (this.contentPath !== null) {
       await this.sidecarQueue.enqueue(
         this.contentPath,
