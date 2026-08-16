@@ -483,7 +483,8 @@ var DEFAULT_SETTINGS = {
   memoryDailyNew: 20,
   memoryReminder: true,
   memoryMarkRating: true,
-  swipeNavigation: true
+  swipeNavigation: true,
+  memoryUpdateInNormalMode: true
 };
 
 // src/settings.ts
@@ -1007,7 +1008,7 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
             control: {
               type: "number",
               key: "memoryDailyNew",
-              min: 1,
+              min: 0,
               max: 500,
               defaultValue: DEFAULT_SETTINGS.memoryDailyNew
             }
@@ -1026,6 +1027,11 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
             name: "\u5DE6\u53F3\u6ED1\u52A8\u5207\u9898",
             desc: "\u79FB\u52A8\u7AEF\u5728\u5237\u9898\u9762\u677F\u5185\u5DE6\u53F3\u6ED1\u52A8\u5207\u6362\u9898\u76EE\uFF08\u5DE6\u6ED1\u4E0B\u4E00\u9898\u3001\u53F3\u6ED1\u4E0A\u4E00\u9898\uFF09\uFF1B\u5F00\u542F\u65F6\u9762\u677F\u533A\u57DF\u4E0D\u89E6\u53D1 Obsidian \u81EA\u8EAB\u7684\u4FA7\u8FB9\u680F\u6ED1\u52A8",
             control: { type: "toggle", key: "swipeNavigation" }
+          },
+          {
+            name: "\u975E\u8BB0\u5FC6\u6A21\u5F0F\u7B54\u9898\u53C2\u4E0EFSRS",
+            desc: "\u5E38\u89C4\u6A21\u5F0F/\u968F\u673A\u7EC3\u4E60\u4E2D\u7B54\u9898\u4E5F\u66F4\u65B0\u8BB0\u5FC6\u5361\u7247\uFF08FSRS \u95F4\u9694\u91CD\u590D\uFF09\uFF1B\u5173\u95ED\u540E\u4EC5\u8BB0\u5FC6\u7EC3\u4E60\u66F4\u65B0\u5361\u7247",
+            control: { type: "toggle", key: "memoryUpdateInNormalMode" }
           }
         ]
       },
@@ -1148,6 +1154,12 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
       this.plugin.syncSwipeNavigation();
       return;
     }
+    if (key === "memoryDailyNew") {
+      this.plugin.settings[key] = value;
+      await this.plugin.saveSettings();
+      await this.plugin.resetDailyNewQuota();
+      return;
+    }
     this.plugin.settings[key] = value;
     await this.plugin.saveSettings();
   }
@@ -1205,7 +1217,7 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
       "\u6BCF\u65E5\u65B0\u9898\u6570",
       "\u8BB0\u5FC6\u7EC3\u4E60\u6BCF\u5929\u5F15\u5165\u7684\u65B0\u9898\u6570\u91CF\u4E0A\u9650\uFF08\u7A33\u5B9A\u540E\u6BCF\u65E5\u590D\u4E60\u91CF\u7EA6\u4E3A\u8BE5\u503C\u7684 2~3 \u500D\uFF09",
       "memoryDailyNew",
-      1,
+      0,
       500
     );
     this.addToggleSetting(
@@ -1225,6 +1237,12 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
       "\u5DE6\u53F3\u6ED1\u52A8\u5207\u9898",
       "\u79FB\u52A8\u7AEF\u5728\u5237\u9898\u9762\u677F\u5185\u5DE6\u53F3\u6ED1\u52A8\u5207\u6362\u9898\u76EE\uFF08\u5DE6\u6ED1\u4E0B\u4E00\u9898\u3001\u53F3\u6ED1\u4E0A\u4E00\u9898\uFF09\uFF1B\u5F00\u542F\u65F6\u9762\u677F\u533A\u57DF\u4E0D\u89E6\u53D1 Obsidian \u81EA\u8EAB\u7684\u4FA7\u8FB9\u680F\u6ED1\u52A8",
       "swipeNavigation"
+    );
+    this.addToggleSetting(
+      containerEl,
+      "\u975E\u8BB0\u5FC6\u6A21\u5F0F\u7B54\u9898\u53C2\u4E0EFSRS",
+      "\u5E38\u89C4\u6A21\u5F0F/\u968F\u673A\u7EC3\u4E60\u4E2D\u7B54\u9898\u4E5F\u66F4\u65B0\u8BB0\u5FC6\u5361\u7247\uFF08FSRS \u95F4\u9694\u91CD\u590D\uFF09\uFF1B\u5173\u95ED\u540E\u4EC5\u8BB0\u5FC6\u7EC3\u4E60\u66F4\u65B0\u5361\u7247",
+      "memoryUpdateInNormalMode"
     );
     this.addNumberSetting(
       containerEl,
@@ -1338,6 +1356,9 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
         if (!isNaN(num) && num >= min && num <= max) {
           this.plugin.settings[key] = num;
           void this.plugin.saveSettings();
+          if (key === "memoryDailyNew") {
+            void this.plugin.resetDailyNewQuota();
+          }
         }
       })
     );
@@ -5113,7 +5134,9 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     const isCorrect = selectedStr === this.normalizeAnswer(question.answer);
     this.showingAnswer = true;
     await this.recordAnswer(question, selectedStr, isCorrect);
-    this.applyMemoryReview(question.id, isCorrect);
+    if (this.memoryActive || this.getSettings().memoryUpdateInNormalMode) {
+      this.applyMemoryReview(question.id, isCorrect);
+    }
     this.renderQuestion();
     this.updateProgress();
     const settings = this.getSettings();
@@ -5264,6 +5287,13 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     } else {
       this.currentIndex = this.filteredQuestions.length > 0 ? 0 : -1;
     }
+  }
+  /** 每日新题设置变更后重置当日配额状态（日期/计数/已选未答），使新设置立即生效。 */
+  async resetDailyNewQuota() {
+    this.memoryNewDate = "";
+    this.memoryNewCountToday = 0;
+    this.memoryPendingNew = [];
+    this.saveState();
   }
   /** 随机题目顺序开关变更：保留答题进度，按当前设置重建显示顺序并重新定位当前题。 */
   async reorderForRandomSetting() {
@@ -5534,7 +5564,9 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     const isCorrect = normalizeAnswerValue(selectedKey) === normalizeAnswerValue(question.answer);
     this.showingAnswer = true;
     await this.recordAnswer(question, selectedKey, isCorrect);
-    this.applyMemoryReview(question.id, isCorrect);
+    if (this.memoryActive || this.getSettings().memoryUpdateInNormalMode) {
+      this.applyMemoryReview(question.id, isCorrect);
+    }
     this.renderQuestion();
     this.updateProgress();
     const settings = this.getSettings();
@@ -6972,6 +7004,22 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
       const state = this.stateManager.getState();
       if (state) {
         state.displayOrder = [];
+        await this.stateManager.saveStateImmediately(state);
+      }
+    }
+  }
+  /** 「每日新题数」设置变更后重置当日配额（面板打开由视图就地重置，未打开直接改状态并落盘）。 */
+  async resetDailyNewQuota() {
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
+    const view = leaf == null ? void 0 : leaf.view;
+    if (view) {
+      await view.resetDailyNewQuota();
+    } else {
+      const state = this.stateManager.getState();
+      if (state) {
+        state.memoryNewDate = "";
+        state.memoryNewCountToday = 0;
+        state.memoryPendingNew = [];
         await this.stateManager.saveStateImmediately(state);
       }
     }

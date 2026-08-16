@@ -81,6 +81,8 @@ export interface PluginSettings {
   memoryMarkRating: boolean;
   /** 移动端左右滑动切题（左滑下一题/右滑上一题） */
   swipeNavigation: boolean;
+  /** 非记忆模式下答题是否更新 FSRS 卡片（常规模式/随机练习；记忆练习始终更新） */
+  memoryUpdateInNormalMode: boolean;
 }
 
 export interface PluginData {
@@ -106,4 +108,5 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   memoryReminder: true,
   memoryMarkRating: true,
   swipeNavigation: true,
+  memoryUpdateInNormalMode: true,
 };

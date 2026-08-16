@@ -21,6 +21,7 @@ interface PluginHandle {
   resetQuizProgress(choice?: "records" | "cards" | "order" | "all"): Promise<void>;
   reorderQuestions(): Promise<void>;
   syncSwipeNavigation(): void;
+  resetDailyNewQuota(): Promise<void>;
   changeQuizPath(path: string): Promise<void>;
   compileQuizToCqv(): Promise<void>;
   exportQuizMetaToCsv(): Promise<void>;
@@ -83,7 +84,7 @@ export class CSVQuizSettingTab extends PluginSettingTab {
             control: {
               type: "number",
               key: "memoryDailyNew",
-              min: 1,
+              min: 0,
               max: 500,
               defaultValue: DEFAULT_SETTINGS.memoryDailyNew,
             },
@@ -102,6 +103,11 @@ export class CSVQuizSettingTab extends PluginSettingTab {
             name: "左右滑动切题",
             desc: "移动端在刷题面板内左右滑动切换题目（左滑下一题、右滑上一题）；开启时面板区域不触发 Obsidian 自身的侧边栏滑动",
             control: { type: "toggle", key: "swipeNavigation" },
+          },
+          {
+            name: "非记忆模式答题参与FSRS",
+            desc: "常规模式/随机练习中答题也更新记忆卡片（FSRS 间隔重复）；关闭后仅记忆练习更新卡片",
+            control: { type: "toggle", key: "memoryUpdateInNormalMode" },
           },
         ],
       },
@@ -228,6 +234,13 @@ export class CSVQuizSettingTab extends PluginSettingTab {
       this.plugin.syncSwipeNavigation();
       return;
     }
+    if (key === "memoryDailyNew") {
+      (this.plugin.settings as unknown as Record<string, unknown>)[key] = value;
+      await this.plugin.saveSettings();
+      // 每日新题数变更：重置当日配额（日期/计数/已选未答），使新设置立即生效
+      await this.plugin.resetDailyNewQuota();
+      return;
+    }
     (this.plugin.settings as unknown as Record<string, unknown>)[key] = value;
     await this.plugin.saveSettings();
   }
@@ -296,7 +309,7 @@ export class CSVQuizSettingTab extends PluginSettingTab {
       "每日新题数",
       "记忆练习每天引入的新题数量上限（稳定后每日复习量约为该值的 2~3 倍）",
       "memoryDailyNew",
-      1,
+      0,
       500
     );
     this.addToggleSetting(
@@ -316,6 +329,12 @@ export class CSVQuizSettingTab extends PluginSettingTab {
       "左右滑动切题",
       "移动端在刷题面板内左右滑动切换题目（左滑下一题、右滑上一题）；开启时面板区域不触发 Obsidian 自身的侧边栏滑动",
       "swipeNavigation"
+    );
+    this.addToggleSetting(
+      containerEl,
+      "非记忆模式答题参与FSRS",
+      "常规模式/随机练习中答题也更新记忆卡片（FSRS 间隔重复）；关闭后仅记忆练习更新卡片",
+      "memoryUpdateInNormalMode"
     );
 
     this.addNumberSetting(
@@ -490,6 +509,10 @@ export class CSVQuizSettingTab extends PluginSettingTab {
             if (!isNaN(num) && num >= min && num <= max) {
               (this.plugin.settings as unknown as Record<string, boolean | string | number>)[key] = num;
               void this.plugin.saveSettings();
+              // 每日新题数变更：重置当日配额（日期/计数/已选未答），使新设置立即生效
+              if (key === "memoryDailyNew") {
+                void this.plugin.resetDailyNewQuota();
+              }
             }
           })
       );

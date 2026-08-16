@@ -1789,8 +1789,10 @@ export class QuizView extends ItemView {
     const isCorrect = selectedStr === this.normalizeAnswer(question.answer);
     this.showingAnswer = true;
     await this.recordAnswer(question, selectedStr, isCorrect);
-    // 任意模式判分都更新 FSRS 卡片（记忆练习/随机练习/常规模式一致）
-    this.applyMemoryReview(question.id, isCorrect);
+    // 更新 FSRS 卡片：记忆练习始终更新；常规/随机练习按设置（非记忆模式参与 FSRS）
+    if (this.memoryActive || this.getSettings().memoryUpdateInNormalMode) {
+      this.applyMemoryReview(question.id, isCorrect);
+    }
 
     this.renderQuestion();
     this.updateProgress();
@@ -1982,6 +1984,14 @@ export class QuizView extends ItemView {
     } else {
       this.currentIndex = this.filteredQuestions.length > 0 ? 0 : -1;
     }
+  }
+
+  /** 每日新题设置变更后重置当日配额状态（日期/计数/已选未答），使新设置立即生效。 */
+  async resetDailyNewQuota(): Promise<void> {
+    this.memoryNewDate = "";
+    this.memoryNewCountToday = 0;
+    this.memoryPendingNew = [];
+    this.saveState();
   }
 
   /** 随机题目顺序开关变更：保留答题进度，按当前设置重建显示顺序并重新定位当前题。 */
@@ -2342,8 +2352,10 @@ export class QuizView extends ItemView {
       normalizeAnswerValue(question.answer);
     this.showingAnswer = true;
     await this.recordAnswer(question, selectedKey, isCorrect);
-    // 任意模式判分都更新 FSRS 卡片（记忆练习/随机练习/常规模式一致）
-    this.applyMemoryReview(question.id, isCorrect);
+    // 更新 FSRS 卡片：记忆练习始终更新；常规/随机练习按设置（非记忆模式参与 FSRS）
+    if (this.memoryActive || this.getSettings().memoryUpdateInNormalMode) {
+      this.applyMemoryReview(question.id, isCorrect);
+    }
 
     this.renderQuestion();
     this.updateProgress();
