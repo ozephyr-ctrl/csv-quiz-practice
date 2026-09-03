@@ -24,7 +24,7 @@ export default class CSVQuizPlugin extends Plugin {
     this.csvWriteQueue = new CSVWriteQueue(this.app);
 
     await this.loadSettings();
-    await this.stateManager.loadPluginData(this.settings);
+    await this.stateManager.loadLegacyQuizState();
 
     // 阶段 4：迁移旧版进度——data.json.quizState → 当前 csvPath 的 sidecar（无视图场景）
     try {
@@ -357,6 +357,29 @@ export default class CSVQuizPlugin extends Plugin {
       const state = this.stateManager.getState();
       if (state) {
         state.displayOrder = [];
+        await this.stateManager.saveStateImmediately(state);
+      }
+    }
+  }
+
+  /** 「每日新题数」设置变更后重置当日配额（面板打开由视图就地重置，未打开直接改状态并落盘）。 */
+  async resetDailyNewQuota(): Promise<void> {
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
+    const view = leaf?.view as QuizView | undefined;
+    if (view) {
+      await view.resetDailyNewQuota();
+    } else {
+      // M5: 无视图时先确保 sidecar 状态已载入，避免静默 no-op
+      // （未开过面板且切换过题库路径时 currentState 为 null）
+      if (!(await this.ensureSidecarLoaded())) {
+        new Notice("无法加载题库状态，请先打开刷题面板");
+        return;
+      }
+      const state = this.stateManager.getState();
+      if (state) {
+        state.memoryNewDate = "";
+        state.memoryNewCountToday = 0;
+        state.memoryPendingNew = [];
         await this.stateManager.saveStateImmediately(state);
       }
     }

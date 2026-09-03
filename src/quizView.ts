@@ -1054,9 +1054,13 @@ export class QuizView extends ItemView {
   }
 
   /** 随机练习：按当前筛选条件筛出未答题，随机取最多 100 道作为练习集（不足自适应）。 */
-  private enableRandomPractice(): void {
+  private async enableRandomPractice(): Promise<void> {
     // F3: 记忆练习确认弹窗 await 期间禁止进入随机练习，避免双模式并存
     if (this.practiceActive || this.memoryEnabling) return;
+    // 先保存编辑区未提交的修改（此时 filteredQuestions/currentIndex/编辑区 DOM 仍一致），
+    // 再互斥退出另一练习模式——退出会重置列表与定位，之后保存会把编辑错位应用到别的题
+    await this.saveCurrentEdit();
+    if (this.isClosed) return;
     // 进入任一练习模式前互斥退出另一个
     if (this.memoryActive) this.exitMemoryPractice();
 
@@ -1121,7 +1125,7 @@ export class QuizView extends ItemView {
       this.saveState();
       new Notice("已退出随机练习");
     } else {
-      this.enableRandomPractice();
+      void this.enableRandomPractice();
     }
   }
 
@@ -1139,6 +1143,10 @@ export class QuizView extends ItemView {
     if (this.memoryActive || this.memoryEnabling) return;
     this.memoryEnabling = true;
     try {
+      // 先保存编辑区未提交的修改（此时 filteredQuestions/currentIndex/编辑区 DOM 仍一致），
+      // 再互斥退出另一练习模式——退出会重置列表与定位，之后保存会把编辑错位应用到别的题
+      await this.saveCurrentEdit();
+      if (this.isClosed) return;
       // 进入任一练习模式前互斥退出另一个
       if (this.practiceActive) this.exitRandomPractice();
 
@@ -1437,7 +1445,17 @@ export class QuizView extends ItemView {
       this.exitMemoryPractice();
     }
     this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
-    this.currentIndex = this.filteredQuestions.length > 0 ? 0 : -1;
+    // 定位到当前顺序下的首个未答题（filteredQuestions 已按 displayOrder 排序，
+    // 即「当前顺序」）；无未答题或全部已答时回退第一题。注意未答判断必须用
+    // === undefined：answeredQuestions[id] 可能为空字符串（空选判错）
+    const firstUnanswered = this.filteredQuestions.findIndex(
+      (q) => this.answeredQuestions[q.id] === undefined
+    );
+    if (this.filteredQuestions.length === 0) {
+      this.currentIndex = -1;
+    } else {
+      this.currentIndex = firstUnanswered >= 0 ? firstUnanswered : 0;
+    }
     this.currentShuffledQId = null;
     this.cancelAutoNext();
     this.renderQuestion();
@@ -1760,6 +1778,12 @@ export class QuizView extends ItemView {
 
     const origQuestion = this.filteredQuestions[this.currentIndex];
     if (!origQuestion) return;
+    // 空选不判分：答案列含脏数据（如非 A-D 字母）时归一化后为空串，
+    // 空选会被误判为"正确"并给 FSRS 记 Good/Easy 评分
+    if (this.selectedOptions.length === 0) {
+      new Notice("请先选择答案");
+      return;
+    }
 
     this.answering = true;
     await this.saveCurrentEdit();
@@ -2197,27 +2221,13 @@ export class QuizView extends ItemView {
       this.saveQuestionMeta(question, ["tags"]);
 
       // Remember which question is currently displayed before re-filtering
-      const currentDisplayedId = this.filteredQuestions[this.currentIndex]?.id;
-
-      // Re-apply filters since tags changed
-      this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
-
-      // Restore the currently displayed question, not the saved one
       // (the user may have auto-advanced or manually navigated while the modal was open)
-      if (currentDisplayedId) {
-        const newIndex = this.filteredQuestions.findIndex(
-          (q) => q.id === currentDisplayedId
-        );
-        if (newIndex >= 0) {
-          this.currentIndex = newIndex;
-        } else if (this.filteredQuestions.length > 0) {
-          this.currentIndex = 0;
-        } else {
-          this.currentIndex = -1;
-        }
-      } else {
-        this.currentIndex = this.filteredQuestions.length > 0 ? 0 : -1;
-      }
+      const currentDisplayedId =
+        this.filteredQuestions[this.currentIndex]?.id ?? question.id;
+
+      // Re-apply filters since tags changed. 练习模式（随机/记忆）内练习集是固定快照，
+      // reFilterAndLocate 只在快照内定位、不重建列表，改标签不再导致退出练习模式
+      this.reFilterAndLocate(currentDisplayedId);
 
       this.saveState();
 
@@ -2540,7 +2550,9 @@ export class QuizView extends ItemView {
       text: "下一个未答题",
       cls: "csv-quiz-btn csv-quiz-btn-sm",
     });
-    nextUnansweredBtn.addEventListener("click", () => this.goToNextUnanswered());
+    nextUnansweredBtn.addEventListener("click", () => {
+      void this.goToNextUnanswered();
+    });
 
     const resetBtn = bottomRow.createEl("button", {
       text: "重置答题进度",
@@ -2555,31 +2567,39 @@ export class QuizView extends ItemView {
     });
   }
 
-  private goToNextUnanswered(): void {
-    if (this.filteredQuestions.length === 0) return;
-    for (let i = this.currentIndex + 1; i < this.filteredQuestions.length; i++) {
-      const id = this.filteredQuestions[i].id;
-      // 练习模式：本次会话未答的题才算未答（旧题允许继续练习）；常规模式按答题记录判断
-      const unanswered =
-        this.practiceActive || this.memoryActive
-          ? !this.practiceAnswered.has(id)
-          : this.answeredQuestions[id] === undefined;
-      if (unanswered) {
-        this.currentIndex = i;
-        this.currentShuffledQId = null;
-        this.cancelAutoNext();
-        this.renderQuestion();
-        this.saveState();
-        return;
+  private async goToNextUnanswered(): Promise<void> {
+    // 与 next/prev/跳转一致：防重入 + 先保存编辑区未提交的修改，避免重渲染后静默丢失
+    if (this.isClosed || this.navigating) return;
+    this.navigating = true;
+    try {
+      await this.saveCurrentEdit();
+      if (this.filteredQuestions.length === 0) return;
+      for (let i = this.currentIndex + 1; i < this.filteredQuestions.length; i++) {
+        const id = this.filteredQuestions[i].id;
+        // 练习模式：本次会话未答的题才算未答（旧题允许继续练习）；常规模式按答题记录判断
+        const unanswered =
+          this.practiceActive || this.memoryActive
+            ? !this.practiceAnswered.has(id)
+            : this.answeredQuestions[id] === undefined;
+        if (unanswered) {
+          this.currentIndex = i;
+          this.currentShuffledQId = null;
+          this.cancelAutoNext();
+          this.renderQuestion();
+          this.saveState();
+          return;
+        }
       }
-    }
-    if (
-      (this.practiceActive || this.memoryActive) &&
-      this.filteredQuestions.every((q) => this.practiceAnswered.has(q.id))
-    ) {
-      new Notice(`练习完成！共 ${this.filteredQuestions.length} 题`);
-    } else {
-      new Notice("没有更多未答题");
+      if (
+        (this.practiceActive || this.memoryActive) &&
+        this.filteredQuestions.every((q) => this.practiceAnswered.has(q.id))
+      ) {
+        new Notice(`练习完成！共 ${this.filteredQuestions.length} 题`);
+      } else {
+        new Notice("没有更多未答题");
+      }
+    } finally {
+      this.navigating = false;
     }
   }
 
@@ -2682,16 +2702,20 @@ export class QuizView extends ItemView {
       memoryCards: this.memoryCards,
       currentId: this.filteredQuestions[this.currentIndex]?.id ?? null,
       onJump: (id: string) => {
-        const idx = this.filteredQuestions.findIndex((q) => q.id === id);
-        if (idx < 0) {
-          new Notice("该题不在当前列表");
-          return;
-        }
-        this.currentIndex = idx;
-        this.currentShuffledQId = null;
-        this.cancelAutoNext();
-        this.renderQuestion();
-        this.saveState();
+        // 与其他切题入口一致：先保存编辑区未提交的修改再跳转，避免重渲染后静默丢失
+        void (async () => {
+          await this.saveCurrentEdit();
+          const idx = this.filteredQuestions.findIndex((q) => q.id === id);
+          if (idx < 0) {
+            new Notice("该题不在当前列表");
+            return;
+          }
+          this.currentIndex = idx;
+          this.currentShuffledQId = null;
+          this.cancelAutoNext();
+          this.renderQuestion();
+          this.saveState();
+        })();
       },
     });
     // L4: ProgressModal 未自定义 onClose（基类 onClose 无副作用），
@@ -2865,7 +2889,9 @@ export class QuizView extends ItemView {
             throw new Error(`CSV 中未找到对应题号: ${id}`);
           }
           const row = dataRows[idx];
-          if (row.length < 14) row.length = 14; // 补齐缺失列，避免写入越界
+          // 显式补齐到 15 列（含错题列）：稀疏数组（row.length = N）会产生空洞，
+          // 补齐行输出 14 列而正常行 15 列，产生参差不齐的 CSV
+          while (row.length < 15) row.push("");
           row[7] = question.tags;
           row[8] = question.category1;
           row[9] = question.category2;

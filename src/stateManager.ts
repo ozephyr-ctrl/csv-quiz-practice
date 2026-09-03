@@ -1,10 +1,9 @@
 import { Notice, Plugin, Vault } from "obsidian";
 import {
-  MemoryCard,
   QuizSessionState,
-  PluginData,
   PluginSettings,
 } from "./types";
+import { normalizeMemoryCards } from "./utils";
 import {
   SidecarData,
   SidecarMeta,
@@ -141,16 +140,17 @@ export class StateManager {
     this.sidecarQueue = new SidecarWriteQueue(this.vault);
   }
 
-  async loadPluginData(currentSettings: PluginSettings): Promise<PluginData> {
+  /**
+   * 读取 data.json 中的旧版 quizState（兼容模式内存态），字段级归一化后设置为
+   * currentState，返回归一化结果（null = 无旧状态）。设置不在此处理——加载与
+   * 净化由 main.loadSettings 负责（旧实现把未净化的磁盘 settings 覆盖进合并
+   * 结果，容易被误当作已应用的设置使用）。
+   */
+  async loadLegacyQuizState(): Promise<QuizSessionState | null> {
     const data =
       ((await this.plugin.loadData()) as Record<string, unknown> | null) || {};
-    const settings: PluginSettings = {
-      ...currentSettings,
-      ...(data.settings as Partial<PluginSettings> | undefined || {}),
-    };
-    const quizState = this.normalizeQuizState(data.quizState);
-    this.currentState = quizState;
-    return { settings, quizState };
+    this.currentState = this.normalizeQuizState(data.quizState);
+    return this.currentState;
   }
 
   /**
@@ -170,12 +170,11 @@ export class StateManager {
       Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
     const toRecord = (v: unknown): Record<string, string> =>
       v && typeof v === "object" ? (v as Record<string, string>) : {};
+    // 记忆卡片逐卡字段级归一化：类型错误的损坏卡片整卡剔除（与 sidecar 路径一致）
     const memoryCards =
       r.memoryCards === undefined
         ? undefined
-        : r.memoryCards && typeof r.memoryCards === "object"
-          ? (r.memoryCards as Record<string, MemoryCard>)
-          : {};
+        : normalizeMemoryCards(r.memoryCards);
     return {
       csvPath: toStr(r.csvPath),
       currentIndex: toNumber(r.currentIndex),

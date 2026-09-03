@@ -925,8 +925,6 @@
   background: color-mix(in srgb, var(--color-accent) 15%, transparent);
 }
 
-/* 进度弹窗：全量列表渲染性能优化——视口外行跳过渲染，滚动时按需生成 */
-.csv-quiz-progress-row {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 2.6em;
-}
+/* 进度弹窗：虚拟滚动（progressModal.ts 只构建视口附近的行，spacer 占位）。
+ * 注意不要给行加 content-visibility: auto——视口外行已被移除，
+ * 而其 contain-intrinsic-size 占位高度会与虚拟滚动的行高计算冲突导致滚动抖动 */

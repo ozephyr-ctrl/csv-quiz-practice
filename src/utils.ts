@@ -125,3 +125,66 @@ export function countDueCards(
 export function normalizeAnswerValue(value: string): string {
   return [...new Set(value.toUpperCase().replace(/[^A-D]/g, ""))].sort().join("");
 }
+
+/**
+ * 单张记忆卡片的字段级归一化：state 必须为 0-3 的整数，数值字段必须为
+ * 有限数字（difficulty 按定义域限制在 1-10），due/lastReview 必须为字符串。
+ * 任一字段类型错误返回 null（整卡作废，题目回到新题状态，由调用方剔除），
+ * 避免 renderCardPanel 的 toFixed 等调用在损坏数据上抛 TypeError 中断渲染。
+ * due/lastReview 的"可解析为时间"不在此时强制——下游 parseDueTime 与
+ * applyMemoryReview 的 F2 防御另行兜底。
+ */
+export function normalizeMemoryCard(raw: unknown): MemoryCard | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const toNum = (v: unknown, min: number, max: number): number | null => {
+    if (typeof v !== "number" || !Number.isFinite(v) || v < min || v > max) {
+      return null;
+    }
+    return v;
+  };
+  if (
+    typeof r.state !== "number" ||
+    !Number.isInteger(r.state) ||
+    r.state < 0 ||
+    r.state > 3
+  ) {
+    return null;
+  }
+  const stability = toNum(r.stability, 0, Infinity);
+  if (stability === null) return null;
+  const difficulty = toNum(r.difficulty, 1, 10);
+  if (difficulty === null) return null;
+  const reps = toNum(r.reps, 0, Infinity);
+  if (reps === null) return null;
+  const lapses = toNum(r.lapses, 0, Infinity);
+  if (lapses === null) return null;
+  const learningSteps = toNum(r.learningSteps, 0, Infinity);
+  if (learningSteps === null) return null;
+  if (typeof r.due !== "string" || typeof r.lastReview !== "string") {
+    return null;
+  }
+  return {
+    state: r.state,
+    stability,
+    difficulty,
+    due: r.due,
+    reps,
+    lapses,
+    learningSteps,
+    lastReview: r.lastReview,
+  };
+}
+
+/** memoryCards 记录的字段级归一化：逐卡片校验，类型错误的整卡剔除。输入非对象时返回空记录。 */
+export function normalizeMemoryCards(
+  raw: unknown
+): Record<string, MemoryCard> {
+  if (!raw || typeof raw !== "object") return {};
+  const result: Record<string, MemoryCard> = {};
+  for (const [id, card] of Object.entries(raw)) {
+    const c = normalizeMemoryCard(card);
+    if (c !== null) result[id] = c;
+  }
+  return result;
+}

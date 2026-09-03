@@ -720,6 +720,146 @@ function askPrompt(app, opts) {
 
 // src/sidecar.ts
 var import_obsidian2 = require("obsidian");
+
+// src/utils.ts
+function shuffle(array) {
+  const result = [...array];
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
+}
+function sortByDisplayOrder(items, displayOrder) {
+  const orderMap = /* @__PURE__ */ new Map();
+  displayOrder.forEach((id, index) => orderMap.set(id, index));
+  return [...items].sort((a, b) => {
+    var _a, _b;
+    const aIdx = (_a = orderMap.get(a.id)) != null ? _a : Number.MAX_SAFE_INTEGER;
+    const bIdx = (_b = orderMap.get(b.id)) != null ? _b : Number.MAX_SAFE_INTEGER;
+    return aIdx - bIdx;
+  });
+}
+function quizStateEquals(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (a.csvPath !== b.csvPath) return false;
+  if (a.currentIndex !== b.currentIndex) return false;
+  if (a.correctCount !== b.correctCount) return false;
+  if (a.wrongCount !== b.wrongCount) return false;
+  if (a.filterText !== b.filterText) return false;
+  if (a.filterTags !== b.filterTags) return false;
+  if (a.filterCat1 !== b.filterCat1) return false;
+  if (a.filterCat2 !== b.filterCat2) return false;
+  if (a.filterCat3 !== b.filterCat3) return false;
+  if (a.filterFavorite !== b.filterFavorite) return false;
+  if (a.filterMastered !== b.filterMastered) return false;
+  if (a.filterRepeat !== b.filterRepeat) return false;
+  if (a.filterWrong !== b.filterWrong) return false;
+  if ((a.filterUnanswered || "") !== (b.filterUnanswered || "")) return false;
+  const aOrder = a.displayOrder || [];
+  const bOrder = b.displayOrder || [];
+  if (aOrder.length !== bOrder.length) return false;
+  for (let i = 0; i < aOrder.length; i++) {
+    if (aOrder[i] !== bOrder[i]) return false;
+  }
+  const aq = a.answeredQuestions || {};
+  const bq = b.answeredQuestions || {};
+  const ak = Object.keys(aq);
+  const bk = Object.keys(bq);
+  if (ak.length !== bk.length) return false;
+  for (const k of ak) {
+    if (aq[k] !== bq[k]) return false;
+  }
+  const am = a.memoryCards || {};
+  const bm = b.memoryCards || {};
+  const amk = Object.keys(am);
+  const bmk = Object.keys(bm);
+  if (amk.length !== bmk.length) return false;
+  for (const k of amk) {
+    const ac = am[k];
+    const bc = bm[k];
+    if (!ac || !bc) return false;
+    if (ac.state !== bc.state) return false;
+    if (ac.stability !== bc.stability) return false;
+    if (ac.difficulty !== bc.difficulty) return false;
+    if (ac.due !== bc.due) return false;
+    if (ac.reps !== bc.reps) return false;
+    if (ac.lapses !== bc.lapses) return false;
+    if (ac.learningSteps !== bc.learningSteps) return false;
+    if ((ac.lastReview || "") !== (bc.lastReview || "")) return false;
+  }
+  if ((a.memoryNewDate || "") !== (b.memoryNewDate || "")) return false;
+  if ((a.memoryNewCountToday || 0) !== (b.memoryNewCountToday || 0)) return false;
+  const ap = a.memoryPendingNew || [];
+  const bp = b.memoryPendingNew || [];
+  if (ap.length !== bp.length) return false;
+  for (let i = 0; i < ap.length; i++) {
+    if (ap[i] !== bp[i]) return false;
+  }
+  if (!!a.memoryInitialized !== !!b.memoryInitialized) return false;
+  return true;
+}
+function countDueCards(cards, now = /* @__PURE__ */ new Date()) {
+  if (!cards) return 0;
+  let n = 0;
+  for (const c of Object.values(cards)) {
+    if (!c || typeof c !== "object") continue;
+    const t = new Date(c.due).getTime();
+    if (!Number.isNaN(t) && t <= now.getTime()) n++;
+  }
+  return n;
+}
+function normalizeAnswerValue(value) {
+  return [...new Set(value.toUpperCase().replace(/[^A-D]/g, ""))].sort().join("");
+}
+function normalizeMemoryCard(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw;
+  const toNum = (v, min, max) => {
+    if (typeof v !== "number" || !Number.isFinite(v) || v < min || v > max) {
+      return null;
+    }
+    return v;
+  };
+  if (typeof r.state !== "number" || !Number.isInteger(r.state) || r.state < 0 || r.state > 3) {
+    return null;
+  }
+  const stability = toNum(r.stability, 0, Infinity);
+  if (stability === null) return null;
+  const difficulty = toNum(r.difficulty, 1, 10);
+  if (difficulty === null) return null;
+  const reps = toNum(r.reps, 0, Infinity);
+  if (reps === null) return null;
+  const lapses = toNum(r.lapses, 0, Infinity);
+  if (lapses === null) return null;
+  const learningSteps = toNum(r.learningSteps, 0, Infinity);
+  if (learningSteps === null) return null;
+  if (typeof r.due !== "string" || typeof r.lastReview !== "string") {
+    return null;
+  }
+  return {
+    state: r.state,
+    stability,
+    difficulty,
+    due: r.due,
+    reps,
+    lapses,
+    learningSteps,
+    lastReview: r.lastReview
+  };
+}
+function normalizeMemoryCards(raw) {
+  if (!raw || typeof raw !== "object") return {};
+  const result = {};
+  for (const [id, card] of Object.entries(raw)) {
+    const c = normalizeMemoryCard(card);
+    if (c !== null) result[id] = c;
+  }
+  return result;
+}
+
+// src/sidecar.ts
 function sidecarPathFor(contentPath) {
   return contentPath + ".sidecar.json";
 }
@@ -837,7 +977,7 @@ function normalizeSidecar(raw) {
     }
   }
   const s = r.state && typeof r.state === "object" ? r.state : {};
-  const memoryCards = s.memoryCards === void 0 ? void 0 : s.memoryCards && typeof s.memoryCards === "object" ? s.memoryCards : {};
+  const memoryCards = s.memoryCards === void 0 ? void 0 : normalizeMemoryCards(s.memoryCards);
   return {
     version: 1,
     meta,
@@ -1770,109 +1910,15 @@ function decodeCqv(buffer) {
   };
 }
 
-// src/utils.ts
-function shuffle(array) {
-  const result = [...array];
-  for (let i = result.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [result[i], result[j]] = [result[j], result[i]];
-  }
-  return result;
-}
-function sortByDisplayOrder(items, displayOrder) {
-  const orderMap = /* @__PURE__ */ new Map();
-  displayOrder.forEach((id, index) => orderMap.set(id, index));
-  return [...items].sort((a, b) => {
-    var _a, _b;
-    const aIdx = (_a = orderMap.get(a.id)) != null ? _a : Number.MAX_SAFE_INTEGER;
-    const bIdx = (_b = orderMap.get(b.id)) != null ? _b : Number.MAX_SAFE_INTEGER;
-    return aIdx - bIdx;
-  });
-}
-function quizStateEquals(a, b) {
-  if (a === b) return true;
-  if (!a || !b) return false;
-  if (a.csvPath !== b.csvPath) return false;
-  if (a.currentIndex !== b.currentIndex) return false;
-  if (a.correctCount !== b.correctCount) return false;
-  if (a.wrongCount !== b.wrongCount) return false;
-  if (a.filterText !== b.filterText) return false;
-  if (a.filterTags !== b.filterTags) return false;
-  if (a.filterCat1 !== b.filterCat1) return false;
-  if (a.filterCat2 !== b.filterCat2) return false;
-  if (a.filterCat3 !== b.filterCat3) return false;
-  if (a.filterFavorite !== b.filterFavorite) return false;
-  if (a.filterMastered !== b.filterMastered) return false;
-  if (a.filterRepeat !== b.filterRepeat) return false;
-  if (a.filterWrong !== b.filterWrong) return false;
-  if ((a.filterUnanswered || "") !== (b.filterUnanswered || "")) return false;
-  const aOrder = a.displayOrder || [];
-  const bOrder = b.displayOrder || [];
-  if (aOrder.length !== bOrder.length) return false;
-  for (let i = 0; i < aOrder.length; i++) {
-    if (aOrder[i] !== bOrder[i]) return false;
-  }
-  const aq = a.answeredQuestions || {};
-  const bq = b.answeredQuestions || {};
-  const ak = Object.keys(aq);
-  const bk = Object.keys(bq);
-  if (ak.length !== bk.length) return false;
-  for (const k of ak) {
-    if (aq[k] !== bq[k]) return false;
-  }
-  const am = a.memoryCards || {};
-  const bm = b.memoryCards || {};
-  const amk = Object.keys(am);
-  const bmk = Object.keys(bm);
-  if (amk.length !== bmk.length) return false;
-  for (const k of amk) {
-    const ac = am[k];
-    const bc = bm[k];
-    if (!ac || !bc) return false;
-    if (ac.state !== bc.state) return false;
-    if (ac.stability !== bc.stability) return false;
-    if (ac.difficulty !== bc.difficulty) return false;
-    if (ac.due !== bc.due) return false;
-    if (ac.reps !== bc.reps) return false;
-    if (ac.lapses !== bc.lapses) return false;
-    if (ac.learningSteps !== bc.learningSteps) return false;
-    if ((ac.lastReview || "") !== (bc.lastReview || "")) return false;
-  }
-  if ((a.memoryNewDate || "") !== (b.memoryNewDate || "")) return false;
-  if ((a.memoryNewCountToday || 0) !== (b.memoryNewCountToday || 0)) return false;
-  const ap = a.memoryPendingNew || [];
-  const bp = b.memoryPendingNew || [];
-  if (ap.length !== bp.length) return false;
-  for (let i = 0; i < ap.length; i++) {
-    if (ap[i] !== bp[i]) return false;
-  }
-  if (!!a.memoryInitialized !== !!b.memoryInitialized) return false;
-  return true;
-}
-function countDueCards(cards, now = /* @__PURE__ */ new Date()) {
-  if (!cards) return 0;
-  let n = 0;
-  for (const c of Object.values(cards)) {
-    if (!c || typeof c !== "object") continue;
-    const t = new Date(c.due).getTime();
-    if (!Number.isNaN(t) && t <= now.getTime()) n++;
-  }
-  return n;
-}
-function normalizeAnswerValue(value) {
-  return [...new Set(value.toUpperCase().replace(/[^A-D]/g, ""))].sort().join("");
-}
-
 // src/progressModal.ts
 var import_obsidian5 = require("obsidian");
-var ProgressModal = class extends import_obsidian5.Modal {
+var _ProgressModal = class _ProgressModal extends import_obsidian5.Modal {
   constructor(app, opts) {
     super(app);
     this.opts = opts;
     this.titleEl.setText("\u5237\u9898\u8FDB\u5EA6");
   }
   onOpen() {
-    var _a;
     this.contentEl.empty();
     const { questions, answeredQuestions, memoryCards, currentId } = this.opts;
     const now = (/* @__PURE__ */ new Date()).getTime();
@@ -1884,10 +1930,9 @@ var ProgressModal = class extends import_obsidian5.Modal {
       2: "\u590D\u4E60",
       3: "\u518D\u5B66\u4E60"
     };
-    const frag = createFragment();
+    const normCache = /* @__PURE__ */ new Map();
     let answered = 0;
     let correct = 0;
-    const normCache = /* @__PURE__ */ new Map();
     for (const q of questions) {
       const a = answeredQuestions[q.id];
       if (a !== void 0) {
@@ -1901,9 +1946,18 @@ var ProgressModal = class extends import_obsidian5.Modal {
         }
       }
     }
-    for (const q of questions) {
+    summary.setText(
+      `\u5171 ${questions.length} \u9898 \xB7 \u5DF2\u7B54 ${answered} \xB7 \u672A\u7B54 ${questions.length - answered} \xB7 \u7B54\u5BF9 ${correct} \xB7 \u7B54\u9519 ${answered - correct}` + (answered > 0 ? ` \xB7 \u6B63\u786E\u7387 ${(correct / answered * 100).toFixed(1)}%` : "")
+    );
+    if (questions.length === 0) {
+      list.createEl("p", { text: "\u5F53\u524D\u5217\u8868\u6CA1\u6709\u9898\u76EE", cls: "csv-quiz-empty" });
+      return;
+    }
+    const renderRow = (q) => {
+      var _a;
       const a = answeredQuestions[q.id];
-      const row = frag.createEl("div", { cls: "csv-quiz-progress-row" });
+      const row = createEl("div", { cls: "csv-quiz-progress-row" });
+      row.dataset.id = q.id;
       if (q.id === currentId) row.addClass("csv-quiz-progress-row-current");
       row.createEl("span", { text: q.id, cls: "csv-quiz-progress-id" });
       const stem = q.stem.replace(/[#*`_~[\]()>!-]/g, "").trim();
@@ -1949,28 +2003,94 @@ var ProgressModal = class extends import_obsidian5.Modal {
           cls: "csv-quiz-progress-flags"
         });
       }
-      row.addEventListener("click", () => {
-        this.close();
-        this.opts.onJump(q.id);
-      });
-    }
-    if (questions.length === 0) {
-      list.createEl("p", { text: "\u5F53\u524D\u5217\u8868\u6CA1\u6709\u9898\u76EE", cls: "csv-quiz-empty" });
-    }
-    list.appendChild(frag);
-    summary.setText(
-      `\u5171 ${questions.length} \u9898 \xB7 \u5DF2\u7B54 ${answered} \xB7 \u672A\u7B54 ${questions.length - answered} \xB7 \u7B54\u5BF9 ${correct} \xB7 \u7B54\u9519 ${answered - correct}` + (answered > 0 ? ` \xB7 \u6B63\u786E\u7387 ${(correct / answered * 100).toFixed(1)}%` : "")
-    );
-    if (currentId) {
-      const currentRow = list.querySelector(".csv-quiz-progress-row-current");
-      if (currentRow) {
-        window.setTimeout(() => {
-          currentRow.scrollIntoView({ block: "center", behavior: "auto" });
-        }, 80);
+      return row;
+    };
+    const topSpacer = list.createDiv();
+    const viewport = list.createDiv();
+    const bottomSpacer = list.createDiv();
+    const probe = renderRow(questions[0]);
+    viewport.appendChild(probe);
+    let rowHeight = probe.offsetHeight || _ProgressModal.FALLBACK_ROW_HEIGHT;
+    const total = questions.length;
+    let renderedStart = 0;
+    let renderedEnd = 0;
+    const renderWindow = (force) => {
+      const firstVisible = Math.max(
+        0,
+        Math.floor(list.scrollTop / rowHeight) - _ProgressModal.BUFFER_ROWS
+      );
+      const visibleCount = Math.ceil(list.clientHeight / rowHeight) + _ProgressModal.BUFFER_ROWS * 2;
+      const start = Math.min(firstVisible, Math.max(0, total - 1));
+      const end = Math.min(total, start + Math.max(1, visibleCount));
+      if (!force && start >= renderedStart && end <= renderedEnd) return;
+      renderedStart = start;
+      renderedEnd = end;
+      viewport.empty();
+      const frag = createFragment();
+      for (let i = start; i < end; i++) {
+        frag.appendChild(renderRow(questions[i]));
       }
-    }
+      viewport.appendChild(frag);
+      topSpacer.style.height = `${start * rowHeight}px`;
+      bottomSpacer.style.height = `${(total - end) * rowHeight}px`;
+    };
+    viewport.addEventListener("click", (e) => {
+      var _a;
+      const row = (_a = e.target) == null ? void 0 : _a.closest(
+        ".csv-quiz-progress-row"
+      );
+      const id = row == null ? void 0 : row.dataset.id;
+      if (!id) return;
+      this.close();
+      this.opts.onJump(id);
+    });
+    const scrollToCurrent = () => {
+      if (!currentId) return;
+      const idx = questions.findIndex((q) => q.id === currentId);
+      if (idx >= 0) {
+        list.scrollTop = Math.max(
+          0,
+          idx * rowHeight - Math.floor(list.clientHeight / 2)
+        );
+      }
+    };
+    renderWindow(true);
+    scrollToCurrent();
+    renderWindow(true);
+    list.addEventListener("scroll", () => renderWindow(false), {
+      passive: true
+    });
+    const settle = (retries) => {
+      window.requestAnimationFrame(() => {
+        var _a;
+        const first = viewport.querySelector(
+          ".csv-quiz-progress-row"
+        );
+        const measured = (_a = first == null ? void 0 : first.offsetHeight) != null ? _a : 0;
+        if (measured > 0 && measured !== rowHeight) {
+          rowHeight = measured;
+          scrollToCurrent();
+        }
+        renderWindow(true);
+        if (measured === 0 && retries > 0) settle(retries - 1);
+      });
+    };
+    settle(3);
+    const onResize = () => {
+      if (!list.isConnected) {
+        window.removeEventListener("resize", onResize);
+        return;
+      }
+      renderWindow(true);
+    };
+    window.addEventListener("resize", onResize);
   }
 };
+/** 视口上下各多渲染的缓冲行数（滚动时窗口漂出缓冲区才重建，降低重建频率） */
+_ProgressModal.BUFFER_ROWS = 10;
+/** 行高实测失败（onOpen 时 modal 尚未布局）的回退值 px */
+_ProgressModal.FALLBACK_ROW_HEIGHT = 32;
+var ProgressModal = _ProgressModal;
 
 // node_modules/ts-fsrs/dist/index.mjs
 var FSRSError = class _FSRSError extends Error {
@@ -4560,9 +4680,11 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     this.applyFiltersAndReset();
   }
   /** 随机练习：按当前筛选条件筛出未答题，随机取最多 100 道作为练习集（不足自适应）。 */
-  enableRandomPractice() {
+  async enableRandomPractice() {
     var _a, _b;
     if (this.practiceActive || this.memoryEnabling) return;
+    await this.saveCurrentEdit();
+    if (this.isClosed) return;
     if (this.memoryActive) this.exitMemoryPractice();
     const pool = this.applyFiltersTo(this.orderedQuestions);
     const unanswered = pool.filter(
@@ -4619,7 +4741,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       this.saveState();
       new import_obsidian6.Notice("\u5DF2\u9000\u51FA\u968F\u673A\u7EC3\u4E60");
     } else {
-      this.enableRandomPractice();
+      void this.enableRandomPractice();
     }
   }
   /**
@@ -4635,6 +4757,8 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     if (this.memoryActive || this.memoryEnabling) return;
     this.memoryEnabling = true;
     try {
+      await this.saveCurrentEdit();
+      if (this.isClosed) return;
       if (this.practiceActive) this.exitRandomPractice();
       if (!this.memoryInitialized && Object.keys(this.memoryCards).length === 0 && Object.keys(this.answeredQuestions).length > 0) {
         const modal = new ChoiceModal(this.app, {
@@ -4879,7 +5003,14 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       this.exitMemoryPractice();
     }
     this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
-    this.currentIndex = this.filteredQuestions.length > 0 ? 0 : -1;
+    const firstUnanswered = this.filteredQuestions.findIndex(
+      (q) => this.answeredQuestions[q.id] === void 0
+    );
+    if (this.filteredQuestions.length === 0) {
+      this.currentIndex = -1;
+    } else {
+      this.currentIndex = firstUnanswered >= 0 ? firstUnanswered : 0;
+    }
     this.currentShuffledQId = null;
     this.cancelAutoNext();
     this.renderQuestion();
@@ -5109,6 +5240,10 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     if (this.answering || this.showingAnswer) return;
     const origQuestion = this.filteredQuestions[this.currentIndex];
     if (!origQuestion) return;
+    if (this.selectedOptions.length === 0) {
+      new import_obsidian6.Notice("\u8BF7\u5148\u9009\u62E9\u7B54\u6848");
+      return;
+    }
     this.answering = true;
     await this.saveCurrentEdit();
     let question = this.filteredQuestions[this.currentIndex];
@@ -5437,7 +5572,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     }
   }
   async openTagPicker(question) {
-    var _a;
+    var _a, _b;
     await this.saveCurrentEdit();
     const allTags = getUniqueTags(this.allQuestions);
     const currentTags = question.tags || "";
@@ -5447,22 +5582,8 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     if (result !== null) {
       question.tags = result;
       this.saveQuestionMeta(question, ["tags"]);
-      const currentDisplayedId = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id;
-      this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
-      if (currentDisplayedId) {
-        const newIndex = this.filteredQuestions.findIndex(
-          (q) => q.id === currentDisplayedId
-        );
-        if (newIndex >= 0) {
-          this.currentIndex = newIndex;
-        } else if (this.filteredQuestions.length > 0) {
-          this.currentIndex = 0;
-        } else {
-          this.currentIndex = -1;
-        }
-      } else {
-        this.currentIndex = this.filteredQuestions.length > 0 ? 0 : -1;
-      }
+      const currentDisplayedId = (_b = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id) != null ? _b : question.id;
+      this.reFilterAndLocate(currentDisplayedId);
       this.saveState();
       this.populateTagChips();
       if (this.filteredQuestions.length > 0) {
@@ -5722,7 +5843,9 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       text: "\u4E0B\u4E00\u4E2A\u672A\u7B54\u9898",
       cls: "csv-quiz-btn csv-quiz-btn-sm"
     });
-    nextUnansweredBtn.addEventListener("click", () => this.goToNextUnanswered());
+    nextUnansweredBtn.addEventListener("click", () => {
+      void this.goToNextUnanswered();
+    });
     const resetBtn = bottomRow.createEl("button", {
       text: "\u91CD\u7F6E\u7B54\u9898\u8FDB\u5EA6",
       cls: "csv-quiz-btn csv-quiz-btn-sm"
@@ -5736,24 +5859,31 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       cls: "csv-quiz-q-id-bottom"
     });
   }
-  goToNextUnanswered() {
-    if (this.filteredQuestions.length === 0) return;
-    for (let i = this.currentIndex + 1; i < this.filteredQuestions.length; i++) {
-      const id = this.filteredQuestions[i].id;
-      const unanswered = this.practiceActive || this.memoryActive ? !this.practiceAnswered.has(id) : this.answeredQuestions[id] === void 0;
-      if (unanswered) {
-        this.currentIndex = i;
-        this.currentShuffledQId = null;
-        this.cancelAutoNext();
-        this.renderQuestion();
-        this.saveState();
-        return;
+  async goToNextUnanswered() {
+    if (this.isClosed || this.navigating) return;
+    this.navigating = true;
+    try {
+      await this.saveCurrentEdit();
+      if (this.filteredQuestions.length === 0) return;
+      for (let i = this.currentIndex + 1; i < this.filteredQuestions.length; i++) {
+        const id = this.filteredQuestions[i].id;
+        const unanswered = this.practiceActive || this.memoryActive ? !this.practiceAnswered.has(id) : this.answeredQuestions[id] === void 0;
+        if (unanswered) {
+          this.currentIndex = i;
+          this.currentShuffledQId = null;
+          this.cancelAutoNext();
+          this.renderQuestion();
+          this.saveState();
+          return;
+        }
       }
-    }
-    if ((this.practiceActive || this.memoryActive) && this.filteredQuestions.every((q) => this.practiceAnswered.has(q.id))) {
-      new import_obsidian6.Notice(`\u7EC3\u4E60\u5B8C\u6210\uFF01\u5171 ${this.filteredQuestions.length} \u9898`);
-    } else {
-      new import_obsidian6.Notice("\u6CA1\u6709\u66F4\u591A\u672A\u7B54\u9898");
+      if ((this.practiceActive || this.memoryActive) && this.filteredQuestions.every((q) => this.practiceAnswered.has(q.id))) {
+        new import_obsidian6.Notice(`\u7EC3\u4E60\u5B8C\u6210\uFF01\u5171 ${this.filteredQuestions.length} \u9898`);
+      } else {
+        new import_obsidian6.Notice("\u6CA1\u6709\u66F4\u591A\u672A\u7B54\u9898");
+      }
+    } finally {
+      this.navigating = false;
     }
   }
   /** 同步 data-ignore-swipe 属性（Obsidian 手势识别器对该区域跳过）；设置页开关变更后即时调用。 */
@@ -5838,16 +5968,19 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       memoryCards: this.memoryCards,
       currentId: (_b = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id) != null ? _b : null,
       onJump: (id) => {
-        const idx = this.filteredQuestions.findIndex((q) => q.id === id);
-        if (idx < 0) {
-          new import_obsidian6.Notice("\u8BE5\u9898\u4E0D\u5728\u5F53\u524D\u5217\u8868");
-          return;
-        }
-        this.currentIndex = idx;
-        this.currentShuffledQId = null;
-        this.cancelAutoNext();
-        this.renderQuestion();
-        this.saveState();
+        void (async () => {
+          await this.saveCurrentEdit();
+          const idx = this.filteredQuestions.findIndex((q) => q.id === id);
+          if (idx < 0) {
+            new import_obsidian6.Notice("\u8BE5\u9898\u4E0D\u5728\u5F53\u524D\u5217\u8868");
+            return;
+          }
+          this.currentIndex = idx;
+          this.currentShuffledQId = null;
+          this.cancelAutoNext();
+          this.renderQuestion();
+          this.saveState();
+        })();
       }
     });
     modal.onClose = () => {
@@ -5977,7 +6110,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
             throw new Error(`CSV \u4E2D\u672A\u627E\u5230\u5BF9\u5E94\u9898\u53F7: ${id}`);
           }
           const row = dataRows[idx];
-          if (row.length < 14) row.length = 14;
+          while (row.length < 15) row.push("");
           row[7] = question.tags;
           row[8] = question.category1;
           row[9] = question.category2;
@@ -6315,15 +6448,16 @@ var StateManager = class {
     this.writeQueue = new StateWriteQueue(plugin);
     this.sidecarQueue = new SidecarWriteQueue(this.vault);
   }
-  async loadPluginData(currentSettings) {
+  /**
+   * 读取 data.json 中的旧版 quizState（兼容模式内存态），字段级归一化后设置为
+   * currentState，返回归一化结果（null = 无旧状态）。设置不在此处理——加载与
+   * 净化由 main.loadSettings 负责（旧实现把未净化的磁盘 settings 覆盖进合并
+   * 结果，容易被误当作已应用的设置使用）。
+   */
+  async loadLegacyQuizState() {
     const data = await this.plugin.loadData() || {};
-    const settings = {
-      ...currentSettings,
-      ...data.settings || {}
-    };
-    const quizState = this.normalizeQuizState(data.quizState);
-    this.currentState = quizState;
-    return { settings, quizState };
+    this.currentState = this.normalizeQuizState(data.quizState);
+    return this.currentState;
   }
   /**
    * 对磁盘上读取的 quizState 做字段级归一化防御：类型错误的字段
@@ -6340,7 +6474,7 @@ var StateManager = class {
     const toStr = (v) => typeof v === "string" ? v : "";
     const toStrArray = (v) => Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
     const toRecord = (v) => v && typeof v === "object" ? v : {};
-    const memoryCards = r.memoryCards === void 0 ? void 0 : r.memoryCards && typeof r.memoryCards === "object" ? r.memoryCards : {};
+    const memoryCards = r.memoryCards === void 0 ? void 0 : normalizeMemoryCards(r.memoryCards);
     return {
       csvPath: toStr(r.csvPath),
       currentIndex: toNumber(r.currentIndex),
@@ -6736,7 +6870,7 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
     this.stateManager = new StateManager(this);
     this.csvWriteQueue = new CSVWriteQueue(this.app);
     await this.loadSettings();
-    await this.stateManager.loadPluginData(this.settings);
+    await this.stateManager.loadLegacyQuizState();
     try {
       const result = await this.stateManager.migrateLegacyState(
         this.settings.csvPath,
@@ -7015,6 +7149,10 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
     if (view) {
       await view.resetDailyNewQuota();
     } else {
+      if (!await this.ensureSidecarLoaded()) {
+        new import_obsidian8.Notice("\u65E0\u6CD5\u52A0\u8F7D\u9898\u5E93\u72B6\u6001\uFF0C\u8BF7\u5148\u6253\u5F00\u5237\u9898\u9762\u677F");
+        return;
+      }
       const state = this.stateManager.getState();
       if (state) {
         state.memoryNewDate = "";

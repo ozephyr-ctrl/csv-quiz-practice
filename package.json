@@ -1,21 +1,23 @@
 {
   "name": "csv-quiz-practice",
-  "version": "3.1.6",
+  "version": "3.1.7",
   "description": "Obsidian plugin for CSV-based quiz practice",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-    "lint": "tsc -noEmit -skipLibCheck"
+    "lint": "tsc -noEmit -skipLibCheck",
+    "test": "vitest run"
   },
   "devDependencies": {
-    "@types/node": "^16.11.6",
+    "@types/node": "^20.19.43",
     "@types/papaparse": "^5.3.14",
     "esbuild": "^0.28.1",
     "obsidian": "latest",
     "papaparse": "^5.4.1",
     "tslib": "^2.3.1",
-    "typescript": "^4.7.4"
+    "typescript": "^4.7.4",
+    "vitest": "^4.1.11"
   },
   "dependencies": {
     "ts-fsrs": "^5.4.1"

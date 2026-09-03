@@ -1,5 +1,6 @@
 import { Notice, Vault } from "obsidian";
 import { MemoryCard } from "./types";
+import { normalizeMemoryCards } from "./utils";
 
 /** sidecar 中 B 类覆盖 + C 类状态的合并存储层（同层）。键为题 id。 */
 export interface SidecarMeta {
@@ -196,7 +197,7 @@ export async function backupSidecar(
  * 类型错误进入运行时崩溃。可选字段缺失保留 undefined。
  * JSON.parse 成功但结构不合法（version 非 1 / 根非对象）返回 null。
  */
-function normalizeSidecar(raw: unknown): SidecarData | null {
+export function normalizeSidecar(raw: unknown): SidecarData | null {
   if (raw === null || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
   if (r.version !== 1) return null;
@@ -241,13 +242,12 @@ function normalizeSidecar(raw: unknown): SidecarData | null {
       : {};
 
   // 记忆卡片在 state 层（写入端 stateToSidecar 输出 state.memoryCards），
-  // 从顶层 r.memoryCards 读取会恒为 undefined 导致卡片读回丢失
+  // 从顶层 r.memoryCards 读取会恒为 undefined 导致卡片读回丢失；
+  // 逐卡片字段级归一化，类型错误的损坏卡片整卡剔除（题目回到新题状态）
   const memoryCards =
     s.memoryCards === undefined
       ? undefined
-      : s.memoryCards && typeof s.memoryCards === "object"
-        ? (s.memoryCards as Record<string, MemoryCard>)
-        : {};
+      : normalizeMemoryCards(s.memoryCards);
 
   return {
     version: 1,
