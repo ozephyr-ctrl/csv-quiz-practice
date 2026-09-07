@@ -584,9 +584,10 @@ export class QuizView extends ItemView {
         return;
       }
 
-      // 合并改变了 answeredQuestions 集合：按当前题目重算对错统计
-      // （计数由内存状态流向 applyRestore，需在状态应用前完成）
-      this.recomputeAnswerStats();
+      // 合并改变了 answeredQuestions 集合：只为本批新并入的答案补计对错统计
+      // （在内存状态流向 applyRestore 前完成）。不能整体重算——统计口径是累计
+      // 作答事件数（同一题重刷每次 +1），按唯一题重算会篡改历史正确率。
+      this.addStatsForAnswers(outcome.addedAnswerIds ?? []);
 
       const parts = [
         `已合并 ${outcome.mergedSources} 个冲突副本`,
@@ -602,24 +603,30 @@ export class QuizView extends ItemView {
     }
   }
 
-  /** 按当前题目集与答题记录重算 correct/wrong 计数（冲突合并后统计口径对齐）。 */
-  private recomputeAnswerStats(): void {
+  /**
+   * 为本次合并新并入的答题记录补计对错统计（冲突合并后口径对齐）。
+   * 统计口径为累计作答事件数：每条并入记录按其最终答案判一次对错并 +1，
+   * 与"该答案在原设备作答时本应累计"等价。题库中已不存在的 id 跳过
+   * （记录保留但无法判分）；答案列归一化后为空串的脏题不计（从未可判分）。
+   */
+  private addStatsForAnswers(ids: string[]): void {
+    if (ids.length === 0) return;
     const st = this.stateManager.getState();
     if (!st) return;
     const byId = new Map(this.allQuestions.map((q) => [q.id, q]));
-    let correct = 0;
-    let wrong = 0;
-    for (const [id, ans] of Object.entries(st.answeredQuestions)) {
+    for (const id of ids) {
       const q = byId.get(id);
       if (!q) continue;
-      if (normalizeAnswerValue(ans) === normalizeAnswerValue(q.answer)) {
-        correct++;
+      const answerNorm = normalizeAnswerValue(q.answer);
+      if (answerNorm === "") continue; // 脏答案题从不判分（空选不判分口径）
+      const isCorrect =
+        normalizeAnswerValue(st.answeredQuestions[id] ?? "") === answerNorm;
+      if (isCorrect) {
+        st.correctCount++;
       } else {
-        wrong++;
+        st.wrongCount++;
       }
     }
-    st.correctCount = correct;
-    st.wrongCount = wrong;
   }
 
   /** 把 sidecar meta 覆盖层的 B/C 类字段合并到 allQuestions（meta 优先，永久遮蔽语义）。 */

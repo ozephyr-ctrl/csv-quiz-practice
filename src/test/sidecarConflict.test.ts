@@ -74,7 +74,7 @@ function baseSidecar(): SidecarData {
 describe("mergeSidecarData", () => {
   const BASE_TS = 1_000_000;
 
-  it("answered 取并集，同 key 以 base 为准，addedAnswers 只计副本补入", () => {
+  it("answered 取并集，同 key 以 base 为准，addedAnswers/addedAnswerIds 只计副本补入", () => {
     const conflict: SidecarConflictSource = {
       path: "x",
       tsMs: BASE_TS - 100,
@@ -89,6 +89,7 @@ describe("mergeSidecarData", () => {
     const res = mergeSidecarData(baseSidecar(), BASE_TS, [conflict]);
     expect(res.data.state.answeredQuestions).toEqual({ q1: "A", q2: "", q3: "C" });
     expect(res.addedAnswers).toBe(1);
+    expect(res.addedAnswerIds).toEqual(["q3"]);
     expect(res.mergedSources).toBe(1);
   });
 
@@ -177,6 +178,7 @@ describe("mergeSidecarData", () => {
       once.data.state.answeredQuestions
     );
     expect(twice.addedAnswers).toBe(0);
+    expect(twice.addedAnswerIds).toEqual([]);
   });
 
   it("双方都无记忆卡片时保持 undefined（不写入空对象）", () => {

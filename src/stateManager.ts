@@ -115,6 +115,8 @@ export interface SidecarMergeOutcome {
   mergedSources?: number;
   /** 并入的、当前状态缺失的答题记录条数。 */
   addedAnswers?: number;
+  /** 本次并入的答题记录对应题 id（供调用方按累计口径补计对错统计）。 */
+  addedAnswerIds?: string[];
   /** 读取失败（损坏/结构非法）被跳过的副本数。 */
   unreadable?: number;
   /** 成功归档为 .merged 的副本数。 */
@@ -660,7 +662,8 @@ export class StateManager {
    * 合并语义见 mergeSidecarData：标量保留当前，answered/meta/memoryCards 取并集（相同条目
    * 以时间戳/当前进度为准）。currentState 的 answeredQuestions/memoryCards 原地更新内容
    * （保持对象引用，调用方持有的状态对象同步可见）；currentMeta 整体替换为合并结果。
-   * 正确/错误计数不含在合并内（需题目数据比对答案，由调用方重算）。
+   * 正确/错误计数不在合并内改写（统计口径是累计作答事件数，整体重算会篡改历史；
+   * 由调用方按 addedAnswerIds 为新并入的答案逐条补计）。
    */
   async mergeSidecarConflicts(): Promise<SidecarMergeOutcome> {
     if (this.contentPath === null || this.currentState === null) {
@@ -742,6 +745,7 @@ export class StateManager {
       status: "merged",
       mergedSources: merge.mergedSources,
       addedAnswers: merge.addedAnswers,
+      addedAnswerIds: merge.addedAnswerIds,
       unreadable,
       archived,
       archiveFailed,

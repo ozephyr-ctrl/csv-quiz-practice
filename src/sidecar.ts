@@ -477,6 +477,8 @@ export interface SidecarMergeResult {
   data: SidecarData;
   /** 并入 base 中原本缺失的答题记录条数。 */
   addedAnswers: number;
+  /** 本次并入的答题记录对应题 id（供调用方按累计口径补计对错统计）。 */
+  addedAnswerIds: string[];
   /** 实际参与合并的冲突副本数。 */
   mergedSources: number;
 }
@@ -521,15 +523,17 @@ export function mergeSidecarData(
 
   // answered：并集，同 key 后写覆盖（base 最后处理 → base 优先）
   const answered: Record<string, string> = {};
-  let addedAnswers = 0;
+  const addedAnswerIds: string[] = [];
   const baseAnswered = base.state.answeredQuestions;
   for (let i = 0; i < orderedSources.length; i++) {
     const src = orderedSources[i];
     const isBase = i === orderedSources.length - 1;
     for (const [id, ans] of Object.entries(src.state.answeredQuestions)) {
       if (typeof ans !== "string") continue;
-      // 只统计"由冲突副本首次补入且 base 缺失"的 key
-      if (!isBase && !(id in answered) && !(id in baseAnswered)) addedAnswers++;
+      // 只记录"由冲突副本首次补入且 base 缺失"的 key（调用方据此补计统计）
+      if (!isBase && !(id in answered) && !(id in baseAnswered)) {
+        addedAnswerIds.push(id);
+      }
       answered[id] = ans;
     }
   }
@@ -596,5 +600,10 @@ export function mergeSidecarData(
         : cards,
   };
 
-  return { data: { version: 1, meta, state }, addedAnswers, mergedSources: others.length };
+  return {
+    data: { version: 1, meta, state },
+    addedAnswers: addedAnswerIds.length,
+    addedAnswerIds,
+    mergedSources: others.length,
+  };
 }

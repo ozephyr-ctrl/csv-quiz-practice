@@ -1164,14 +1164,16 @@ function mergeSidecarData(base, baseTsMs, others) {
   const orderedSources = others.slice().sort((a, b) => a.tsMs - b.tsMs).map((src) => ({ meta: src.data.meta, state: src.data.state, tsMs: src.tsMs }));
   orderedSources.push({ meta: base.meta, state: base.state, tsMs: baseTsMs });
   const answered = {};
-  let addedAnswers = 0;
+  const addedAnswerIds = [];
   const baseAnswered = base.state.answeredQuestions;
   for (let i = 0; i < orderedSources.length; i++) {
     const src = orderedSources[i];
     const isBase = i === orderedSources.length - 1;
     for (const [id, ans] of Object.entries(src.state.answeredQuestions)) {
       if (typeof ans !== "string") continue;
-      if (!isBase && !(id in answered) && !(id in baseAnswered)) addedAnswers++;
+      if (!isBase && !(id in answered) && !(id in baseAnswered)) {
+        addedAnswerIds.push(id);
+      }
       answered[id] = ans;
     }
   }
@@ -1222,7 +1224,12 @@ function mergeSidecarData(base, baseTsMs, others) {
     // 双方都无卡片时保持 undefined（不写入空对象污染旧格式兼容）
     memoryCards: base.state.memoryCards === void 0 && Object.keys(cards).length === 0 ? void 0 : cards
   };
-  return { data: { version: 1, meta, state }, addedAnswers, mergedSources: others.length };
+  return {
+    data: { version: 1, meta, state },
+    addedAnswers: addedAnswerIds.length,
+    addedAnswerIds,
+    mergedSources: others.length
+  };
 }
 
 // src/settings.ts
@@ -4444,6 +4451,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
    * epoch 用于在弹窗/写盘 await 期间丢弃过期流程（对齐其它加载路径的 M2 守卫）。
    */
   async handleSidecarConflicts(epoch) {
+    var _a;
     try {
       const conflicts = await this.stateManager.detectSidecarConflicts();
       if (this.isClosed || epoch !== this.loadEpoch) return;
@@ -4462,7 +4470,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         }
         return;
       }
-      this.recomputeAnswerStats();
+      this.addStatsForAnswers((_a = outcome.addedAnswerIds) != null ? _a : []);
       const parts = [
         `\u5DF2\u5408\u5E76 ${outcome.mergedSources} \u4E2A\u51B2\u7A81\u526F\u672C`,
         `\u5E76\u5165 ${outcome.addedAnswers} \u6761\u7B54\u9898\u8BB0\u5F55`
@@ -4475,24 +4483,30 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       new import_obsidian6.Notice("\u5408\u5E76\u540C\u6B65\u51B2\u7A81\u526F\u672C\u5931\u8D25\uFF0C\u5DF2\u8DF3\u8FC7\uFF08\u4E0D\u5F71\u54CD\u5F53\u524D\u8FDB\u5EA6\uFF09");
     }
   }
-  /** 按当前题目集与答题记录重算 correct/wrong 计数（冲突合并后统计口径对齐）。 */
-  recomputeAnswerStats() {
+  /**
+   * 为本次合并新并入的答题记录补计对错统计（冲突合并后口径对齐）。
+   * 统计口径为累计作答事件数：每条并入记录按其最终答案判一次对错并 +1，
+   * 与"该答案在原设备作答时本应累计"等价。题库中已不存在的 id 跳过
+   * （记录保留但无法判分）；答案列归一化后为空串的脏题不计（从未可判分）。
+   */
+  addStatsForAnswers(ids) {
+    var _a;
+    if (ids.length === 0) return;
     const st = this.stateManager.getState();
     if (!st) return;
     const byId = new Map(this.allQuestions.map((q) => [q.id, q]));
-    let correct = 0;
-    let wrong = 0;
-    for (const [id, ans] of Object.entries(st.answeredQuestions)) {
+    for (const id of ids) {
       const q = byId.get(id);
       if (!q) continue;
-      if (normalizeAnswerValue(ans) === normalizeAnswerValue(q.answer)) {
-        correct++;
+      const answerNorm = normalizeAnswerValue(q.answer);
+      if (answerNorm === "") continue;
+      const isCorrect = normalizeAnswerValue((_a = st.answeredQuestions[id]) != null ? _a : "") === answerNorm;
+      if (isCorrect) {
+        st.correctCount++;
       } else {
-        wrong++;
+        st.wrongCount++;
       }
     }
-    st.correctCount = correct;
-    st.wrongCount = wrong;
   }
   /** 把 sidecar meta 覆盖层的 B/C 类字段合并到 allQuestions（meta 优先，永久遮蔽语义）。 */
   applyMetaToQuestions() {
@@ -7054,7 +7068,8 @@ var StateManager = class {
    * 合并语义见 mergeSidecarData：标量保留当前，answered/meta/memoryCards 取并集（相同条目
    * 以时间戳/当前进度为准）。currentState 的 answeredQuestions/memoryCards 原地更新内容
    * （保持对象引用，调用方持有的状态对象同步可见）；currentMeta 整体替换为合并结果。
-   * 正确/错误计数不含在合并内（需题目数据比对答案，由调用方重算）。
+   * 正确/错误计数不在合并内改写（统计口径是累计作答事件数，整体重算会篡改历史；
+   * 由调用方按 addedAnswerIds 为新并入的答案逐条补计）。
    */
   async mergeSidecarConflicts() {
     var _a, _b;
@@ -7124,6 +7139,7 @@ var StateManager = class {
       status: "merged",
       mergedSources: merge.mergedSources,
       addedAnswers: merge.addedAnswers,
+      addedAnswerIds: merge.addedAnswerIds,
       unreadable,
       archived,
       archiveFailed
