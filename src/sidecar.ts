@@ -12,6 +12,8 @@ export interface SidecarMeta {
   favorite?: string;
   mastered?: string;
   wrong?: string;
+  /** 该条目最近一次写入时间（epoch ms）。供同步冲突合并时判定字段新旧；旧文件缺失。 */
+  ts?: number;
 }
 
 /** sidecar 的 state 层（C' 使用痕迹），与现有 QuizSessionState 字段对应（见 types.ts）。 */
@@ -41,6 +43,8 @@ export interface SidecarState {
   memoryPendingNew?: string[];
   /** 记忆练习是否已初始化过（至少判分一次）；仅删除记忆卡片时保留，避免重复触发首次启用重置提示。旧进度无此字段。 */
   memoryInitialized?: boolean;
+  /** 该 sidecar 最近一次写盘时间（epoch ms）。供同步冲突合并时判定文件新旧；旧文件缺失。 */
+  updatedAt?: number;
 }
 
 /** sidecar 文件完整结构（v1）。注意：无 quizId 字段（关联靠同目录同名文件约定）。 */
@@ -274,17 +278,21 @@ export function normalizeSidecar(raw: unknown): SidecarData | null {
       memoryNewCountToday: toOptNumber(s.memoryNewCountToday),
       memoryPendingNew: toOptStrArray(s.memoryPendingNew),
       memoryInitialized: toOptBool(s.memoryInitialized),
+      updatedAt: toOptNumber(s.updatedAt),
     },
   };
 }
 
-/** meta 单条归一化：仅保留字符串类型的可选字段，其余字段/类型丢弃。 */
+/** meta 的字符串数据字段名（ts 是时间戳，不属于数据字段）。 */
+export type MetaStringField = Exclude<keyof SidecarMeta, "ts">;
+
+/** meta 单条归一化：仅保留字符串类型的可选字段，其余字段/类型丢弃。ts 数值字段单独保留。 */
 function normalizeMeta(raw: Record<string, unknown>): SidecarMeta {
   const toStrOpt = (v: unknown): string | undefined =>
     typeof v === "string" ? v : undefined;
   const result: SidecarMeta = {};
   // 逐字段校验，可选字段缺失保留 undefined（即不写入 result）
-  const candidate: [keyof SidecarMeta, string | undefined][] = [
+  const candidate: [MetaStringField, string | undefined][] = [
     ["repeat", toStrOpt(raw.repeat)],
     ["tags", toStrOpt(raw.tags)],
     ["category1", toStrOpt(raw.category1)],
@@ -296,6 +304,14 @@ function normalizeMeta(raw: Record<string, unknown>): SidecarMeta {
   ];
   for (const [key, value] of candidate) {
     if (value !== undefined) result[key] = value;
+  }
+  // 冲突合并时间戳：有限非负数值才保留
+  if (
+    typeof raw.ts === "number" &&
+    Number.isFinite(raw.ts) &&
+    raw.ts >= 0
+  ) {
+    result.ts = raw.ts;
   }
   return result;
 }
@@ -399,4 +415,186 @@ export function createBackupTimer(): BackupTimer {
       }
     },
   };
+}
+
+/* ===================== 同步冲突副本：检测与合并 ===================== */
+
+/** 冲突副本归档后缀（iCloud 等同步服务产生的冲突副本合并后改名保留，不删除）。 */
+export const SIDECAR_MERGED_SUFFIX = ".merged";
+
+/** 正则元字符转义（文件名进入 RegExp 前必须转义）。 */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * 从目录文件列表中找出 contentPath 的 sidecar 冲突副本。覆盖两类命名（S = 一个或多个序号组）：
+ * - sidecar 自身被冲突：`<contentPath>.sidecar<S>.json`（macOS " 2"、Windows "(1)"，含嵌套 "(2)(1)"）
+ * - 主文件被冲突后其 sidecar：`<contentPath><S>.sidecar.json`（如 "题库.cqv 2.sidecar.json"）
+ * macOS 空格序号从 2 起（" 1" 视为用户命名），Windows 括号序号从 1 起。
+ * 返回匹配的完整路径列表（不含规范 sidecar，也不含 .tmp/.bak/.merged 归档）。
+ */
+export function findSidecarConflictPaths(
+  allFiles: string[],
+  contentPath: string
+): string[] {
+  const suffixGroup = "((?: \\d+| ?\\(\\d+\\))+)?";
+  const re = new RegExp(
+    "^" +
+      escapeRegExp(contentPath) +
+      suffixGroup +
+      "\\.sidecar" +
+      suffixGroup +
+      "\\.json$"
+  );
+  const result: string[] = [];
+  for (const file of allFiles) {
+    const m = re.exec(file);
+    if (!m) continue;
+    const mainSuffix = m[1];
+    const sidecarSuffix = m[2];
+    if (!mainSuffix && !sidecarSuffix) continue; // 规范 sidecar 本身
+    // 校验序号：空格组必须 ≥2（排除用户命名 "xxx 1"）；括号组 ≥1 即可（Windows iCloud 从 (1) 起）
+    const spaceNums: string[] = [
+      ...(mainSuffix?.match(/ \d+/g) ?? []),
+      ...(sidecarSuffix?.match(/ \d+/g) ?? []),
+    ];
+    if (spaceNums.some((n) => Number(n.trim()) < 2)) continue;
+    result.push(file);
+  }
+  return result;
+}
+
+/** 参与合并的冲突副本源：归一化数据 + 有效写入时间（state.updatedAt ?? 文件 mtime）。 */
+export interface SidecarConflictSource {
+  path: string;
+  data: SidecarData;
+  tsMs: number;
+}
+
+/** mergeSidecarData 的结果：合并数据 + 诊断计数。 */
+export interface SidecarMergeResult {
+  data: SidecarData;
+  /** 并入 base 中原本缺失的答题记录条数。 */
+  addedAnswers: number;
+  /** 实际参与合并的冲突副本数。 */
+  mergedSources: number;
+}
+
+/** meta 条目的可合并字符串字段（ts 是时间戳，不参与字段合并）。 */
+const META_MERGE_FIELDS: MetaStringField[] = [
+  "repeat",
+  "tags",
+  "category1",
+  "category2",
+  "category3",
+  "favorite",
+  "mastered",
+  "wrong",
+];
+
+/**
+ * 把冲突副本并入 base（当前权威状态），产出合并后的完整 sidecar 数据。合并语义：
+ * - state 标量（位置/筛选/统计/displayOrder/memory 配额）整体保留 base —— 会话级字段
+ *   以用户当前所见为准，不跨设备拼接；
+ * - answeredQuestions 按 key 取并集，同 key 以 base 为准（无逐条时间戳，取当前进度可预期）；
+ * - meta 按 (id, field) 合并，冲突时以较新的写入时间（entry.ts ?? 源时间戳）为准，
+ *   时间相同 base 优先；
+ * - memoryCards 按 id 取较新卡片（card.ts ?? 源时间戳），时间相同 base 优先。
+ * 合并为纯函数且幂等：对已合并结果重放相同副本不改变数据。
+ */
+export function mergeSidecarData(
+  base: SidecarData,
+  baseTsMs: number,
+  others: SidecarConflictSource[]
+): SidecarMergeResult {
+  // 源按时间升序处理；base 放最后（时间相同时 base 的写入覆盖副本）
+  const orderedSources: Array<{
+    meta: Record<string, SidecarMeta>;
+    state: SidecarState;
+    tsMs: number;
+  }> = others
+    .slice()
+    .sort((a, b) => a.tsMs - b.tsMs)
+    .map((src) => ({ meta: src.data.meta, state: src.data.state, tsMs: src.tsMs }));
+  orderedSources.push({ meta: base.meta, state: base.state, tsMs: baseTsMs });
+
+  // answered：并集，同 key 后写覆盖（base 最后处理 → base 优先）
+  const answered: Record<string, string> = {};
+  let addedAnswers = 0;
+  const baseAnswered = base.state.answeredQuestions;
+  for (let i = 0; i < orderedSources.length; i++) {
+    const src = orderedSources[i];
+    const isBase = i === orderedSources.length - 1;
+    for (const [id, ans] of Object.entries(src.state.answeredQuestions)) {
+      if (typeof ans !== "string") continue;
+      // 只统计"由冲突副本首次补入且 base 缺失"的 key
+      if (!isBase && !(id in answered) && !(id in baseAnswered)) addedAnswers++;
+      answered[id] = ans;
+    }
+  }
+
+  // meta：按 (id, field) 以写入时间取胜者
+  type Cell = { value: string; ts: number };
+  const cells: Record<string, Partial<Record<keyof SidecarMeta, Cell>>> = {};
+  for (const src of orderedSources) {
+    for (const [id, entry] of Object.entries(src.meta)) {
+      if (!entry) continue;
+      const entryTs =
+        typeof entry.ts === "number" && Number.isFinite(entry.ts)
+          ? entry.ts
+          : src.tsMs;
+      for (const field of META_MERGE_FIELDS) {
+        const value = entry[field];
+        if (typeof value !== "string") continue;
+        const cur = cells[id]?.[field];
+        if (!cur || entryTs >= cur.ts) {
+          (cells[id] ??= {})[field] = { value, ts: entryTs };
+        }
+      }
+    }
+  }
+  const meta: Record<string, SidecarMeta> = {};
+  for (const [id, fields] of Object.entries(cells)) {
+    const entry: SidecarMeta = {};
+    let maxTs: number | undefined;
+    for (const field of META_MERGE_FIELDS) {
+      const cell = fields[field];
+      if (!cell) continue;
+      entry[field] = cell.value;
+      maxTs = maxTs === undefined ? cell.ts : Math.max(maxTs, cell.ts);
+    }
+    if (maxTs !== undefined) entry.ts = maxTs;
+    meta[id] = entry;
+  }
+
+  // memoryCards：按 id 取较新卡片
+  const cards: Record<string, MemoryCard> = {};
+  for (const src of orderedSources) {
+    const srcCards = src.state.memoryCards;
+    if (!srcCards) continue;
+    for (const [id, card] of Object.entries(srcCards)) {
+      if (!card) continue;
+      const cardTs =
+        typeof card.ts === "number" && Number.isFinite(card.ts)
+          ? card.ts
+          : src.tsMs;
+      const cur = cards[id];
+      if (!cur || cardTs >= (cur.ts ?? 0)) {
+        cards[id] = { ...card, ts: cardTs };
+      }
+    }
+  }
+
+  const state: SidecarState = {
+    ...base.state,
+    answeredQuestions: answered,
+    // 双方都无卡片时保持 undefined（不写入空对象污染旧格式兼容）
+    memoryCards:
+      base.state.memoryCards === undefined && Object.keys(cards).length === 0
+        ? undefined
+        : cards,
+  };
+
+  return { data: { version: 1, meta, state }, addedAnswers, mergedSources: others.length };
 }

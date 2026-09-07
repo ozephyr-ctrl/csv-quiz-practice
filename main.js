@@ -573,6 +573,27 @@ function askResetChoice(app) {
     (res) => res === null || res === "cancel" ? null : res
   );
 }
+function askConflictMergeChoice(app, conflictCount) {
+  const modal = new ChoiceModal(app, {
+    title: "\u68C0\u6D4B\u5230\u540C\u6B65\u51B2\u7A81\u526F\u672C",
+    message: `iCloud \u7B49\u540C\u6B65\u670D\u52A1\u4E3A\u5F53\u524D\u9898\u5E93\u7684\u72B6\u6001\u6587\u4EF6\u521B\u5EFA\u4E86 ${conflictCount} \u4E2A\u51B2\u7A81\u526F\u672C\uFF0C\u5176\u4E2D\u53EF\u80FD\u5305\u542B\u5176\u4ED6\u8BBE\u5907\u4E0A\u672A\u5408\u5E76\u7684\u7B54\u9898\u8BB0\u5F55\u3001\u6807\u8BB0\u4E0E\u8BB0\u5FC6\u5361\u7247\u3002`,
+    options: [
+      {
+        label: "\u5408\u5E76\u5E76\u5F52\u6863\u526F\u672C",
+        value: "merge",
+        description: "\u628A\u526F\u672C\u6570\u636E\u5E76\u5165\u5F53\u524D\u8FDB\u5EA6\uFF08\u7B54\u9898\u8BB0\u5F55\u53D6\u5E76\u96C6\uFF1B\u76F8\u540C\u6761\u76EE\u4EE5\u8F83\u65B0\u65F6\u95F4/\u5F53\u524D\u8FDB\u5EA6\u4E3A\u51C6\uFF09\uFF0C\u526F\u672C\u6587\u4EF6\u6539\u540D\u4E3A .merged \u4FDD\u7559\u5907\u67E5",
+        cta: true
+      },
+      {
+        label: "\u6682\u4E0D\u5904\u7406",
+        value: "cancel",
+        description: "\u4FDD\u6301\u73B0\u72B6\uFF0C\u4E0B\u6B21\u6253\u5F00\u5237\u9898\u9762\u677F\u65F6\u518D\u6B21\u63D0\u9192"
+      }
+    ]
+  });
+  modal.open();
+  return modal.promise.then((res) => res === "merge" ? "merge" : null);
+}
 var TagPickerModal = class extends import_obsidian.Modal {
   constructor(app, allTags, currentTags) {
     super(app);
@@ -846,7 +867,9 @@ function normalizeMemoryCard(raw) {
     reps,
     lapses,
     learningSteps,
-    lastReview: r.lastReview
+    lastReview: r.lastReview,
+    // 冲突合并时间戳：有限非负数值才保留
+    ...typeof r.ts === "number" && Number.isFinite(r.ts) && r.ts >= 0 ? { ts: r.ts } : {}
   };
 }
 function normalizeMemoryCards(raw) {
@@ -1001,7 +1024,8 @@ function normalizeSidecar(raw) {
       memoryNewDate: typeof s.memoryNewDate === "string" ? s.memoryNewDate : void 0,
       memoryNewCountToday: toOptNumber(s.memoryNewCountToday),
       memoryPendingNew: toOptStrArray(s.memoryPendingNew),
-      memoryInitialized: toOptBool(s.memoryInitialized)
+      memoryInitialized: toOptBool(s.memoryInitialized),
+      updatedAt: toOptNumber(s.updatedAt)
     }
   };
 }
@@ -1020,6 +1044,9 @@ function normalizeMeta(raw) {
   ];
   for (const [key, value] of candidate) {
     if (value !== void 0) result[key] = value;
+  }
+  if (typeof raw.ts === "number" && Number.isFinite(raw.ts) && raw.ts >= 0) {
+    result.ts = raw.ts;
   }
   return result;
 }
@@ -1095,6 +1122,107 @@ function createBackupTimer() {
       }
     }
   };
+}
+var SIDECAR_MERGED_SUFFIX = ".merged";
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function findSidecarConflictPaths(allFiles, contentPath) {
+  var _a, _b;
+  const suffixGroup = "((?: \\d+| ?\\(\\d+\\))+)?";
+  const re = new RegExp(
+    "^" + escapeRegExp(contentPath) + suffixGroup + "\\.sidecar" + suffixGroup + "\\.json$"
+  );
+  const result = [];
+  for (const file of allFiles) {
+    const m = re.exec(file);
+    if (!m) continue;
+    const mainSuffix = m[1];
+    const sidecarSuffix = m[2];
+    if (!mainSuffix && !sidecarSuffix) continue;
+    const spaceNums = [
+      ...(_a = mainSuffix == null ? void 0 : mainSuffix.match(/ \d+/g)) != null ? _a : [],
+      ...(_b = sidecarSuffix == null ? void 0 : sidecarSuffix.match(/ \d+/g)) != null ? _b : []
+    ];
+    if (spaceNums.some((n) => Number(n.trim()) < 2)) continue;
+    result.push(file);
+  }
+  return result;
+}
+var META_MERGE_FIELDS = [
+  "repeat",
+  "tags",
+  "category1",
+  "category2",
+  "category3",
+  "favorite",
+  "mastered",
+  "wrong"
+];
+function mergeSidecarData(base, baseTsMs, others) {
+  var _a, _b, _c;
+  const orderedSources = others.slice().sort((a, b) => a.tsMs - b.tsMs).map((src) => ({ meta: src.data.meta, state: src.data.state, tsMs: src.tsMs }));
+  orderedSources.push({ meta: base.meta, state: base.state, tsMs: baseTsMs });
+  const answered = {};
+  let addedAnswers = 0;
+  const baseAnswered = base.state.answeredQuestions;
+  for (let i = 0; i < orderedSources.length; i++) {
+    const src = orderedSources[i];
+    const isBase = i === orderedSources.length - 1;
+    for (const [id, ans] of Object.entries(src.state.answeredQuestions)) {
+      if (typeof ans !== "string") continue;
+      if (!isBase && !(id in answered) && !(id in baseAnswered)) addedAnswers++;
+      answered[id] = ans;
+    }
+  }
+  const cells = {};
+  for (const src of orderedSources) {
+    for (const [id, entry] of Object.entries(src.meta)) {
+      if (!entry) continue;
+      const entryTs = typeof entry.ts === "number" && Number.isFinite(entry.ts) ? entry.ts : src.tsMs;
+      for (const field of META_MERGE_FIELDS) {
+        const value = entry[field];
+        if (typeof value !== "string") continue;
+        const cur = (_a = cells[id]) == null ? void 0 : _a[field];
+        if (!cur || entryTs >= cur.ts) {
+          ((_b = cells[id]) != null ? _b : cells[id] = {})[field] = { value, ts: entryTs };
+        }
+      }
+    }
+  }
+  const meta = {};
+  for (const [id, fields] of Object.entries(cells)) {
+    const entry = {};
+    let maxTs;
+    for (const field of META_MERGE_FIELDS) {
+      const cell = fields[field];
+      if (!cell) continue;
+      entry[field] = cell.value;
+      maxTs = maxTs === void 0 ? cell.ts : Math.max(maxTs, cell.ts);
+    }
+    if (maxTs !== void 0) entry.ts = maxTs;
+    meta[id] = entry;
+  }
+  const cards = {};
+  for (const src of orderedSources) {
+    const srcCards = src.state.memoryCards;
+    if (!srcCards) continue;
+    for (const [id, card] of Object.entries(srcCards)) {
+      if (!card) continue;
+      const cardTs = typeof card.ts === "number" && Number.isFinite(card.ts) ? card.ts : src.tsMs;
+      const cur = cards[id];
+      if (!cur || cardTs >= ((_c = cur.ts) != null ? _c : 0)) {
+        cards[id] = { ...card, ts: cardTs };
+      }
+    }
+  }
+  const state = {
+    ...base.state,
+    answeredQuestions: answered,
+    // 双方都无卡片时保持 undefined（不写入空对象污染旧格式兼容）
+    memoryCards: base.state.memoryCards === void 0 && Object.keys(cards).length === 0 ? void 0 : cards
+  };
+  return { data: { version: 1, meta, state }, addedAnswers, mergedSources: others.length };
 }
 
 // src/settings.ts
@@ -4203,6 +4331,9 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         }
       }
     }
+    await this.handleSidecarConflicts(epoch);
+    if (this.isClosed) return;
+    if (epoch !== this.loadEpoch) return;
     this.pruneMetaEntries();
     this.applyMetaToQuestions();
     if (effectiveState.csvPath === this.csvPath) {
@@ -4306,6 +4437,63 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       if (st) this.stateManager.scheduleSave(st, 0);
     }
   }
+  /**
+   * 检测并处理 sidecar 同步冲突副本（iCloud 等同步服务改名保留的近似文件）：
+   * 有副本时弹确认框，用户确认后由 stateManager 合并（当前进度优先的并集语义）、
+   * 写盘并把副本归档为 .merged。合并并入的答题记录会改变对错统计，随后重算。
+   * epoch 用于在弹窗/写盘 await 期间丢弃过期流程（对齐其它加载路径的 M2 守卫）。
+   */
+  async handleSidecarConflicts(epoch) {
+    try {
+      const conflicts = await this.stateManager.detectSidecarConflicts();
+      if (this.isClosed || epoch !== this.loadEpoch) return;
+      if (conflicts.length === 0) return;
+      const choice = await askConflictMergeChoice(this.app, conflicts.length);
+      if (this.isClosed || epoch !== this.loadEpoch) return;
+      if (choice !== "merge") {
+        new import_obsidian6.Notice("\u5DF2\u5FFD\u7565\u540C\u6B65\u51B2\u7A81\u526F\u672C\uFF0C\u4E0B\u6B21\u6253\u5F00\u65F6\u5C06\u518D\u6B21\u63D0\u9192");
+        return;
+      }
+      const outcome = await this.stateManager.mergeSidecarConflicts();
+      if (this.isClosed || epoch !== this.loadEpoch) return;
+      if (outcome.status !== "merged") {
+        if (outcome.unreadable) {
+          new import_obsidian6.Notice(`${outcome.unreadable} \u4E2A\u51B2\u7A81\u526F\u672C\u65E0\u6CD5\u8BFB\u53D6\uFF0C\u5DF2\u8DF3\u8FC7\u5408\u5E76`);
+        }
+        return;
+      }
+      this.recomputeAnswerStats();
+      const parts = [
+        `\u5DF2\u5408\u5E76 ${outcome.mergedSources} \u4E2A\u51B2\u7A81\u526F\u672C`,
+        `\u5E76\u5165 ${outcome.addedAnswers} \u6761\u7B54\u9898\u8BB0\u5F55`
+      ];
+      if (outcome.unreadable) parts.push(`${outcome.unreadable} \u4E2A\u65E0\u6CD5\u8BFB\u53D6`);
+      if (outcome.archiveFailed) parts.push(`${outcome.archiveFailed} \u4E2A\u5F52\u6863\u5931\u8D25`);
+      new import_obsidian6.Notice(parts.join("\uFF0C"));
+    } catch (e) {
+      console.error("CSV Quiz: \u5408\u5E76 sidecar \u51B2\u7A81\u526F\u672C\u5931\u8D25", e);
+      new import_obsidian6.Notice("\u5408\u5E76\u540C\u6B65\u51B2\u7A81\u526F\u672C\u5931\u8D25\uFF0C\u5DF2\u8DF3\u8FC7\uFF08\u4E0D\u5F71\u54CD\u5F53\u524D\u8FDB\u5EA6\uFF09");
+    }
+  }
+  /** 按当前题目集与答题记录重算 correct/wrong 计数（冲突合并后统计口径对齐）。 */
+  recomputeAnswerStats() {
+    const st = this.stateManager.getState();
+    if (!st) return;
+    const byId = new Map(this.allQuestions.map((q) => [q.id, q]));
+    let correct = 0;
+    let wrong = 0;
+    for (const [id, ans] of Object.entries(st.answeredQuestions)) {
+      const q = byId.get(id);
+      if (!q) continue;
+      if (normalizeAnswerValue(ans) === normalizeAnswerValue(q.answer)) {
+        correct++;
+      } else {
+        wrong++;
+      }
+    }
+    st.correctCount = correct;
+    st.wrongCount = wrong;
+  }
   /** 把 sidecar meta 覆盖层的 B/C 类字段合并到 allQuestions（meta 优先，永久遮蔽语义）。 */
   applyMetaToQuestions() {
     const meta = this.stateManager.getMeta();
@@ -4335,11 +4523,23 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
    * M6: 把内存中捕获的 meta 覆盖层逐字段写回 StateManager。
    * getMeta() 返回内部引用无法整体替换，故逐条 setMetaField 重建；
    * 磁盘上有而内存中不存在的条目保留（外部新增），内存有而磁盘无的条目会被写回。
+   * 只遍历数据字段（ts 是冲突合并时间戳，由 setMetaField 写当前时间）。
    */
   restoreMetaFrom(source) {
+    const dataFields = [
+      "repeat",
+      "tags",
+      "category1",
+      "category2",
+      "category3",
+      "favorite",
+      "mastered",
+      "wrong"
+    ];
     for (const [id, entry] of Object.entries(source)) {
       if (!entry) continue;
-      for (const [field, value] of Object.entries(entry)) {
+      for (const field of dataFields) {
+        const value = entry[field];
         if (value !== void 0) {
           this.stateManager.setMetaField(id, field, value);
         }
@@ -5378,7 +5578,9 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         reps: c.reps,
         lapses: c.lapses,
         learningSteps: c.learning_steps,
-        lastReview: c.last_review ? c.last_review.toISOString() : ""
+        lastReview: c.last_review ? c.last_review.toISOString() : "",
+        // 冲突合并时间戳：记录卡片写入时间（较新者胜）
+        ts: Date.now()
       };
       if (!correct) {
         if (q && q.wrong !== "1") {
@@ -6019,10 +6221,17 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     const idx = this.filteredQuestions.findIndex((q) => q.id === questionId);
     if (idx >= 0) {
       this.currentIndex = idx;
-    } else if (this.filteredQuestions.length > 0) {
-      this.currentIndex = 0;
     } else {
-      this.currentIndex = -1;
+      const pinned = this.orderedQuestions.find((q) => q.id === questionId);
+      if (pinned) {
+        const insertAt = Math.min(this.currentIndex, this.filteredQuestions.length);
+        this.filteredQuestions.splice(insertAt, 0, pinned);
+        this.currentIndex = insertAt;
+      } else if (this.filteredQuestions.length > 0) {
+        this.currentIndex = 0;
+      } else {
+        this.currentIndex = -1;
+      }
     }
   }
   async saveCurrentEdit() {
@@ -6289,6 +6498,12 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         this.startAutoSave();
         return;
       }
+      await this.handleSidecarConflicts(epoch);
+      if (this.isClosed) {
+        this.canPersistState = true;
+        return;
+      }
+      if (epoch !== this.loadEpoch) return;
       this.pruneMetaEntries();
       this.applyMetaToQuestions();
       this.exitRandomPractice();
@@ -6639,6 +6854,7 @@ var StateManager = class {
       this.currentMeta[questionId] = entry;
     }
     entry[field] = value;
+    entry.ts = Date.now();
     if (this.currentState) {
       this.scheduleSave(this.currentState, 300);
     }
@@ -6681,7 +6897,9 @@ var StateManager = class {
       memoryNewDate: s.memoryNewDate,
       memoryNewCountToday: s.memoryNewCountToday,
       memoryPendingNew: s.memoryPendingNew,
-      memoryInitialized: s.memoryInitialized
+      memoryInitialized: s.memoryInitialized,
+      // 冲突合并时间戳：每次写盘刷新（供同步冲突合并判定文件新旧）
+      updatedAt: Date.now()
     };
   }
   /**
@@ -6814,6 +7032,102 @@ var StateManager = class {
     } catch (e) {
       console.error("CSV Quiz: \u5907\u4EFD\u5F53\u524D sidecar \u5931\u8D25", e);
     }
+  }
+  /**
+   * 检测当前题库 sidecar 的同步冲突副本（iCloud 等服务改名保留的近似文件）。
+   * 列 contentPath 所在目录，按 findSidecarConflictPaths 的命名模式匹配。
+   * 返回冲突副本的完整路径列表；无 contentPath 或无冲突时返回空数组。
+   */
+  async detectSidecarConflicts() {
+    if (this.contentPath === null) return [];
+    const dir = this.contentPath.includes("/") ? this.contentPath.slice(0, this.contentPath.lastIndexOf("/")) : "/";
+    try {
+      const listing = await this.vault.adapter.list(dir);
+      return findSidecarConflictPaths(listing.files, this.contentPath);
+    } catch (e) {
+      console.error("CSV Quiz: \u5217\u76EE\u5F55\u68C0\u6D4B\u51B2\u7A81\u526F\u672C\u5931\u8D25", e);
+      return [];
+    }
+  }
+  /**
+   * 合并 sidecar 冲突副本到当前状态并写盘，然后把副本归档为 ".merged"（不删除用户数据）。
+   * 合并语义见 mergeSidecarData：标量保留当前，answered/meta/memoryCards 取并集（相同条目
+   * 以时间戳/当前进度为准）。currentState 的 answeredQuestions/memoryCards 原地更新内容
+   * （保持对象引用，调用方持有的状态对象同步可见）；currentMeta 整体替换为合并结果。
+   * 正确/错误计数不含在合并内（需题目数据比对答案，由调用方重算）。
+   */
+  async mergeSidecarConflicts() {
+    var _a, _b;
+    if (this.contentPath === null || this.currentState === null) {
+      return { status: "none" };
+    }
+    const conflictPaths = await this.detectSidecarConflicts();
+    if (conflictPaths.length === 0) return { status: "none" };
+    const sources = [];
+    let unreadable = 0;
+    for (const path of conflictPaths) {
+      try {
+        const content = await this.vault.adapter.read(path);
+        const data = normalizeSidecar(JSON.parse(content));
+        if (!data) {
+          unreadable++;
+          continue;
+        }
+        let tsMs = typeof data.state.updatedAt === "number" ? data.state.updatedAt : 0;
+        if (!tsMs) {
+          const stat = await this.vault.adapter.stat(path);
+          tsMs = (_a = stat == null ? void 0 : stat.mtime) != null ? _a : 0;
+        }
+        sources.push({ path, data, tsMs });
+      } catch (e) {
+        console.error("CSV Quiz: \u8BFB\u53D6\u51B2\u7A81\u526F\u672C\u5931\u8D25", path, e);
+        unreadable++;
+      }
+    }
+    if (sources.length === 0) {
+      return { status: "none", unreadable };
+    }
+    const merge = mergeSidecarData(
+      this.buildSidecarData(),
+      Date.now(),
+      sources
+    );
+    const st = this.currentState;
+    for (const key of Object.keys(st.answeredQuestions)) {
+      delete st.answeredQuestions[key];
+    }
+    Object.assign(st.answeredQuestions, merge.data.state.answeredQuestions);
+    if (merge.data.state.memoryCards !== void 0) {
+      const merged = (_b = st.memoryCards) != null ? _b : {};
+      for (const key of Object.keys(merged)) delete merged[key];
+      Object.assign(merged, merge.data.state.memoryCards);
+      st.memoryCards = merged;
+    }
+    this.currentMeta = merge.data.meta;
+    await this.sidecarQueue.enqueue(this.contentPath, this.buildSidecarData());
+    let archived = 0;
+    let archiveFailed = 0;
+    for (const path of conflictPaths) {
+      try {
+        const dest = path + SIDECAR_MERGED_SUFFIX;
+        if (await this.vault.adapter.exists(dest)) {
+          await this.vault.adapter.remove(dest);
+        }
+        await this.vault.adapter.rename(path, dest);
+        archived++;
+      } catch (e) {
+        console.error("CSV Quiz: \u5F52\u6863\u51B2\u7A81\u526F\u672C\u5931\u8D25", path, e);
+        archiveFailed++;
+      }
+    }
+    return {
+      status: "merged",
+      mergedSources: merge.mergedSources,
+      addedAnswers: merge.addedAnswers,
+      unreadable,
+      archived,
+      archiveFailed
+    };
   }
   /**
    * 设置保存防抖：设置面板每次击键都会触发，合并为最后一次变更后 400ms 写入一次。

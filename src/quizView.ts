@@ -24,6 +24,7 @@ import {
   CSVWriteQueue,
 } from "./csvHandler";
 import { StateManager } from "./stateManager";
+import type { SidecarMergeOutcome } from "./stateManager";
 import { createBackupTimer } from "./sidecar";
 import type { SidecarMeta } from "./sidecar";
 import { decodeCqv, encodeCqv } from "./cqvHandler";
@@ -34,7 +35,13 @@ import {
   countDueCards,
   normalizeAnswerValue,
 } from "./utils";
-import { ChoiceModal, TagPickerModal, askResetChoice, askPrompt } from "./modals";
+import {
+  ChoiceModal,
+  TagPickerModal,
+  askResetChoice,
+  askPrompt,
+  askConflictMergeChoice,
+} from "./modals";
 import { ProgressModal } from "./progressModal";
 import { fsrs, createEmptyCard, Rating, type Card } from "ts-fsrs";
 import Papa from "papaparse";
@@ -417,6 +424,15 @@ export class QuizView extends ItemView {
       }
     }
 
+    // 同步冲突副本检测（iCloud 等改名保留的近似文件）：合并并入其他设备未同步的进度。
+    // 放在外部修改仲裁之后——先用 3A 确定权威状态，再把副本数据并集进来，避免合并结果
+    // 随即被 justSaved 信任内存分支覆盖。
+    await this.handleSidecarConflicts(epoch);
+    // V2: 合并弹窗期间视图被关闭 → 中止
+    if (this.isClosed) return;
+    // M2: 弹窗期间已开始新加载流程 → 本流程过期，丢弃结果
+    if (epoch !== this.loadEpoch) return;
+
     // 对齐清理 sidecar meta 中已不存在于题库的僵尸条目（替换产物后 id 变化时）
     this.pruneMetaEntries();
 
@@ -539,6 +555,73 @@ export class QuizView extends ItemView {
     }
   }
 
+  /**
+   * 检测并处理 sidecar 同步冲突副本（iCloud 等同步服务改名保留的近似文件）：
+   * 有副本时弹确认框，用户确认后由 stateManager 合并（当前进度优先的并集语义）、
+   * 写盘并把副本归档为 .merged。合并并入的答题记录会改变对错统计，随后重算。
+   * epoch 用于在弹窗/写盘 await 期间丢弃过期流程（对齐其它加载路径的 M2 守卫）。
+   */
+  private async handleSidecarConflicts(epoch: number): Promise<void> {
+    try {
+      const conflicts = await this.stateManager.detectSidecarConflicts();
+      if (this.isClosed || epoch !== this.loadEpoch) return;
+      if (conflicts.length === 0) return;
+
+      const choice = await askConflictMergeChoice(this.app, conflicts.length);
+      if (this.isClosed || epoch !== this.loadEpoch) return;
+      if (choice !== "merge") {
+        new Notice("已忽略同步冲突副本，下次打开时将再次提醒");
+        return;
+      }
+
+      const outcome: SidecarMergeOutcome =
+        await this.stateManager.mergeSidecarConflicts();
+      if (this.isClosed || epoch !== this.loadEpoch) return;
+      if (outcome.status !== "merged") {
+        if (outcome.unreadable) {
+          new Notice(`${outcome.unreadable} 个冲突副本无法读取，已跳过合并`);
+        }
+        return;
+      }
+
+      // 合并改变了 answeredQuestions 集合：按当前题目重算对错统计
+      // （计数由内存状态流向 applyRestore，需在状态应用前完成）
+      this.recomputeAnswerStats();
+
+      const parts = [
+        `已合并 ${outcome.mergedSources} 个冲突副本`,
+        `并入 ${outcome.addedAnswers} 条答题记录`,
+      ];
+      if (outcome.unreadable) parts.push(`${outcome.unreadable} 个无法读取`);
+      if (outcome.archiveFailed) parts.push(`${outcome.archiveFailed} 个归档失败`);
+      new Notice(parts.join("，"));
+    } catch (e: unknown) {
+      // 合并失败不阻塞题库加载：保持当前状态继续
+      console.error("CSV Quiz: 合并 sidecar 冲突副本失败", e);
+      new Notice("合并同步冲突副本失败，已跳过（不影响当前进度）");
+    }
+  }
+
+  /** 按当前题目集与答题记录重算 correct/wrong 计数（冲突合并后统计口径对齐）。 */
+  private recomputeAnswerStats(): void {
+    const st = this.stateManager.getState();
+    if (!st) return;
+    const byId = new Map(this.allQuestions.map((q) => [q.id, q]));
+    let correct = 0;
+    let wrong = 0;
+    for (const [id, ans] of Object.entries(st.answeredQuestions)) {
+      const q = byId.get(id);
+      if (!q) continue;
+      if (normalizeAnswerValue(ans) === normalizeAnswerValue(q.answer)) {
+        correct++;
+      } else {
+        wrong++;
+      }
+    }
+    st.correctCount = correct;
+    st.wrongCount = wrong;
+  }
+
   /** 把 sidecar meta 覆盖层的 B/C 类字段合并到 allQuestions（meta 优先，永久遮蔽语义）。 */
   private applyMetaToQuestions(): void {
     const meta = this.stateManager.getMeta();
@@ -582,13 +665,23 @@ export class QuizView extends ItemView {
    * M6: 把内存中捕获的 meta 覆盖层逐字段写回 StateManager。
    * getMeta() 返回内部引用无法整体替换，故逐条 setMetaField 重建；
    * 磁盘上有而内存中不存在的条目保留（外部新增），内存有而磁盘无的条目会被写回。
+   * 只遍历数据字段（ts 是冲突合并时间戳，由 setMetaField 写当前时间）。
    */
   private restoreMetaFrom(source: Record<string, SidecarMeta>): void {
+    const dataFields = [
+      "repeat",
+      "tags",
+      "category1",
+      "category2",
+      "category3",
+      "favorite",
+      "mastered",
+      "wrong",
+    ] as const;
     for (const [id, entry] of Object.entries(source)) {
       if (!entry) continue;
-      for (const [field, value] of Object.entries(entry) as Array<
-        [keyof SidecarMeta, string]
-      >) {
+      for (const field of dataFields) {
+        const value = entry[field];
         if (value !== undefined) {
           this.stateManager.setMetaField(id, field, value);
         }
@@ -1958,6 +2051,8 @@ export class QuizView extends ItemView {
         lapses: c.lapses,
         learningSteps: c.learning_steps,
         lastReview: c.last_review ? c.last_review.toISOString() : "",
+        // 冲突合并时间戳：记录卡片写入时间（较新者胜）
+        ts: Date.now(),
       };
       if (!correct) {
         // 答错计入 wrong 标记并写入 sidecar meta（内存操作 + 调度保存，无失败路径）
@@ -2765,10 +2860,20 @@ export class QuizView extends ItemView {
     const idx = this.filteredQuestions.findIndex((q) => q.id === questionId);
     if (idx >= 0) {
       this.currentIndex = idx;
-    } else if (this.filteredQuestions.length > 0) {
-      this.currentIndex = 0;
     } else {
-      this.currentIndex = -1;
+      // 标记/编辑导致当前题被新筛选排除：不立即移除、不跳转第一题，
+      // 而是把该题临时钉在原位继续展示；下次导航时 reFilterForNavigation
+      // 会重筛掉它，之后不再出现。
+      const pinned = this.orderedQuestions.find((q) => q.id === questionId);
+      if (pinned) {
+        const insertAt = Math.min(this.currentIndex, this.filteredQuestions.length);
+        this.filteredQuestions.splice(insertAt, 0, pinned);
+        this.currentIndex = insertAt;
+      } else if (this.filteredQuestions.length > 0) {
+        this.currentIndex = 0;
+      } else {
+        this.currentIndex = -1;
+      }
     }
   }
 
@@ -3131,6 +3236,14 @@ export class QuizView extends ItemView {
         this.startAutoSave();
         return;
       }
+
+      // 同步冲突副本检测（切换题库时检测的是新题库的 sidecar）
+      await this.handleSidecarConflicts(epoch);
+      if (this.isClosed) {
+        this.canPersistState = true;
+        return;
+      }
+      if (epoch !== this.loadEpoch) return;
 
       // 对齐清理 sidecar meta 中已不存在的僵尸条目（替换产物后 id 变化时）
       this.pruneMetaEntries();

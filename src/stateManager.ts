@@ -5,14 +5,19 @@ import {
 } from "./types";
 import { normalizeMemoryCards } from "./utils";
 import {
+  SidecarConflictSource,
   SidecarData,
   SidecarMeta,
   SidecarState,
   SidecarWriteQueue,
   backupSidecar,
+  findSidecarConflictPaths,
+  mergeSidecarData,
+  normalizeSidecar,
   readSidecar,
   sidecarPathFor,
   writeSidecar,
+  SIDECAR_MERGED_SUFFIX,
 } from "./sidecar";
 import { checkIdQuality, parseCSV } from "./csvHandler";
 
@@ -102,6 +107,21 @@ export type LegacyMigrationResult =
         | "path-mismatch"
         | "bad-state";
     };
+
+/** mergeSidecarConflicts 的结果（status=none 时其余字段缺失/为零）。 */
+export interface SidecarMergeOutcome {
+  status: "none" | "merged";
+  /** 成功参与合并的冲突副本数。 */
+  mergedSources?: number;
+  /** 并入的、当前状态缺失的答题记录条数。 */
+  addedAnswers?: number;
+  /** 读取失败（损坏/结构非法）被跳过的副本数。 */
+  unreadable?: number;
+  /** 成功归档为 .merged 的副本数。 */
+  archived?: number;
+  /** 归档失败的副本数（仍会再次被检测到，下次可重试）。 */
+  archiveFailed?: number;
+}
 
 export class StateManager {
   private plugin: Plugin;
@@ -381,6 +401,8 @@ export class StateManager {
       this.currentMeta[questionId] = entry;
     }
     entry[field] = value;
+    // 冲突合并时间戳：记录该条目最近写入时间（较新者胜）
+    entry.ts = Date.now();
     if (this.currentState) {
       this.scheduleSave(this.currentState, 300);
     }
@@ -427,6 +449,8 @@ export class StateManager {
       memoryNewCountToday: s.memoryNewCountToday,
       memoryPendingNew: s.memoryPendingNew,
       memoryInitialized: s.memoryInitialized,
+      // 冲突合并时间戳：每次写盘刷新（供同步冲突合并判定文件新旧）
+      updatedAt: Date.now(),
     };
   }
 
@@ -610,6 +634,118 @@ export class StateManager {
     } catch (e) {
       console.error("CSV Quiz: 备份当前 sidecar 失败", e);
     }
+  }
+
+  /**
+   * 检测当前题库 sidecar 的同步冲突副本（iCloud 等服务改名保留的近似文件）。
+   * 列 contentPath 所在目录，按 findSidecarConflictPaths 的命名模式匹配。
+   * 返回冲突副本的完整路径列表；无 contentPath 或无冲突时返回空数组。
+   */
+  async detectSidecarConflicts(): Promise<string[]> {
+    if (this.contentPath === null) return [];
+    const dir = this.contentPath.includes("/")
+      ? this.contentPath.slice(0, this.contentPath.lastIndexOf("/"))
+      : "/";
+    try {
+      const listing = await this.vault.adapter.list(dir);
+      return findSidecarConflictPaths(listing.files, this.contentPath);
+    } catch (e) {
+      console.error("CSV Quiz: 列目录检测冲突副本失败", e);
+      return [];
+    }
+  }
+
+  /**
+   * 合并 sidecar 冲突副本到当前状态并写盘，然后把副本归档为 ".merged"（不删除用户数据）。
+   * 合并语义见 mergeSidecarData：标量保留当前，answered/meta/memoryCards 取并集（相同条目
+   * 以时间戳/当前进度为准）。currentState 的 answeredQuestions/memoryCards 原地更新内容
+   * （保持对象引用，调用方持有的状态对象同步可见）；currentMeta 整体替换为合并结果。
+   * 正确/错误计数不含在合并内（需题目数据比对答案，由调用方重算）。
+   */
+  async mergeSidecarConflicts(): Promise<SidecarMergeOutcome> {
+    if (this.contentPath === null || this.currentState === null) {
+      return { status: "none" };
+    }
+    const conflictPaths = await this.detectSidecarConflicts();
+    if (conflictPaths.length === 0) return { status: "none" };
+
+    // 逐个读取冲突副本：解析失败/结构非法的跳过并计数（不阻塞其余副本合并）
+    const sources: SidecarConflictSource[] = [];
+    let unreadable = 0;
+    for (const path of conflictPaths) {
+      try {
+        const content = await this.vault.adapter.read(path);
+        const data = normalizeSidecar(JSON.parse(content));
+        if (!data) {
+          unreadable++;
+          continue;
+        }
+        // 有效写入时间：文件内 updatedAt 优先，缺失回退文件 mtime
+        let tsMs =
+          typeof data.state.updatedAt === "number" ? data.state.updatedAt : 0;
+        if (!tsMs) {
+          const stat = await this.vault.adapter.stat(path);
+          tsMs = stat?.mtime ?? 0;
+        }
+        sources.push({ path, data, tsMs });
+      } catch (e) {
+        console.error("CSV Quiz: 读取冲突副本失败", path, e);
+        unreadable++;
+      }
+    }
+    if (sources.length === 0) {
+      return { status: "none", unreadable };
+    }
+
+    const merge = mergeSidecarData(
+      this.buildSidecarData(),
+      Date.now(),
+      sources
+    );
+
+    // 写回内存：answeredQuestions/memoryCards 原地替换内容（保持引用，视图持有的
+    // effectiveState/loadResult.state 与本 currentState 为同一对象）
+    const st = this.currentState;
+    for (const key of Object.keys(st.answeredQuestions)) {
+      delete st.answeredQuestions[key];
+    }
+    Object.assign(st.answeredQuestions, merge.data.state.answeredQuestions);
+    if (merge.data.state.memoryCards !== undefined) {
+      const merged = st.memoryCards ?? {};
+      for (const key of Object.keys(merged)) delete merged[key];
+      Object.assign(merged, merge.data.state.memoryCards);
+      st.memoryCards = merged;
+    }
+    this.currentMeta = merge.data.meta;
+
+    // 合并属关键操作：绕过防抖直接落盘
+    await this.sidecarQueue.enqueue(this.contentPath, this.buildSidecarData());
+
+    // 归档冲突副本（改名保留备查；单个失败不阻塞其余）
+    let archived = 0;
+    let archiveFailed = 0;
+    for (const path of conflictPaths) {
+      try {
+        const dest = path + SIDECAR_MERGED_SUFFIX;
+        if (await this.vault.adapter.exists(dest)) {
+          await this.vault.adapter.remove(dest);
+        }
+        await this.vault.adapter.rename(path, dest);
+        archived++;
+      } catch (e) {
+        console.error("CSV Quiz: 归档冲突副本失败", path, e);
+        archiveFailed++;
+      }
+    }
+
+    return {
+      status: "merged",
+      mergedSources: merge.mergedSources,
+      addedAnswers: merge.addedAnswers,
+      unreadable,
+      archived,
+      archiveFailed,
+    };
   }
 
   /**

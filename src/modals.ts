@@ -126,6 +126,33 @@ export function askResetChoice(
   );
 }
 
+/** 弹「合并同步冲突副本」确认框；返回 "merge"，取消/关闭返回 null。 */
+export function askConflictMergeChoice(
+  app: App,
+  conflictCount: number
+): Promise<"merge" | null> {
+  const modal = new ChoiceModal(app, {
+    title: "检测到同步冲突副本",
+    message: `iCloud 等同步服务为当前题库的状态文件创建了 ${conflictCount} 个冲突副本，其中可能包含其他设备上未合并的答题记录、标记与记忆卡片。`,
+    options: [
+      {
+        label: "合并并归档副本",
+        value: "merge",
+        description:
+          "把副本数据并入当前进度（答题记录取并集；相同条目以较新时间/当前进度为准），副本文件改名为 .merged 保留备查",
+        cta: true,
+      },
+      {
+        label: "暂不处理",
+        value: "cancel",
+        description: "保持现状，下次打开刷题面板时再次提醒",
+      },
+    ],
+  });
+  modal.open();
+  return modal.promise.then((res) => (res === "merge" ? "merge" : null));
+}
+
 /**
  * Promise-based modal for picking tags from a list of all existing tags.
  * Displays checkboxes for each tag, pre-checked based on currentTags.

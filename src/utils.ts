@@ -173,6 +173,10 @@ export function normalizeMemoryCard(raw: unknown): MemoryCard | null {
     lapses,
     learningSteps,
     lastReview: r.lastReview,
+    // 冲突合并时间戳：有限非负数值才保留
+    ...(typeof r.ts === "number" && Number.isFinite(r.ts) && r.ts >= 0
+      ? { ts: r.ts }
+      : {}),
   };
 }
 

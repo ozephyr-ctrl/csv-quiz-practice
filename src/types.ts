@@ -29,6 +29,8 @@ export interface MemoryCard {
   lapses: number; // 遗忘次数
   learningSteps: number; // 学习/再学习步进位置
   lastReview: string; // 上次复习 ISO 时间（空串 "" 表示从未复习）
+  /** 该卡片最近一次写入时间（epoch ms）。供同步冲突合并时判定卡片新旧；旧文件缺失。 */
+  ts?: number;
 }
 
 export interface QuizSessionState {
