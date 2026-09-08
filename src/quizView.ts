@@ -34,6 +34,7 @@ import {
   quizStateEquals,
   countDueCards,
   normalizeAnswerValue,
+  resolveKeyBinding,
 } from "./utils";
 import {
   ChoiceModal,
@@ -295,6 +296,8 @@ export class QuizView extends ItemView {
       this.contentEl.focus();
     });
     this.registerDomEvent(document, "keydown", (e: KeyboardEvent) => {
+      // 键盘绑定总开关：关闭时方向键切题与选项/标记快捷键一并禁用
+      if (!this.getSettings().keyboardBindingsEnabled) return;
       // 已答题显示答案时 answering=true 但方向键切题应恢复（与 handleSwipeEnd 口径统一）；
       // 仅真正作答中（未显示答案）或导航切换中才拦截键盘导航
       if ((this.answering && !this.showingAnswer) || this.navigating) return;
@@ -303,9 +306,15 @@ export class QuizView extends ItemView {
       const focusedInPanel =
         active === this.contentEl || this.contentEl.contains(active);
       if (!focusedInPanel) return;
-      // 焦点在可编辑元素内时放行，避免干扰输入
+      // 焦点在可编辑元素内时放行，避免干扰输入。
+      // 例外：checkbox/radio（本面板的选项与标记）不接收键盘文本，点击它们后
+      // 焦点会停留其上，若不放行快捷键与方向键会在点击后失效
+      const isTextEditableInput =
+        active.tagName === "INPUT" &&
+        (active as HTMLInputElement).type !== "checkbox" &&
+        (active as HTMLInputElement).type !== "radio";
       if (
-        active.tagName === "INPUT" ||
+        isTextEditableInput ||
         active.tagName === "TEXTAREA" ||
         active.tagName === "SELECT" ||
         active.isContentEditable ||
@@ -319,6 +328,9 @@ export class QuizView extends ItemView {
       } else if (e.key === "ArrowRight") {
         e.preventDefault();
         void this.nextQuestion();
+      } else {
+        // 选项/标记自定义快捷键
+        this.handleKeyBinding(e);
       }
     });
   }
@@ -1078,6 +1090,12 @@ export class QuizView extends ItemView {
   private swipeBound: boolean = false;
   /** L4: 刷题进度弹窗是否已打开（防重入：连续点击不重复弹窗）。 */
   private progressModalOpen: boolean = false;
+  /** 当前题的选项按显示顺序排列（键盘快捷键按显示位置触发；renderQuestion 每次重建）。 */
+  private currentDisplayOptions: Array<{ key: string; text: string }> = [];
+  /** 标记复选框引用（键盘快捷键触发原生 change 事件复用点击逻辑；空列表/渲染时重置）。 */
+  private markCheckboxes: Partial<
+    Record<"favorite" | "mastered" | "repeat", HTMLInputElement>
+  > = {};
 
   private updateFilterUI(): void {
     if (!this.cat1Select) return;
@@ -1580,6 +1598,9 @@ export class QuizView extends ItemView {
     this.questionArea.empty();
     this.feedbackArea.empty();
     this.editArea.empty();
+    // 键盘快捷键引用重置（空列表/无题路径不残留旧题的选项与复选框；有题时下方重建）
+    this.currentDisplayOptions = [];
+    this.markCheckboxes = {};
     this.updateProgress();
 
     if (
@@ -1675,6 +1696,8 @@ export class QuizView extends ItemView {
         this.currentShuffledOptions = displayOptions;
       }
     }
+    // 键盘快捷键按显示位置触发：记录当前显示顺序
+    this.currentDisplayOptions = displayOptions;
 
     // 显示字母按展示位置顺序排列（A、B、C、D…），这样打乱选项时不会泄露
     // 原始字母映射。内部判题仍使用原始 opt.key（与 question.answer 比对）。
@@ -2269,8 +2292,49 @@ export class QuizView extends ItemView {
     await this.applyResetChoice(res);
   }
 
+  /**
+   * 选项/标记自定义快捷键：resolveKeyBinding 命中后触发。
+   * - 选项：按显示位置取 currentDisplayOptions 的原始 key 作答/多选切换，
+   *   与点击选项同一入口；已答题（showingAnswer）或作答中不触发（与点击绑定口径一致），
+   *   该题选项不足该位置时不响应。
+   * - 标记：翻转对应复选框并派发原生 change 事件，完整复用点击的处理链
+   *   （saveQuestionMeta + 重筛定位 + 渲染 + 保存）。带修饰键（Ctrl/Meta/Alt）不响应，
+   *   避免劫持浏览器/应用快捷键。
+   */
+  private handleKeyBinding(e: KeyboardEvent): void {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const target = resolveKeyBinding(this.getSettings(), e.key);
+    if (!target) return;
+
+    const question = this.filteredQuestions[this.currentIndex];
+    if (!question) return;
+
+    if (target.kind === "option") {
+      // 与点击选项的绑定条件一致：作答中/已显示答案时不响应
+      if (this.answering || this.showingAnswer) return;
+      const opt = this.currentDisplayOptions[target.index];
+      if (!opt) return; // 该题选项不足该显示位
+      e.preventDefault();
+      if (this.isMultiChoice(question)) {
+        this.toggleMultiOption(opt.key);
+      } else {
+        void this.handleAnswer(opt.key);
+      }
+      return;
+    }
+
+    // 标记：翻转复选框并复用 change 处理链
+    const cb = this.markCheckboxes[target.field];
+    if (!cb) return;
+    e.preventDefault();
+    cb.checked = !cb.checked;
+    cb.dispatchEvent(new Event("change"));
+  }
+
   private renderCheckboxArea(question: Question): void {
     this.checkboxArea.empty();
+    // 键盘快捷键引用重建（仅收藏/掌握/重复三项有快捷键，错题无）
+    this.markCheckboxes = {};
 
     const fields = [
       { key: "favorite", label: "收藏", value: question.favorite },
@@ -2286,6 +2350,9 @@ export class QuizView extends ItemView {
         attr: { "data-field": f.key },
       });
       cb.checked = f.value === "1";
+      if (f.key === "favorite" || f.key === "mastered" || f.key === "repeat") {
+        this.markCheckboxes[f.key] = cb;
+      }
       labelEl.createSpan({ text: " " + f.label });
 
       cb.addEventListener("change", () => {

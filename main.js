@@ -484,7 +484,15 @@ var DEFAULT_SETTINGS = {
   memoryReminder: true,
   memoryMarkRating: true,
   swipeNavigation: true,
-  memoryUpdateInNormalMode: true
+  memoryUpdateInNormalMode: true,
+  keyboardBindingsEnabled: true,
+  keyOptionA: "1",
+  keyOptionB: "2",
+  keyOptionC: "3",
+  keyOptionD: "4",
+  keyFavorite: "m",
+  keyMastered: "e",
+  keyRepeat: "x"
 };
 
 // src/settings.ts
@@ -880,6 +888,31 @@ function normalizeMemoryCards(raw) {
     if (c !== null) result[id] = c;
   }
   return result;
+}
+function resolveKeyBinding(settings, key) {
+  var _a;
+  const k = key.trim().toLowerCase();
+  if (!k) return null;
+  const optionBindings = [
+    settings.keyOptionA,
+    settings.keyOptionB,
+    settings.keyOptionC,
+    settings.keyOptionD
+  ];
+  for (let i = 0; i < optionBindings.length; i++) {
+    const b = ((_a = optionBindings[i]) != null ? _a : "").trim().toLowerCase();
+    if (b && b === k) return { kind: "option", index: i };
+  }
+  const markBindings = [
+    ["favorite", settings.keyFavorite],
+    ["mastered", settings.keyMastered],
+    ["repeat", settings.keyRepeat]
+  ];
+  for (const [field, binding] of markBindings) {
+    const b = (binding != null ? binding : "").trim().toLowerCase();
+    if (b && b === k) return { kind: "mark", field };
+  }
+  return null;
 }
 
 // src/sidecar.ts
@@ -1311,6 +1344,80 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
         ]
       },
       {
+        type: "group",
+        heading: "\u952E\u76D8\u7ED1\u5B9A",
+        items: [
+          {
+            name: "\u952E\u76D8\u7ED1\u5B9A",
+            desc: "\u5237\u9898\u9762\u677F\u5185\u542F\u7528\u952E\u76D8\u5FEB\u6377\u952E\uFF08\u542B\u5DE6\u53F3\u65B9\u5411\u952E\u5207\u9898\u4E0E\u4E0B\u65B9\u9009\u9879/\u6807\u8BB0\u5FEB\u6377\u952E\uFF09\uFF1B\u5173\u95ED\u540E\u5168\u90E8\u952E\u76D8\u64CD\u4F5C\u7981\u7528",
+            control: { type: "toggle", key: "keyboardBindingsEnabled" }
+          },
+          {
+            name: "\u9009\u9879\u5FEB\u6377\u952E\uFF1A\u7B2C 1 \u4E2A\u663E\u793A\u9009\u9879",
+            desc: "\u6309\u4E0B\u8BE5\u952E\u9009\u62E9\u5F53\u524D\u9898\u7B2C 1 \u4E2A\u663E\u793A\u7684\u9009\u9879\uFF08\u9009\u9879\u6253\u4E71\u65F6\u4E0E\u5C4F\u5E55\u663E\u793A\u7684 A \u4F4D\u4E00\u81F4\uFF09\uFF1B\u5355\u4E2A\u5B57\u7B26\uFF0C\u5927\u5C0F\u5199\u4E0D\u654F\u611F\uFF0C\u7559\u7A7A\u4E0D\u7ED1\u5B9A",
+            control: {
+              type: "text",
+              key: "keyOptionA",
+              defaultValue: DEFAULT_SETTINGS.keyOptionA
+            }
+          },
+          {
+            name: "\u9009\u9879\u5FEB\u6377\u952E\uFF1A\u7B2C 2 \u4E2A\u663E\u793A\u9009\u9879",
+            desc: "\u6309\u4E0B\u8BE5\u952E\u9009\u62E9\u7B2C 2 \u4E2A\u663E\u793A\u7684\u9009\u9879\uFF08\u5C4F\u5E55 B \u4F4D\uFF09\uFF1B\u5355\u4E2A\u5B57\u7B26\uFF0C\u7559\u7A7A\u4E0D\u7ED1\u5B9A",
+            control: {
+              type: "text",
+              key: "keyOptionB",
+              defaultValue: DEFAULT_SETTINGS.keyOptionB
+            }
+          },
+          {
+            name: "\u9009\u9879\u5FEB\u6377\u952E\uFF1A\u7B2C 3 \u4E2A\u663E\u793A\u9009\u9879",
+            desc: "\u6309\u4E0B\u8BE5\u952E\u9009\u62E9\u7B2C 3 \u4E2A\u663E\u793A\u7684\u9009\u9879\uFF08\u5C4F\u5E55 C \u4F4D\uFF09\uFF1B\u5355\u4E2A\u5B57\u7B26\uFF0C\u7559\u7A7A\u4E0D\u7ED1\u5B9A",
+            control: {
+              type: "text",
+              key: "keyOptionC",
+              defaultValue: DEFAULT_SETTINGS.keyOptionC
+            }
+          },
+          {
+            name: "\u9009\u9879\u5FEB\u6377\u952E\uFF1A\u7B2C 4 \u4E2A\u663E\u793A\u9009\u9879",
+            desc: "\u6309\u4E0B\u8BE5\u952E\u9009\u62E9\u7B2C 4 \u4E2A\u663E\u793A\u7684\u9009\u9879\uFF08\u5C4F\u5E55 D \u4F4D\uFF09\uFF1B\u5355\u4E2A\u5B57\u7B26\uFF0C\u7559\u7A7A\u4E0D\u7ED1\u5B9A",
+            control: {
+              type: "text",
+              key: "keyOptionD",
+              defaultValue: DEFAULT_SETTINGS.keyOptionD
+            }
+          },
+          {
+            name: "\u6807\u8BB0\u5FEB\u6377\u952E\uFF1A\u6536\u85CF",
+            desc: "\u6309\u4E0B\u8BE5\u952E\u5207\u6362\u5F53\u524D\u9898\u7684\u6536\u85CF\u6807\u8BB0\uFF1B\u5355\u4E2A\u5B57\u7B26\uFF0C\u5927\u5C0F\u5199\u4E0D\u654F\u611F\uFF0C\u7559\u7A7A\u4E0D\u7ED1\u5B9A",
+            control: {
+              type: "text",
+              key: "keyFavorite",
+              defaultValue: DEFAULT_SETTINGS.keyFavorite
+            }
+          },
+          {
+            name: "\u6807\u8BB0\u5FEB\u6377\u952E\uFF1A\u638C\u63E1",
+            desc: "\u6309\u4E0B\u8BE5\u952E\u5207\u6362\u5F53\u524D\u9898\u7684\u638C\u63E1\u6807\u8BB0\uFF1B\u5355\u4E2A\u5B57\u7B26\uFF0C\u7559\u7A7A\u4E0D\u7ED1\u5B9A",
+            control: {
+              type: "text",
+              key: "keyMastered",
+              defaultValue: DEFAULT_SETTINGS.keyMastered
+            }
+          },
+          {
+            name: "\u6807\u8BB0\u5FEB\u6377\u952E\uFF1A\u91CD\u590D",
+            desc: "\u6309\u4E0B\u8BE5\u952E\u5207\u6362\u5F53\u524D\u9898\u7684\u91CD\u590D\u6807\u8BB0\uFF1B\u5355\u4E2A\u5B57\u7B26\uFF0C\u7559\u7A7A\u4E0D\u7ED1\u5B9A",
+            control: {
+              type: "text",
+              key: "keyRepeat",
+              defaultValue: DEFAULT_SETTINGS.keyRepeat
+            }
+          }
+        ]
+      },
+      {
         name: "\u7B54\u5BF9\u81EA\u52A8\u8DF3\u8F6C\u5EF6\u8FDF\uFF08\u79D2\uFF09",
         desc: "\u7B54\u5BF9\u540E\u81EA\u52A8\u8DF3\u8F6C\u5230\u4E0B\u4E00\u9898\u7684\u7B49\u5F85\u65F6\u95F4\uFF0C0 \u8868\u793A\u4E0D\u81EA\u52A8\u8DF3\u8F6C",
         control: {
@@ -1519,6 +1626,55 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
       "\u5E38\u89C4\u6A21\u5F0F/\u968F\u673A\u7EC3\u4E60\u4E2D\u7B54\u9898\u4E5F\u66F4\u65B0\u8BB0\u5FC6\u5361\u7247\uFF08FSRS \u95F4\u9694\u91CD\u590D\uFF09\uFF1B\u5173\u95ED\u540E\u4EC5\u8BB0\u5FC6\u7EC3\u4E60\u66F4\u65B0\u5361\u7247",
       "memoryUpdateInNormalMode"
     );
+    new import_obsidian3.Setting(containerEl).setName("\u952E\u76D8\u7ED1\u5B9A").setHeading();
+    this.addToggleSetting(
+      containerEl,
+      "\u952E\u76D8\u7ED1\u5B9A",
+      "\u5237\u9898\u9762\u677F\u5185\u542F\u7528\u952E\u76D8\u5FEB\u6377\u952E\uFF08\u542B\u5DE6\u53F3\u65B9\u5411\u952E\u5207\u9898\u4E0E\u4E0B\u65B9\u9009\u9879/\u6807\u8BB0\u5FEB\u6377\u952E\uFF09\uFF1B\u5173\u95ED\u540E\u5168\u90E8\u952E\u76D8\u64CD\u4F5C\u7981\u7528",
+      "keyboardBindingsEnabled"
+    );
+    this.addKeyBindingSetting(
+      containerEl,
+      "\u9009\u9879\u5FEB\u6377\u952E\uFF1A\u7B2C 1 \u4E2A\u663E\u793A\u9009\u9879",
+      "\u6309\u4E0B\u8BE5\u952E\u9009\u62E9\u5F53\u524D\u9898\u7B2C 1 \u4E2A\u663E\u793A\u7684\u9009\u9879\uFF08\u9009\u9879\u6253\u4E71\u65F6\u4E0E\u5C4F\u5E55\u663E\u793A\u7684 A \u4F4D\u4E00\u81F4\uFF09\uFF1B\u5355\u4E2A\u5B57\u7B26\uFF0C\u5927\u5C0F\u5199\u4E0D\u654F\u611F\uFF0C\u7559\u7A7A\u4E0D\u7ED1\u5B9A",
+      "keyOptionA"
+    );
+    this.addKeyBindingSetting(
+      containerEl,
+      "\u9009\u9879\u5FEB\u6377\u952E\uFF1A\u7B2C 2 \u4E2A\u663E\u793A\u9009\u9879",
+      "\u6309\u4E0B\u8BE5\u952E\u9009\u62E9\u7B2C 2 \u4E2A\u663E\u793A\u7684\u9009\u9879\uFF08\u5C4F\u5E55 B \u4F4D\uFF09\uFF1B\u5355\u4E2A\u5B57\u7B26\uFF0C\u7559\u7A7A\u4E0D\u7ED1\u5B9A",
+      "keyOptionB"
+    );
+    this.addKeyBindingSetting(
+      containerEl,
+      "\u9009\u9879\u5FEB\u6377\u952E\uFF1A\u7B2C 3 \u4E2A\u663E\u793A\u9009\u9879",
+      "\u6309\u4E0B\u8BE5\u952E\u9009\u62E9\u7B2C 3 \u4E2A\u663E\u793A\u7684\u9009\u9879\uFF08\u5C4F\u5E55 C \u4F4D\uFF09\uFF1B\u5355\u4E2A\u5B57\u7B26\uFF0C\u7559\u7A7A\u4E0D\u7ED1\u5B9A",
+      "keyOptionC"
+    );
+    this.addKeyBindingSetting(
+      containerEl,
+      "\u9009\u9879\u5FEB\u6377\u952E\uFF1A\u7B2C 4 \u4E2A\u663E\u793A\u9009\u9879",
+      "\u6309\u4E0B\u8BE5\u952E\u9009\u62E9\u7B2C 4 \u4E2A\u663E\u793A\u7684\u9009\u9879\uFF08\u5C4F\u5E55 D \u4F4D\uFF09\uFF1B\u5355\u4E2A\u5B57\u7B26\uFF0C\u7559\u7A7A\u4E0D\u7ED1\u5B9A",
+      "keyOptionD"
+    );
+    this.addKeyBindingSetting(
+      containerEl,
+      "\u6807\u8BB0\u5FEB\u6377\u952E\uFF1A\u6536\u85CF",
+      "\u6309\u4E0B\u8BE5\u952E\u5207\u6362\u5F53\u524D\u9898\u7684\u6536\u85CF\u6807\u8BB0\uFF1B\u5355\u4E2A\u5B57\u7B26\uFF0C\u5927\u5C0F\u5199\u4E0D\u654F\u611F\uFF0C\u7559\u7A7A\u4E0D\u7ED1\u5B9A",
+      "keyFavorite"
+    );
+    this.addKeyBindingSetting(
+      containerEl,
+      "\u6807\u8BB0\u5FEB\u6377\u952E\uFF1A\u638C\u63E1",
+      "\u6309\u4E0B\u8BE5\u952E\u5207\u6362\u5F53\u524D\u9898\u7684\u638C\u63E1\u6807\u8BB0\uFF1B\u5355\u4E2A\u5B57\u7B26\uFF0C\u7559\u7A7A\u4E0D\u7ED1\u5B9A",
+      "keyMastered"
+    );
+    this.addKeyBindingSetting(
+      containerEl,
+      "\u6807\u8BB0\u5FEB\u6377\u952E\uFF1A\u91CD\u590D",
+      "\u6309\u4E0B\u8BE5\u952E\u5207\u6362\u5F53\u524D\u9898\u7684\u91CD\u590D\u6807\u8BB0\uFF1B\u5355\u4E2A\u5B57\u7B26\uFF0C\u7559\u7A7A\u4E0D\u7ED1\u5B9A",
+      "keyRepeat"
+    );
     this.addNumberSetting(
       containerEl,
       "\u7B54\u5BF9\u81EA\u52A8\u8DF3\u8F6C\u5EF6\u8FDF\uFF08\u79D2\uFF09",
@@ -1637,6 +1793,18 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
         }
       })
     );
+  }
+  /** 键盘绑定设置：单字符文本框，change 时写入（取输入的首个字符，trim 空串合法=不绑定）。 */
+  addKeyBindingSetting(containerEl, name, desc, key) {
+    new import_obsidian3.Setting(containerEl).setName(name).setDesc(desc).addText((text) => {
+      const original = this.plugin.settings[key];
+      text.setPlaceholder(String(DEFAULT_SETTINGS[key])).setValue(original).onChange((value) => {
+        const binding = value.trim().slice(0, 1);
+        text.inputEl.value = binding;
+        this.plugin.settings[key] = binding;
+        void this.plugin.saveSettings();
+      });
+    });
   }
   addFilterDefaultSetting(containerEl, label, key) {
     new import_obsidian3.Setting(containerEl).setName(`\u9ED8\u8BA4\u7B5B\u9009: ${label}`).setDesc(`\u6253\u5F00\u5237\u9898\u9762\u677F\u65F6\u300C${label}\u300D\u7B5B\u9009\u7684\u9ED8\u8BA4\u72B6\u6001`).addDropdown(
@@ -4138,6 +4306,10 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     this.swipeBound = false;
     /** L4: 刷题进度弹窗是否已打开（防重入：连续点击不重复弹窗）。 */
     this.progressModalOpen = false;
+    /** 当前题的选项按显示顺序排列（键盘快捷键按显示位置触发；renderQuestion 每次重建）。 */
+    this.currentDisplayOptions = [];
+    /** 标记复选框引用（键盘快捷键触发原生 change 事件复用点击逻辑；空列表/渲染时重置）。 */
+    this.markCheckboxes = {};
     this.plugin = plugin;
     this.stateManager = stateManager;
     this.vault = vault;
@@ -4263,12 +4435,14 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       this.contentEl.focus();
     });
     this.registerDomEvent(document, "keydown", (e) => {
+      if (!this.getSettings().keyboardBindingsEnabled) return;
       if (this.answering && !this.showingAnswer || this.navigating) return;
       const active = document.activeElement;
       if (!active) return;
       const focusedInPanel = active === this.contentEl || this.contentEl.contains(active);
       if (!focusedInPanel) return;
-      if (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT" || active.isContentEditable || active.closest("[contenteditable]")) {
+      const isTextEditableInput = active.tagName === "INPUT" && active.type !== "checkbox" && active.type !== "radio";
+      if (isTextEditableInput || active.tagName === "TEXTAREA" || active.tagName === "SELECT" || active.isContentEditable || active.closest("[contenteditable]")) {
         return;
       }
       if (e.key === "ArrowLeft") {
@@ -4277,6 +4451,8 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       } else if (e.key === "ArrowRight") {
         e.preventDefault();
         void this.nextQuestion();
+      } else {
+        this.handleKeyBinding(e);
       }
     });
   }
@@ -5243,6 +5419,8 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     this.questionArea.empty();
     this.feedbackArea.empty();
     this.editArea.empty();
+    this.currentDisplayOptions = [];
+    this.markCheckboxes = {};
     this.updateProgress();
     if (this.filteredQuestions.length === 0 || this.currentIndex < 0 || this.currentIndex >= this.filteredQuestions.length) {
       this.questionArea.createEl("p", {
@@ -5306,6 +5484,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         this.currentShuffledOptions = displayOptions;
       }
     }
+    this.currentDisplayOptions = displayOptions;
     const answerKeys = multi ? question.answer.split("") : [question.answer];
     for (let i = 0; i < displayOptions.length; i++) {
       const opt = displayOptions[i];
@@ -5758,8 +5937,42 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     if (!res) return;
     await this.applyResetChoice(res);
   }
+  /**
+   * 选项/标记自定义快捷键：resolveKeyBinding 命中后触发。
+   * - 选项：按显示位置取 currentDisplayOptions 的原始 key 作答/多选切换，
+   *   与点击选项同一入口；已答题（showingAnswer）或作答中不触发（与点击绑定口径一致），
+   *   该题选项不足该位置时不响应。
+   * - 标记：翻转对应复选框并派发原生 change 事件，完整复用点击的处理链
+   *   （saveQuestionMeta + 重筛定位 + 渲染 + 保存）。带修饰键（Ctrl/Meta/Alt）不响应，
+   *   避免劫持浏览器/应用快捷键。
+   */
+  handleKeyBinding(e) {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const target = resolveKeyBinding(this.getSettings(), e.key);
+    if (!target) return;
+    const question = this.filteredQuestions[this.currentIndex];
+    if (!question) return;
+    if (target.kind === "option") {
+      if (this.answering || this.showingAnswer) return;
+      const opt = this.currentDisplayOptions[target.index];
+      if (!opt) return;
+      e.preventDefault();
+      if (this.isMultiChoice(question)) {
+        this.toggleMultiOption(opt.key);
+      } else {
+        void this.handleAnswer(opt.key);
+      }
+      return;
+    }
+    const cb = this.markCheckboxes[target.field];
+    if (!cb) return;
+    e.preventDefault();
+    cb.checked = !cb.checked;
+    cb.dispatchEvent(new Event("change"));
+  }
   renderCheckboxArea(question) {
     this.checkboxArea.empty();
+    this.markCheckboxes = {};
     const fields = [
       { key: "favorite", label: "\u6536\u85CF", value: question.favorite },
       { key: "mastered", label: "\u638C\u63E1", value: question.mastered },
@@ -5773,6 +5986,9 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         attr: { "data-field": f.key }
       });
       cb.checked = f.value === "1";
+      if (f.key === "favorite" || f.key === "mastered" || f.key === "repeat") {
+        this.markCheckboxes[f.key] = cb;
+      }
       labelEl.createSpan({ text: " " + f.label });
       cb.addEventListener("change", () => {
         const q = question;
@@ -7353,6 +7569,7 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
       const n = Number(v);
       return Number.isNaN(n) ? fallback : n;
     };
+    const toBinding = (v, fallback) => typeof v === "string" ? v : fallback;
     const clean = {};
     for (const [k, v] of Object.entries(raw)) {
       if (v !== null && v !== void 0) {
@@ -7371,7 +7588,15 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
         raw.memoryDailyNew,
         DEFAULT_SETTINGS.memoryDailyNew
       ),
-      swipeNavigation: typeof raw.swipeNavigation === "boolean" ? raw.swipeNavigation : DEFAULT_SETTINGS.swipeNavigation
+      swipeNavigation: typeof raw.swipeNavigation === "boolean" ? raw.swipeNavigation : DEFAULT_SETTINGS.swipeNavigation,
+      keyboardBindingsEnabled: typeof raw.keyboardBindingsEnabled === "boolean" ? raw.keyboardBindingsEnabled : DEFAULT_SETTINGS.keyboardBindingsEnabled,
+      keyOptionA: toBinding(raw.keyOptionA, DEFAULT_SETTINGS.keyOptionA),
+      keyOptionB: toBinding(raw.keyOptionB, DEFAULT_SETTINGS.keyOptionB),
+      keyOptionC: toBinding(raw.keyOptionC, DEFAULT_SETTINGS.keyOptionC),
+      keyOptionD: toBinding(raw.keyOptionD, DEFAULT_SETTINGS.keyOptionD),
+      keyFavorite: toBinding(raw.keyFavorite, DEFAULT_SETTINGS.keyFavorite),
+      keyMastered: toBinding(raw.keyMastered, DEFAULT_SETTINGS.keyMastered),
+      keyRepeat: toBinding(raw.keyRepeat, DEFAULT_SETTINGS.keyRepeat)
     };
   }
   async saveSettings() {

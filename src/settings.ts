@@ -112,6 +112,80 @@ export class CSVQuizSettingTab extends PluginSettingTab {
         ],
       },
       {
+        type: "group",
+        heading: "键盘绑定",
+        items: [
+          {
+            name: "键盘绑定",
+            desc: "刷题面板内启用键盘快捷键（含左右方向键切题与下方选项/标记快捷键）；关闭后全部键盘操作禁用",
+            control: { type: "toggle", key: "keyboardBindingsEnabled" },
+          },
+          {
+            name: "选项快捷键：第 1 个显示选项",
+            desc: "按下该键选择当前题第 1 个显示的选项（选项打乱时与屏幕显示的 A 位一致）；单个字符，大小写不敏感，留空不绑定",
+            control: {
+              type: "text",
+              key: "keyOptionA",
+              defaultValue: DEFAULT_SETTINGS.keyOptionA,
+            },
+          },
+          {
+            name: "选项快捷键：第 2 个显示选项",
+            desc: "按下该键选择第 2 个显示的选项（屏幕 B 位）；单个字符，留空不绑定",
+            control: {
+              type: "text",
+              key: "keyOptionB",
+              defaultValue: DEFAULT_SETTINGS.keyOptionB,
+            },
+          },
+          {
+            name: "选项快捷键：第 3 个显示选项",
+            desc: "按下该键选择第 3 个显示的选项（屏幕 C 位）；单个字符，留空不绑定",
+            control: {
+              type: "text",
+              key: "keyOptionC",
+              defaultValue: DEFAULT_SETTINGS.keyOptionC,
+            },
+          },
+          {
+            name: "选项快捷键：第 4 个显示选项",
+            desc: "按下该键选择第 4 个显示的选项（屏幕 D 位）；单个字符，留空不绑定",
+            control: {
+              type: "text",
+              key: "keyOptionD",
+              defaultValue: DEFAULT_SETTINGS.keyOptionD,
+            },
+          },
+          {
+            name: "标记快捷键：收藏",
+            desc: "按下该键切换当前题的收藏标记；单个字符，大小写不敏感，留空不绑定",
+            control: {
+              type: "text",
+              key: "keyFavorite",
+              defaultValue: DEFAULT_SETTINGS.keyFavorite,
+            },
+          },
+          {
+            name: "标记快捷键：掌握",
+            desc: "按下该键切换当前题的掌握标记；单个字符，留空不绑定",
+            control: {
+              type: "text",
+              key: "keyMastered",
+              defaultValue: DEFAULT_SETTINGS.keyMastered,
+            },
+          },
+          {
+            name: "标记快捷键：重复",
+            desc: "按下该键切换当前题的重复标记；单个字符，留空不绑定",
+            control: {
+              type: "text",
+              key: "keyRepeat",
+              defaultValue: DEFAULT_SETTINGS.keyRepeat,
+            },
+          },
+        ],
+      },
+      {
         name: "答对自动跳转延迟（秒）",
         desc: "答对后自动跳转到下一题的等待时间，0 表示不自动跳转",
         control: {
@@ -337,6 +411,56 @@ export class CSVQuizSettingTab extends PluginSettingTab {
       "memoryUpdateInNormalMode"
     );
 
+    new Setting(containerEl).setName("键盘绑定").setHeading();
+    this.addToggleSetting(
+      containerEl,
+      "键盘绑定",
+      "刷题面板内启用键盘快捷键（含左右方向键切题与下方选项/标记快捷键）；关闭后全部键盘操作禁用",
+      "keyboardBindingsEnabled"
+    );
+    this.addKeyBindingSetting(
+      containerEl,
+      "选项快捷键：第 1 个显示选项",
+      "按下该键选择当前题第 1 个显示的选项（选项打乱时与屏幕显示的 A 位一致）；单个字符，大小写不敏感，留空不绑定",
+      "keyOptionA"
+    );
+    this.addKeyBindingSetting(
+      containerEl,
+      "选项快捷键：第 2 个显示选项",
+      "按下该键选择第 2 个显示的选项（屏幕 B 位）；单个字符，留空不绑定",
+      "keyOptionB"
+    );
+    this.addKeyBindingSetting(
+      containerEl,
+      "选项快捷键：第 3 个显示选项",
+      "按下该键选择第 3 个显示的选项（屏幕 C 位）；单个字符，留空不绑定",
+      "keyOptionC"
+    );
+    this.addKeyBindingSetting(
+      containerEl,
+      "选项快捷键：第 4 个显示选项",
+      "按下该键选择第 4 个显示的选项（屏幕 D 位）；单个字符，留空不绑定",
+      "keyOptionD"
+    );
+    this.addKeyBindingSetting(
+      containerEl,
+      "标记快捷键：收藏",
+      "按下该键切换当前题的收藏标记；单个字符，大小写不敏感，留空不绑定",
+      "keyFavorite"
+    );
+    this.addKeyBindingSetting(
+      containerEl,
+      "标记快捷键：掌握",
+      "按下该键切换当前题的掌握标记；单个字符，留空不绑定",
+      "keyMastered"
+    );
+    this.addKeyBindingSetting(
+      containerEl,
+      "标记快捷键：重复",
+      "按下该键切换当前题的重复标记；单个字符，留空不绑定",
+      "keyRepeat"
+    );
+
     this.addNumberSetting(
       containerEl,
       "答对自动跳转延迟（秒）",
@@ -516,6 +640,31 @@ export class CSVQuizSettingTab extends PluginSettingTab {
             }
           })
       );
+  }
+
+  /** 键盘绑定设置：单字符文本框，change 时写入（取输入的首个字符，trim 空串合法=不绑定）。 */
+  private addKeyBindingSetting(
+    containerEl: HTMLElement,
+    name: string,
+    desc: string,
+    key: keyof PluginSettings
+  ): void {
+    new Setting(containerEl)
+      .setName(name)
+      .setDesc(desc)
+      .addText((text) => {
+        const original = this.plugin.settings[key] as string;
+        text.setPlaceholder(String(DEFAULT_SETTINGS[key]))
+          .setValue(original)
+          .onChange((value) => {
+            // 取 trim 后的首个字符作为绑定；空串 = 不绑定（合法值，直接保存）
+            const binding = value.trim().slice(0, 1);
+            text.inputEl.value = binding;
+            (this.plugin.settings as unknown as Record<string, string>)[key] =
+              binding;
+            void this.plugin.saveSettings();
+          });
+      });
   }
 
   private addFilterDefaultSetting(

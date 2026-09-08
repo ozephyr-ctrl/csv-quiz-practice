@@ -209,6 +209,9 @@ export default class CSVQuizPlugin extends Plugin {
       const n = Number(v);
       return Number.isNaN(n) ? fallback : n;
     };
+    // 键盘绑定为单字符串：非字符串（类型损坏）回退默认值；空串合法（= 不绑定）
+    const toBinding = (v: unknown, fallback: string): string =>
+      typeof v === "string" ? v : fallback;
 
     // L3: 以 DEFAULT_SETTINGS 为基座合并（单一默认值来源）；过滤 null/undefined
     // 值，使布尔/字符串字段保持原有「?? 默认值」语义（与手写默认值行为等价）。
@@ -235,6 +238,17 @@ export default class CSVQuizPlugin extends Plugin {
         typeof raw.swipeNavigation === "boolean"
           ? raw.swipeNavigation
           : DEFAULT_SETTINGS.swipeNavigation,
+      keyboardBindingsEnabled:
+        typeof raw.keyboardBindingsEnabled === "boolean"
+          ? raw.keyboardBindingsEnabled
+          : DEFAULT_SETTINGS.keyboardBindingsEnabled,
+      keyOptionA: toBinding(raw.keyOptionA, DEFAULT_SETTINGS.keyOptionA),
+      keyOptionB: toBinding(raw.keyOptionB, DEFAULT_SETTINGS.keyOptionB),
+      keyOptionC: toBinding(raw.keyOptionC, DEFAULT_SETTINGS.keyOptionC),
+      keyOptionD: toBinding(raw.keyOptionD, DEFAULT_SETTINGS.keyOptionD),
+      keyFavorite: toBinding(raw.keyFavorite, DEFAULT_SETTINGS.keyFavorite),
+      keyMastered: toBinding(raw.keyMastered, DEFAULT_SETTINGS.keyMastered),
+      keyRepeat: toBinding(raw.keyRepeat, DEFAULT_SETTINGS.keyRepeat),
     };
   }
 

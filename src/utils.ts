@@ -1,4 +1,4 @@
-import { QuizSessionState, MemoryCard } from "./types";
+import { QuizSessionState, MemoryCard, PluginSettings } from "./types";
 
 export function shuffle<T>(array: T[]): T[] {
   const result = [...array];
@@ -191,4 +191,45 @@ export function normalizeMemoryCards(
     if (c !== null) result[id] = c;
   }
   return result;
+}
+
+/* ===================== 键盘绑定解析 ===================== */
+
+/** 键盘绑定命中结果：选项按显示位置（0 起），标记为固定三字段之一。 */
+export type KeyBindingTarget =
+  | { kind: "option"; index: number }
+  | { kind: "mark"; field: "favorite" | "mastered" | "repeat" };
+
+/**
+ * 解析按键命中的自定义绑定（选项快捷键/标记快捷键）。
+ * 匹配规则：绑定值 trim 后与按键（KeyboardEvent.key）忽略大小写比较；
+ * 绑定为空串/纯空白 = 未绑定（忽略）。选项优先于标记（重复绑定时先命中选项）。
+ * 未命中返回 null。
+ */
+export function resolveKeyBinding(
+  settings: PluginSettings,
+  key: string
+): KeyBindingTarget | null {
+  const k = key.trim().toLowerCase();
+  if (!k) return null;
+  const optionBindings = [
+    settings.keyOptionA,
+    settings.keyOptionB,
+    settings.keyOptionC,
+    settings.keyOptionD,
+  ];
+  for (let i = 0; i < optionBindings.length; i++) {
+    const b = (optionBindings[i] ?? "").trim().toLowerCase();
+    if (b && b === k) return { kind: "option", index: i };
+  }
+  const markBindings: Array<["favorite" | "mastered" | "repeat", string]> = [
+    ["favorite", settings.keyFavorite],
+    ["mastered", settings.keyMastered],
+    ["repeat", settings.keyRepeat],
+  ];
+  for (const [field, binding] of markBindings) {
+    const b = (binding ?? "").trim().toLowerCase();
+    if (b && b === k) return { kind: "mark", field };
+  }
+  return null;
 }

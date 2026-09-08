@@ -7,8 +7,9 @@ import {
   normalizeAnswerValue,
   normalizeMemoryCard,
   normalizeMemoryCards,
+  resolveKeyBinding,
 } from "../utils";
-import { QuizSessionState, MemoryCard } from "../types";
+import { QuizSessionState, MemoryCard, DEFAULT_SETTINGS } from "../types";
 
 const validCard: MemoryCard = {
   state: 2,
@@ -184,5 +185,44 @@ describe("shuffle / sortByDisplayOrder", () => {
     ];
     const sorted = sortByDisplayOrder(items, ["1", "3"]);
     expect(sorted.map((x) => x.id)).toEqual(["1", "3", "new"]);
+  });
+});
+
+describe("resolveKeyBinding", () => {
+  const settings = {
+    ...DEFAULT_SETTINGS,
+  };
+
+  it("默认映射：1-4 命中选项位，m/e/x 命中标记", () => {
+    expect(resolveKeyBinding(settings, "1")).toEqual({ kind: "option", index: 0 });
+    expect(resolveKeyBinding(settings, "4")).toEqual({ kind: "option", index: 3 });
+    expect(resolveKeyBinding(settings, "m")).toEqual({ kind: "mark", field: "favorite" });
+    expect(resolveKeyBinding(settings, "e")).toEqual({ kind: "mark", field: "mastered" });
+    expect(resolveKeyBinding(settings, "x")).toEqual({ kind: "mark", field: "repeat" });
+  });
+
+  it("大小写不敏感；空串/空白/未绑定键不命中", () => {
+    expect(resolveKeyBinding(settings, "M")).toEqual({ kind: "mark", field: "favorite" });
+    expect(resolveKeyBinding(settings, "5")).toBeNull();
+    expect(resolveKeyBinding(settings, "")).toBeNull();
+    expect(resolveKeyBinding(settings, " ")).toBeNull();
+    expect(resolveKeyBinding({ ...settings, keyFavorite: "  " }, " ")).toBeNull();
+    expect(resolveKeyBinding({ ...settings, keyFavorite: "" }, "m")).toBeNull();
+  });
+
+  it("绑定值 trim 后比较；选项与标记重复绑定时选项优先", () => {
+    expect(resolveKeyBinding({ ...settings, keyMastered: " q " }, "Q")).toEqual({
+      kind: "mark",
+      field: "mastered",
+    });
+    // 收藏绑定改成 "1" 与选项位 1 冲突 → 选项优先
+    expect(resolveKeyBinding({ ...settings, keyFavorite: "1" }, "1")).toEqual({
+      kind: "option",
+      index: 0,
+    });
+  });
+
+  it("方向键等非单字符键默认不命中（不影响内置方向键处理）", () => {
+    expect(resolveKeyBinding(settings, "ArrowLeft")).toBeNull();
   });
 });
