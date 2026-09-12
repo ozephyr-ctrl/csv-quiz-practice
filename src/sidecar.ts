@@ -73,9 +73,9 @@ export type SidecarReadResult =
   | { status: "corrupt"; reason: string }; // sidecar 与 bak 均损坏
 
 /**
- * 读 sidecar。sidecar 不存在时尝试从 .bak 恢复（writeSidecar 的 remove+rename
- * 极端窗口下 sidecar 可能缺失但 tmp 残留，.bak 是唯一可恢复来源）；恢复失败
- * 才返回 missing。损坏时自动尝试从 .bak 恢复；bak 也损坏返回 corrupt。
+ * 读 sidecar。sidecar 不存在时尝试从 .bak 恢复（writeSidecar 的覆盖写入持续
+ * 失败的极端窗口下 sidecar 可能缺失、tmp 已尽力清理，.bak 是唯一可恢复来源）；
+ * 恢复失败才返回 missing。损坏时自动尝试从 .bak 恢复；bak 也损坏返回 corrupt。
  */
 export async function readSidecar(
   vault: Vault,
@@ -83,7 +83,7 @@ export async function readSidecar(
 ): Promise<SidecarReadResult> {
   const sidecarPath = sidecarPathFor(contentPath);
   if (!(await vault.adapter.exists(sidecarPath))) {
-    // 缺失：尝试从 .bak 恢复（覆盖「remove 成功、rename 失败」的极端窗口，
+    // 缺失：尝试从 .bak 恢复（覆盖写入长期失败导致原文件未落地的极端窗口，
     // 避免返回 missing 导致进度被当成空状态静默初始化）
     const bakPath = backupPathFor(contentPath);
     const bakExists = await vault.adapter.exists(bakPath);
@@ -155,11 +155,141 @@ export async function readSidecar(
   }
 }
 
+/** sidecar 保存防抖间隔（ms）：降低同步目录（iCloud 等）的写入频率与冲突副本概率。 */
+export const SIDECAR_SAVE_DEBOUNCE_MS = 1000;
+
+/** 同步目录下常见的「文件被占用/锁定」类可重试错误码（Windows EBUSY，权限类 EPERM/EACCES，目录非空 ENOTEMPTY）。 */
+const RETRYABLE_FS_CODES = new Set(["EBUSY", "EPERM", "EACCES", "ENOTEMPTY"]);
+
+/** 判断错误是否为可重试的文件系统错误：错误码命中集合，或 message 匹配 EBUSY/EPERM/EACCES/占用/锁定。 */
+export function isRetryableFsError(e: unknown): boolean {
+  if (e !== null && typeof e === "object") {
+    const code = (e as { code?: unknown }).code;
+    if (typeof code === "string" && RETRYABLE_FS_CODES.has(code)) return true;
+  }
+  const message = e instanceof Error ? e.message : String(e);
+  return /\b(EBUSY|EPERM|EACCES)\b|resource busy|locked/i.test(message);
+}
+
+/** renameOverwriteWithRetry 的重试参数（均可选，默认值见函数实现）。 */
+export interface RenameRetryOptions {
+  /** 重试总预算（ms）：从首次尝试起累计超过后抛出最后一次错误。 */
+  budgetMs?: number;
+  /** 退避基数（ms）：第 n 次失败后延迟 baseDelayMs × (n + 1)。 */
+  baseDelayMs?: number;
+  /** 退避上限（ms）。 */
+  maxDelayMs?: number;
+}
+
+const DEFAULT_RENAME_RETRY_BUDGET_MS = 30000;
+const DEFAULT_RENAME_RETRY_BASE_DELAY_MS = 50;
+const DEFAULT_RENAME_RETRY_MAX_DELAY_MS = 250;
+
+/** 睡眠指定毫秒（用全局 setTimeout：vitest 为 node 环境，无 window）。 */
+function sleep(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
 /**
- * 原子写：写 <path>.tmp 成功后 rename 覆盖（避免写一半损坏）。
- * 注意：Obsidian 的 vault.adapter.rename 在目标文件已存在时会抛
- * "destination file already exist"（它显式检查目标存在，不自动覆盖），
- * 因此 rename 前必须先删除已存在的目标文件。
+ * 懒加载 Node fs.promises。必须放在函数内 try/catch：
+ * manifest 是 isDesktopOnly:false，esbuild 将 fs 标记 external，若在模块顶层
+ * import/require fs，移动端加载插件即崩溃。require 不可用（移动端）时返回 null。
+ */
+function tryRequireNodeFsPromises(): typeof import("fs").promises | null {
+  try {
+    return (require("fs") as typeof import("fs")).promises;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 执行一次覆盖式移动。桌面快路径：adapter 提供 getFullPath 且 Node fs 可用时，
+ * 用 fs.rename 覆盖目标（Windows 走 MoveFileEx 覆盖语义，无需先删目标，避开
+ * remove 的 EBUSY）。**一旦进入快路径，任何错误（含非可重试的 ENOENT，典型
+ * 源 tmp 被同步服务/杀软清掉）都直接抛给重试循环，绝不 fall through**——
+ * 否则源缺失时兜底会先 remove 掉唯一有效的目标文件，再 rename 失败造成数据丢失。
+ * 仅当 getFullPath 缺失或 require("fs") 失败（移动端/异常环境）时才走兜底路径：
+ * 目标存在则先 remove 再 adapter.rename（Obsidian rename 不覆盖已存在目标）。
+ */
+async function renameOverwriteOnce(
+  vault: Vault,
+  sourcePath: string,
+  destPath: string
+): Promise<void> {
+  const adapter = vault.adapter as unknown as {
+    getFullPath?: (p: string) => string;
+  };
+  if (typeof adapter.getFullPath === "function") {
+    const fsp = tryRequireNodeFsPromises();
+    if (fsp) {
+      // 桌面快路径：错误一律上报（可重试错误由外层退避重试；非可重试立即抛）
+      await fsp.rename(
+        adapter.getFullPath(sourcePath),
+        adapter.getFullPath(destPath)
+      );
+      return;
+    }
+  }
+  if (await vault.adapter.exists(destPath)) {
+    await vault.adapter.remove(destPath);
+  }
+  await vault.adapter.rename(sourcePath, destPath);
+}
+
+/**
+ * 覆盖式移动（带重试）：把 sourcePath 移动到 destPath，目标已存在时覆盖。
+ * 桌面端优先 Node fs.rename（原子覆盖，避免 unlink 目标导致的 EBUSY）；其余
+ * 情况回退「存在则 remove + rename」兜底。可重试错误按预算退避重试（首次
+ * console.warn 一次，后续不刷屏）；总耗时超过 budgetMs 抛出最后一次错误；
+ * 非可重试错误立即抛出。
+ */
+export async function renameOverwriteWithRetry(
+  vault: Vault,
+  sourcePath: string,
+  destPath: string,
+  options: RenameRetryOptions = {}
+): Promise<void> {
+  const budgetMs = options.budgetMs ?? DEFAULT_RENAME_RETRY_BUDGET_MS;
+  const baseDelayMs = options.baseDelayMs ?? DEFAULT_RENAME_RETRY_BASE_DELAY_MS;
+  const maxDelayMs = options.maxDelayMs ?? DEFAULT_RENAME_RETRY_MAX_DELAY_MS;
+  const startedAt = Date.now();
+  let failures = 0;
+  let warned = false;
+  for (;;) {
+    try {
+      await renameOverwriteOnce(vault, sourcePath, destPath);
+      return;
+    } catch (e: unknown) {
+      if (!isRetryableFsError(e)) throw e;
+      if (!warned) {
+        warned = true;
+        console.warn("CSV Quiz: 文件被占用，正在重试覆盖写入", sourcePath, e);
+      }
+      if (Date.now() - startedAt >= budgetMs) throw e;
+      const delay = Math.min(maxDelayMs, baseDelayMs * (failures + 1));
+      failures++;
+      await sleep(delay);
+    }
+  }
+}
+
+/** 清理失败的临时文件（exists→remove）；清理自身的错误吞掉，避免掩盖原始错误。 */
+async function cleanupTempFile(vault: Vault, tmpPath: string): Promise<void> {
+  try {
+    if (await vault.adapter.exists(tmpPath)) {
+      await vault.adapter.remove(tmpPath);
+    }
+  } catch {
+    // 残留 .tmp 可被下次写入覆盖，不因清理失败改变抛出行为
+  }
+}
+
+/**
+ * 写入 sidecar：先写 <path>.tmp（紧凑 JSON，无缩进，缩小体积与同步冲突面），
+ * 成功后用 renameOverwriteWithRetry 覆盖最终文件（桌面原子 rename / 兜底
+ * remove+rename，EBUSY 等可重试错误带预算重试）。tmp 写入或覆盖失败时清理
+ * 残留 tmp，避免被 iCloud 等同步服务当成新文件产生冲突副本。
  * 写前应确保目录存在（内容源文件已存在时同目录必然存在，无需处理）。
  */
 export async function writeSidecar(
@@ -169,17 +299,19 @@ export async function writeSidecar(
 ): Promise<void> {
   const finalPath = sidecarPathFor(contentPath);
   const tmpPath = finalPath + ".tmp";
-  await vault.adapter.write(tmpPath, JSON.stringify(data, null, 2));
-  // Obsidian rename 不覆盖目标：先删除已存在的目标（若 remove 后 rename 失败的
-  // 极端窗口内原文件丢失，由 .bak 备份机制兜底恢复）
-  if (await vault.adapter.exists(finalPath)) {
-    await vault.adapter.remove(finalPath);
+  try {
+    await vault.adapter.write(tmpPath, JSON.stringify(data));
+    await renameOverwriteWithRetry(vault, tmpPath, finalPath);
+  } catch (e) {
+    // write 半写/覆盖失败均清理残留 tmp，避免被同步服务当成新文件产生冲突副本
+    await cleanupTempFile(vault, tmpPath);
+    throw e;
   }
-  await vault.adapter.rename(tmpPath, finalPath);
 }
 
 /** 创建/覆盖 .bak 备份（复制当前 sidecar 内容）。sidecar 不存在时静默跳过。
- *  失败仅 console.error，不抛出（备份属尽力而为，不应导致调用方 unhandled rejection）。 */
+ *  走 tmp + renameOverwriteWithRetry 稳健路径（bak 是损坏恢复的唯一来源）；
+ *  失败清理 tmp 并抛出，由调用方 try/catch console.error 维持尽力而为语义。 */
 export async function backupSidecar(
   vault: Vault,
   contentPath: string
@@ -187,11 +319,14 @@ export async function backupSidecar(
   const srcPath = sidecarPathFor(contentPath);
   if (!(await vault.adapter.exists(srcPath))) return;
   const bakPath = backupPathFor(contentPath);
+  const tmpPath = bakPath + ".tmp";
   try {
     const content = await vault.adapter.read(srcPath);
-    await vault.adapter.write(bakPath, content);
+    await vault.adapter.write(tmpPath, content);
+    await renameOverwriteWithRetry(vault, tmpPath, bakPath);
   } catch (e) {
-    console.error("CSV Quiz: 备份 sidecar 失败", e);
+    await cleanupTempFile(vault, tmpPath);
+    throw e;
   }
 }
 

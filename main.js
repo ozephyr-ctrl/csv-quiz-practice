@@ -986,24 +986,102 @@ async function readSidecar(vault, contentPath) {
     };
   }
 }
+var SIDECAR_SAVE_DEBOUNCE_MS = 1e3;
+var RETRYABLE_FS_CODES = /* @__PURE__ */ new Set(["EBUSY", "EPERM", "EACCES", "ENOTEMPTY"]);
+function isRetryableFsError(e) {
+  if (e !== null && typeof e === "object") {
+    const code = e.code;
+    if (typeof code === "string" && RETRYABLE_FS_CODES.has(code)) return true;
+  }
+  const message = e instanceof Error ? e.message : String(e);
+  return /\b(EBUSY|EPERM|EACCES)\b|resource busy|locked/i.test(message);
+}
+var DEFAULT_RENAME_RETRY_BUDGET_MS = 3e4;
+var DEFAULT_RENAME_RETRY_BASE_DELAY_MS = 50;
+var DEFAULT_RENAME_RETRY_MAX_DELAY_MS = 250;
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+function tryRequireNodeFsPromises() {
+  try {
+    return require("fs").promises;
+  } catch (e) {
+    return null;
+  }
+}
+async function renameOverwriteOnce(vault, sourcePath, destPath) {
+  const adapter = vault.adapter;
+  if (typeof adapter.getFullPath === "function") {
+    const fsp = tryRequireNodeFsPromises();
+    if (fsp) {
+      await fsp.rename(
+        adapter.getFullPath(sourcePath),
+        adapter.getFullPath(destPath)
+      );
+      return;
+    }
+  }
+  if (await vault.adapter.exists(destPath)) {
+    await vault.adapter.remove(destPath);
+  }
+  await vault.adapter.rename(sourcePath, destPath);
+}
+async function renameOverwriteWithRetry(vault, sourcePath, destPath, options = {}) {
+  var _a, _b, _c;
+  const budgetMs = (_a = options.budgetMs) != null ? _a : DEFAULT_RENAME_RETRY_BUDGET_MS;
+  const baseDelayMs = (_b = options.baseDelayMs) != null ? _b : DEFAULT_RENAME_RETRY_BASE_DELAY_MS;
+  const maxDelayMs = (_c = options.maxDelayMs) != null ? _c : DEFAULT_RENAME_RETRY_MAX_DELAY_MS;
+  const startedAt = Date.now();
+  let failures = 0;
+  let warned = false;
+  for (; ; ) {
+    try {
+      await renameOverwriteOnce(vault, sourcePath, destPath);
+      return;
+    } catch (e) {
+      if (!isRetryableFsError(e)) throw e;
+      if (!warned) {
+        warned = true;
+        console.warn("CSV Quiz: \u6587\u4EF6\u88AB\u5360\u7528\uFF0C\u6B63\u5728\u91CD\u8BD5\u8986\u76D6\u5199\u5165", sourcePath, e);
+      }
+      if (Date.now() - startedAt >= budgetMs) throw e;
+      const delay = Math.min(maxDelayMs, baseDelayMs * (failures + 1));
+      failures++;
+      await sleep(delay);
+    }
+  }
+}
+async function cleanupTempFile(vault, tmpPath) {
+  try {
+    if (await vault.adapter.exists(tmpPath)) {
+      await vault.adapter.remove(tmpPath);
+    }
+  } catch (e) {
+  }
+}
 async function writeSidecar(vault, contentPath, data) {
   const finalPath = sidecarPathFor(contentPath);
   const tmpPath = finalPath + ".tmp";
-  await vault.adapter.write(tmpPath, JSON.stringify(data, null, 2));
-  if (await vault.adapter.exists(finalPath)) {
-    await vault.adapter.remove(finalPath);
+  try {
+    await vault.adapter.write(tmpPath, JSON.stringify(data));
+    await renameOverwriteWithRetry(vault, tmpPath, finalPath);
+  } catch (e) {
+    await cleanupTempFile(vault, tmpPath);
+    throw e;
   }
-  await vault.adapter.rename(tmpPath, finalPath);
 }
 async function backupSidecar(vault, contentPath) {
   const srcPath = sidecarPathFor(contentPath);
   if (!await vault.adapter.exists(srcPath)) return;
   const bakPath = backupPathFor(contentPath);
+  const tmpPath = bakPath + ".tmp";
   try {
     const content = await vault.adapter.read(srcPath);
-    await vault.adapter.write(bakPath, content);
+    await vault.adapter.write(tmpPath, content);
+    await renameOverwriteWithRetry(vault, tmpPath, bakPath);
   } catch (e) {
-    console.error("CSV Quiz: \u5907\u4EFD sidecar \u5931\u8D25", e);
+    await cleanupTempFile(vault, tmpPath);
+    throw e;
   }
 }
 function normalizeSidecar(raw) {
@@ -6822,7 +6900,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     if (!this.canPersistState) return;
     const state = this.buildCurrentState();
     this.lastSavedState = this.snapshotState(state);
-    this.stateManager.scheduleSave(state, 300);
+    this.stateManager.scheduleSave(state, SIDECAR_SAVE_DEBOUNCE_MS);
   }
 };
 /** 当前打开的视图实例数（模块级）：防止同一窗口内出现双实例互相覆盖进度。 */
@@ -6831,6 +6909,10 @@ var QuizView = _QuizView;
 
 // src/stateManager.ts
 var import_obsidian7 = require("obsidian");
+var SAVE_MAX_WAIT_MS = 3e3;
+function computeSaveDelay(delay, firstScheduledAt, now, maxWaitMs) {
+  return Math.max(0, Math.min(delay, firstScheduledAt + maxWaitMs - now));
+}
 var StateWriteQueue = class {
   constructor(plugin) {
     this.queue = [];
@@ -6872,6 +6954,8 @@ var StateManager = class {
   constructor(plugin) {
     this.currentState = null;
     this.saveTimer = null;
+    /** 本轮防抖的首次调度时间戳（maxWait 计时起点）；无挂起调度时为 null。 */
+    this.saveFirstScheduledAt = null;
     /** T3: 上次弹「保存失败」Notice 的时间戳（30 秒节流，避免反复失败时 Notice 刷屏）。 */
     this.lastSaveErrorNoticeAt = 0;
     this.settingsSaveTimer = null;
@@ -7086,14 +7170,14 @@ var StateManager = class {
     entry[field] = value;
     entry.ts = Date.now();
     if (this.currentState) {
-      this.scheduleSave(this.currentState, 300);
+      this.scheduleSave(this.currentState, SIDECAR_SAVE_DEBOUNCE_MS);
     }
   }
   /** 删除某题的整条 meta（内存）+ 调度保存。currentState 为 null 时仅改内存。 */
   clearQuestionMeta(questionId) {
     delete this.currentMeta[questionId];
     if (this.currentState) {
-      this.scheduleSave(this.currentState, 300);
+      this.scheduleSave(this.currentState, SIDECAR_SAVE_DEBOUNCE_MS);
     }
   }
   /** 从 currentState + currentMeta 组装 sidecar 全量数据（version 1）。 */
@@ -7153,24 +7237,33 @@ var StateManager = class {
     this.currentState = state;
     await this.persistNow();
   }
-  scheduleSave(state, delay = 300) {
+  /**
+   * 调度一次防抖保存：连续变更合并为最后一次后 delay(默认 1s) 落盘；但自本轮
+   * 首次调度起最长 SAVE_MAX_WAIT_MS(3s) 必落盘（computeSaveDelay 压缩剩余等待），
+   * 避免作答间隔始终小于防抖间隔时写盘被无限期推迟。
+   */
+  scheduleSave(state, delay = SIDECAR_SAVE_DEBOUNCE_MS) {
     this.currentState = state;
     const scheduledPath = this.contentPath;
     if (this.saveTimer !== null) {
       window.clearTimeout(this.saveTimer);
     }
+    const now = Date.now();
+    const firstScheduledAt = this.saveFirstScheduledAt === null ? now : this.saveFirstScheduledAt;
+    this.saveFirstScheduledAt = firstScheduledAt;
     this.saveTimer = window.setTimeout(() => {
       this.saveTimer = null;
+      this.saveFirstScheduledAt = null;
       if (this.contentPath !== scheduledPath) return;
       this.persistNow().catch((e) => {
         console.error("CSV Quiz: Failed to save state", e);
-        const now = Date.now();
-        if (now - this.lastSaveErrorNoticeAt < 3e4) return;
-        this.lastSaveErrorNoticeAt = now;
+        const now2 = Date.now();
+        if (now2 - this.lastSaveErrorNoticeAt < 3e4) return;
+        this.lastSaveErrorNoticeAt = now2;
         const message = e instanceof Error ? e.message : String(e);
         new import_obsidian7.Notice("\u5237\u9898\u8FDB\u5EA6\u4FDD\u5B58\u5931\u8D25: " + message);
       });
-    }, delay);
+    }, computeSaveDelay(delay, firstScheduledAt, now, SAVE_MAX_WAIT_MS));
   }
   async clearState() {
     this.cancelScheduledSave();
@@ -7190,6 +7283,7 @@ var StateManager = class {
       window.clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
+    this.saveFirstScheduledAt = null;
   }
   /**
    * 迁移旧 data.json.quizState → 指定内容源的 sidecar；成功后清空
@@ -7341,10 +7435,9 @@ var StateManager = class {
     for (const path of conflictPaths) {
       try {
         const dest = path + SIDECAR_MERGED_SUFFIX;
-        if (await this.vault.adapter.exists(dest)) {
-          await this.vault.adapter.remove(dest);
-        }
-        await this.vault.adapter.rename(path, dest);
+        await renameOverwriteWithRetry(this.vault, path, dest, {
+          budgetMs: 3e3
+        });
         archived++;
       } catch (e) {
         console.error("CSV Quiz: \u5F52\u6863\u51B2\u7A81\u526F\u672C\u5931\u8D25", path, e);

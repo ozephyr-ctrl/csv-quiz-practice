@@ -25,7 +25,7 @@ import {
 } from "./csvHandler";
 import { StateManager } from "./stateManager";
 import type { SidecarMergeOutcome } from "./stateManager";
-import { createBackupTimer } from "./sidecar";
+import { createBackupTimer, SIDECAR_SAVE_DEBOUNCE_MS } from "./sidecar";
 import type { SidecarMeta } from "./sidecar";
 import { decodeCqv, encodeCqv } from "./cqvHandler";
 import {
@@ -3433,6 +3433,6 @@ export class QuizView extends ItemView {
     const state = this.buildCurrentState();
     // F4: 记录脏检查基准（已排队或已写入磁盘的状态快照）
     this.lastSavedState = this.snapshotState(state);
-    this.stateManager.scheduleSave(state, 300);
+    this.stateManager.scheduleSave(state, SIDECAR_SAVE_DEBOUNCE_MS);
   }
 }

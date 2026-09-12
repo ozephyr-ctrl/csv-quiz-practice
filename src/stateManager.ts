@@ -15,15 +15,33 @@ import {
   mergeSidecarData,
   normalizeSidecar,
   readSidecar,
+  renameOverwriteWithRetry,
   sidecarPathFor,
   writeSidecar,
   SIDECAR_MERGED_SUFFIX,
+  SIDECAR_SAVE_DEBOUNCE_MS,
 } from "./sidecar";
 import { checkIdQuality, parseCSV } from "./csvHandler";
 
 interface DataPatch {
   settings?: PluginSettings;
   quizState?: QuizSessionState | null;
+}
+
+/** 防抖最长等待（ms）：连续变更不断重置防抖时，自首次调度起最迟 3s 必落盘（避免磁盘写入被无限期饿死）。 */
+const SAVE_MAX_WAIT_MS = 3000;
+
+/**
+ * 计算本次防抖的实际定时延迟：常规取 delay；自首次调度起累计逼近 maxWaitMs 时
+ * 压缩为剩余时间，保证首次调度后 maxWaitMs 内必然触发（连续重置也不会无限推迟）。
+ */
+export function computeSaveDelay(
+  delay: number,
+  firstScheduledAt: number,
+  now: number,
+  maxWaitMs: number
+): number {
+  return Math.max(0, Math.min(delay, firstScheduledAt + maxWaitMs - now));
 }
 
 class StateWriteQueue {
@@ -130,6 +148,8 @@ export class StateManager {
   private vault: Vault;
   private currentState: QuizSessionState | null = null;
   private saveTimer: number | null = null;
+  /** 本轮防抖的首次调度时间戳（maxWait 计时起点）；无挂起调度时为 null。 */
+  private saveFirstScheduledAt: number | null = null;
   /** T3: 上次弹「保存失败」Notice 的时间戳（30 秒节流，避免反复失败时 Notice 刷屏）。 */
   private lastSaveErrorNoticeAt = 0;
   private writeQueue: StateWriteQueue;
@@ -406,7 +426,7 @@ export class StateManager {
     // 冲突合并时间戳：记录该条目最近写入时间（较新者胜）
     entry.ts = Date.now();
     if (this.currentState) {
-      this.scheduleSave(this.currentState, 300);
+      this.scheduleSave(this.currentState, SIDECAR_SAVE_DEBOUNCE_MS);
     }
   }
 
@@ -414,7 +434,7 @@ export class StateManager {
   clearQuestionMeta(questionId: string): void {
     delete this.currentMeta[questionId];
     if (this.currentState) {
-      this.scheduleSave(this.currentState, 300);
+      this.scheduleSave(this.currentState, SIDECAR_SAVE_DEBOUNCE_MS);
     }
   }
 
@@ -480,9 +500,17 @@ export class StateManager {
     await this.persistNow();
   }
 
-  scheduleSave(state: QuizSessionState, delay: number = 300): void {
+  /**
+   * 调度一次防抖保存：连续变更合并为最后一次后 delay(默认 1s) 落盘；但自本轮
+   * 首次调度起最长 SAVE_MAX_WAIT_MS(3s) 必落盘（computeSaveDelay 压缩剩余等待），
+   * 避免作答间隔始终小于防抖间隔时写盘被无限期推迟。
+   */
+  scheduleSave(
+    state: QuizSessionState,
+    delay: number = SIDECAR_SAVE_DEBOUNCE_MS
+  ): void {
     // H-1: 立即同步 currentState（内存），保证切题库 flush（unloadSidecar 的
-    // persistNow）与状态栏刷新等读到最新状态，避免 300ms 窗口内丢最近进度；
+    // persistNow）与状态栏刷新等读到最新状态，避免防抖窗口内丢最近进度；
     // 回调内仍保留路径检查，防止挂起回调把旧题库状态写回。
     this.currentState = state;
     // M1: 快照入队时的 contentPath；定时器回调执行时若路径已切换（切换题库/
@@ -492,8 +520,15 @@ export class StateManager {
     if (this.saveTimer !== null) {
       window.clearTimeout(this.saveTimer);
     }
+    const now = Date.now();
+    // maxWait 计时起点：本轮防抖首次调度时间；持续重置时保持不变
+    const firstScheduledAt =
+      this.saveFirstScheduledAt === null ? now : this.saveFirstScheduledAt;
+    this.saveFirstScheduledAt = firstScheduledAt;
     this.saveTimer = window.setTimeout(() => {
       this.saveTimer = null;
+      // 本轮防抖结束（含路径切换丢弃分支）：重置 maxWait 计时
+      this.saveFirstScheduledAt = null;
       // M1: 路径已切换 → 丢弃本次写入（旧状态已由 unloadSidecar 的 persistNow 落盘，无需再写）。
       // 兼容模式（contentPath 恒为 null）下 scheduledPath 恒为 null，null !== null 恒 false，
       // 校验恒通过，不影响旧行为。
@@ -507,7 +542,7 @@ export class StateManager {
         const message = e instanceof Error ? e.message : String(e);
         new Notice("刷题进度保存失败: " + message);
       });
-    }, delay);
+    }, computeSaveDelay(delay, firstScheduledAt, now, SAVE_MAX_WAIT_MS));
   }
 
   async clearState(): Promise<void> {
@@ -530,6 +565,7 @@ export class StateManager {
       window.clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
+    this.saveFirstScheduledAt = null;
   }
 
   /**
@@ -730,10 +766,11 @@ export class StateManager {
     for (const path of conflictPaths) {
       try {
         const dest = path + SIDECAR_MERGED_SUFFIX;
-        if (await this.vault.adapter.exists(dest)) {
-          await this.vault.adapter.remove(dest);
-        }
-        await this.vault.adapter.rename(path, dest);
+        // 重试式覆盖归档：Windows 同步目录下 remove+rename 易 EBUSY，走桌面原子 rename/兜底重试。
+        // 预算收紧到 3s：多个副本串行归档时不因单副本 30s 重试阻塞视图渲染（失败者下次再试）
+        await renameOverwriteWithRetry(this.vault, path, dest, {
+          budgetMs: 3000,
+        });
         archived++;
       } catch (e) {
         console.error("CSV Quiz: 归档冲突副本失败", path, e);

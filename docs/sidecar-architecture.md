@@ -185,11 +185,18 @@ data.json
 
 ## 12. 写入与备份机制
 
-**原子写入（已确认）**：写 `题库.sidecar.json.tmp` → 成功后 `vault.adapter.rename` 覆盖（tmp + rename 原子化），避免写一半损坏。
+**原子写入（v3.1.11 加固）**：写 `题库.sidecar.json.tmp`（紧凑 JSON，无缩进，缩小体积与同步冲突面）→ 成功后重试式覆盖正式文件，避免写一半损坏：
+- 桌面端优先 `fs.rename` 原子覆盖（Windows MoveFileEx 覆盖语义，无需先删目标，避开 iCloud 同步目录下 remove 触发的 `EBUSY: resource busy or locked, unlink`）；
+- 桌面快路径（`getFullPath` 存在且 `require("fs")` 可用）的错误一律直接上报重试循环，**绝不 fall through 到兜底**——避免源 tmp 缺失（如被同步服务/杀软清掉）时兜底先删除唯一有效的目标文件再失败，造成数据丢失；
+- 兜底路径为「目标存在则 `remove` + `vault.adapter.rename`」（Obsidian rename 不覆盖已存在目标），仅在 `getFullPath` 缺失或 `require("fs")` 失败（移动端/异常环境）时启用；
+- `EBUSY / EPERM / EACCES / ENOTEMPTY` 等占用类错误按退避重试（默认总预算 30s，50ms 起、单次上限 250ms），总耗时超预算抛出最后一次错误；非可重试错误立即抛出（冲突副本归档时预算收紧为 3s）；
+- tmp 写入/覆盖失败时清理残留 tmp，避免被同步服务当成新文件产生冲突副本；
+- sidecar 写入防抖 **1s**（`SIDECAR_SAVE_DEBOUNCE_MS`），且自本轮首次调度起**最长 3s 强制落盘**（maxWait 压缩剩余等待），降低高频全量写加剧 iCloud 冲突副本的概率，同时避免连续作答期间写盘被无限期推迟。
 
 **备份机制（已确认）**：
 - 随心跳计时的"活跃 30 分钟"触发（面板打开才计时）
 - 覆盖式单份 `题库.sidecar.json.bak`（每题库保留一个）
+- 备份写入同样走 tmp + 重试式覆盖路径；失败清理 tmp 并抛出，由调用方 console.error 兜底（尽力而为，不影响主流程）
 - **仅读损坏时**自动从 bak 恢复 + 提示"状态文件损坏，已从备份恢复"
 - 写失败维持现状（保留内存 + 提示保存失败，不覆盖内存）
 - **级联损坏**（sidecar 与 bak 均损坏）→ 显式提示"状态与备份均损坏，是否重建新状态"（不静默重建）
@@ -227,7 +234,7 @@ data.json
 | 5 | 切换竞态 | 切换即落盘（unloadSidecar flush 语义） |
 | 6 | 文件关联 | 同目录同名物理约定；无路径校验；CSV/.cqv 独立状态；缺失提示重建 |
 | 7 | 写入频率 | 心跳 5s + 切换落盘自洽，脏检查挡无变化写入 |
-| 8 | 备份机制 | 活跃 30min 覆盖式单份 .bak；仅读损坏自动恢复；tmp+rename 原子写 |
+| 8 | 备份机制 | 活跃 30min 覆盖式单份 .bak；仅读损坏自动恢复；tmp+重试式覆盖原子写（EBUSY 退避重试、紧凑 JSON、防抖 1s/最长 3s 落盘） |
 | 9 | 迁移触发 | 每次启动检查；源 CSV 脏则拒绝迁移 |
 | 10 | 多窗口 | 接受现状（文档声明不支持跨窗口并发） |
 | 11 | 状态栏 | 切换题库时立即 refreshMemoryReminder() |
@@ -249,7 +256,7 @@ data.json
 
 | 阶段 | 内容 | 依赖 |
 |---|---|---|
-| 1 | `IQuestionStore` 抽象 + sidecar 读写模块（含 tmp+rename 原子写）+ 写队列 | 无 |
+| 1 | `IQuestionStore` 抽象 + sidecar 读写模块（含 tmp+重试式覆盖原子写）+ 写队列 | 无 |
 | 2 | StateManager 重构（当前 sidecar 语义）+ 切换 flush API + 重置体系改造 | 1 |
 | 3 | 外部修改检测分化（sidecar/内容源）+ 路径切换轻量确认 + 状态栏刷新 | 2 |
 | 4 | 迁移逻辑（每次检查 + 脏拒迁 + .bak 备份）+ 备份机制（30min .bak + 恢复） | 2 |
