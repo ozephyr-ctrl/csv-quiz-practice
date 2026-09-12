@@ -201,6 +201,15 @@ data.json
 - 写失败维持现状（保留内存 + 提示保存失败，不覆盖内存）
 - **级联损坏**（sidecar 与 bak 均损坏）→ 显式提示"状态与备份均损坏，是否重建新状态"（不静默重建）
 
+**同步冲突副本合并（v3.1.12 修正）**：检测目录中 sidecar 的同步冲突命名（macOS `" 2"`、Windows `"(1)"`），读取后并入当前状态，最后把副本改名归档为 `.merged`（不删除用户数据）。
+
+- **state 标量**（位置/筛选/统计/displayOrder/memory 配额）整体保留 base（当前权威状态，会话级字段不跨设备拼接）；
+- **answeredQuestions** 按 key 取并集，同 key 以 base 为准；
+- **meta** 按 (id, field) 合并，冲突时以 `entry.ts ?? 源时间戳` 取新，时间相同 base 优先。**注意** `meta.ts` 同样可能被旧版合并逻辑污染成合并当天的时间戳；离线恢复工具（`tools/recover-sidecar.cjs`）对 meta 采取 fill-only（只补缺失/空字段、不动 `ts`），避免被污染的 ts 翻盘；
+- **memoryCards** 按 id 取较新卡片：**卡片真实新旧以 `lastReview` 为准**——`card.ts` 可能被历史合并逻辑（base 时间戳兜底 `Date.now()`）污染成"现在"，不能作为唯一依据。`lastReview` 缺失/为空/不可解析时回退 `card.ts ?? 源时间戳`，以 `(lastReviewMs, cardTs)` 字典序比较，完全平局 base 优先；输出卡片 `ts` 归一为 `max(cardTs, lastReviewMs)`，保证恢复出的较新卡片不会在后续合并中再被旧 ts 压住；
+- **base 时间戳用磁盘侧真实时间**：载入时 `state.updatedAt` 优先（有限且 >0），旧文件缺失回退文件 `mtime`；`recovered` 路径取 `.bak` 的 mtime（`readSidecar` 恢复时已重写 canonical，其 mtime≈now，不代表恢复内容的时间）；本插件每次成功写盘后刷新为写入时刻。**绝不能用合并时刻 `Date.now()` 兜底**——否则 base 旧条目会以"合并当天"压掉冲突副本里较新的状态（真实数据丢失事故根因）。
+- **baseTs=0（未知）语义**：base 视为最旧——源文件的正时间戳在元组比较中总能胜过 0；仅当源也为 0（双方均未知）时才按既有顺序语义（base 最后处理）回落到 base 优先。missing 路径（新题库初始化）即此语义，首次打开即遇冲突副本时以副本为准。
+
 ## 13. 迁移与回滚
 
 **升级迁移（每次启动检查）**：

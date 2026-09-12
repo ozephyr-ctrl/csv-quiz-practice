@@ -1271,7 +1271,6 @@ var META_MERGE_FIELDS = [
   "wrong"
 ];
 function mergeSidecarData(base, baseTsMs, others) {
-  var _a, _b, _c;
   const orderedSources = others.slice().sort((a, b) => a.tsMs - b.tsMs).map((src) => ({ meta: src.data.meta, state: src.data.state, tsMs: src.tsMs }));
   orderedSources.push({ meta: base.meta, state: base.state, tsMs: baseTsMs });
   const answered = {};
@@ -1288,7 +1287,7 @@ function mergeSidecarData(base, baseTsMs, others) {
       answered[id] = ans;
     }
   }
-  const cells = {};
+  const cells = /* @__PURE__ */ new Map();
   for (const src of orderedSources) {
     for (const [id, entry] of Object.entries(src.meta)) {
       if (!entry) continue;
@@ -1296,15 +1295,20 @@ function mergeSidecarData(base, baseTsMs, others) {
       for (const field of META_MERGE_FIELDS) {
         const value = entry[field];
         if (typeof value !== "string") continue;
-        const cur = (_a = cells[id]) == null ? void 0 : _a[field];
+        const fields = cells.get(id);
+        const cur = fields == null ? void 0 : fields[field];
         if (!cur || entryTs >= cur.ts) {
-          ((_b = cells[id]) != null ? _b : cells[id] = {})[field] = { value, ts: entryTs };
+          if (fields) {
+            fields[field] = { value, ts: entryTs };
+          } else {
+            cells.set(id, { [field]: { value, ts: entryTs } });
+          }
         }
       }
     }
   }
   const meta = {};
-  for (const [id, fields] of Object.entries(cells)) {
+  for (const [id, fields] of cells) {
     const entry = {};
     let maxTs;
     for (const field of META_MERGE_FIELDS) {
@@ -1314,26 +1318,44 @@ function mergeSidecarData(base, baseTsMs, others) {
       maxTs = maxTs === void 0 ? cell.ts : Math.max(maxTs, cell.ts);
     }
     if (maxTs !== void 0) entry.ts = maxTs;
-    meta[id] = entry;
+    Object.defineProperty(meta, id, {
+      value: entry,
+      enumerable: true,
+      configurable: true,
+      writable: true
+    });
   }
-  const cards = {};
+  const cards = /* @__PURE__ */ new Map();
+  const cardKeys = /* @__PURE__ */ new Map();
   for (const src of orderedSources) {
     const srcCards = src.state.memoryCards;
     if (!srcCards) continue;
     for (const [id, card] of Object.entries(srcCards)) {
       if (!card) continue;
       const cardTs = typeof card.ts === "number" && Number.isFinite(card.ts) ? card.ts : src.tsMs;
-      const cur = cards[id];
-      if (!cur || cardTs >= ((_c = cur.ts) != null ? _c : 0)) {
-        cards[id] = { ...card, ts: cardTs };
+      const reviewParsed = typeof card.lastReview === "string" && card.lastReview !== "" ? Date.parse(card.lastReview) : NaN;
+      const lastReviewMs = Number.isFinite(reviewParsed) ? reviewParsed : -Infinity;
+      const cur = cardKeys.get(id);
+      if (!cur || lastReviewMs > cur.lastReviewMs || lastReviewMs === cur.lastReviewMs && cardTs >= cur.cardTs) {
+        cards.set(id, {
+          ...card,
+          // ts 归一为 max(cardTs, lastReviewMs)：保证恢复出的较新卡片不会在后续
+          // 合并中再被旧 ts 压住；正常复习时 lastReview ≤ ts，最大值即原 cardTs，行为不变。
+          ts: Math.max(
+            cardTs,
+            lastReviewMs === -Infinity ? 0 : lastReviewMs
+          )
+        });
+        cardKeys.set(id, { lastReviewMs, cardTs });
       }
     }
   }
   const state = {
     ...base.state,
     answeredQuestions: answered,
-    // 双方都无卡片时保持 undefined（不写入空对象污染旧格式兼容）
-    memoryCards: base.state.memoryCards === void 0 && Object.keys(cards).length === 0 ? void 0 : cards
+    // 双方都无卡片时保持 undefined（不写入空对象污染旧格式兼容）。
+    // Object.fromEntries 对 "__proto__" 等键也生成自有属性（不同于赋值）。
+    memoryCards: base.state.memoryCards === void 0 && cards.size === 0 ? void 0 : Object.fromEntries(cards)
   };
   return {
     data: { version: 1, meta, state },
@@ -6972,6 +6994,11 @@ var StateManager = class {
     /** 默认筛选值（loadSidecar 入参保存），供「全部重置」时 emptySidecarState 复用，
      *  避免重置后默认筛选设置被清空（与首次打开 missing 路径的 emptySessionState 行为保持一致）。 */
     this.defaultFilters = { favorite: "", mastered: "", repeat: "", wrong: "" };
+    /** 最近一次从磁盘载入或成功写入当前 sidecar 的时间（epoch ms；0=未知）。
+     *  冲突合并时作为 base 的时间戳：必须用磁盘侧真实时间（updatedAt/mtime/本插件
+     *  最近成功写入时刻），绝不能用合并时刻 Date.now()——否则 base 条目会以「合并
+     *  当天」压掉冲突副本里较新的状态（真实事故根因之一）。 */
+    this.currentSidecarUpdatedAt = 0;
     this.plugin = plugin;
     this.vault = plugin.app.vault;
     this.writeQueue = new StateWriteQueue(plugin);
@@ -7080,7 +7107,9 @@ var StateManager = class {
   }
   /** 空 sidecar state（「全部重置」时保留文件写入的空状态）。
    *  filterFavorite/filterMastered/filterRepeat/filterWrong 用 loadSidecar 保存的
-   *  defaultFilters 成员填充，避免重置后用户设置的默认筛选丢失；其余字段保持空串。 */
+   *  defaultFilters 成员填充，避免重置后用户设置的默认筛选丢失；其余字段保持空串。
+   *  updatedAt 与 stateToSidecar 一致：文件被同步/复制后 mtime 不再可靠，
+   *  有 in-file 时间戳才能正确参与冲突合并。 */
   emptySidecarState() {
     return {
       currentIndex: 0,
@@ -7097,7 +7126,8 @@ var StateManager = class {
       filterRepeat: this.defaultFilters.repeat,
       filterWrong: this.defaultFilters.wrong,
       filterUnanswered: "",
-      answeredQuestions: {}
+      answeredQuestions: {},
+      updatedAt: Date.now()
     };
   }
   getState() {
@@ -7124,6 +7154,7 @@ var StateManager = class {
     this.defaultFilters = defaultFilters;
     const result = await readSidecar(this.vault, contentPath);
     if (result.status === "corrupt") {
+      this.currentSidecarUpdatedAt = 0;
       return { status: "corrupt", reason: result.reason };
     }
     if (result.status === "missing") {
@@ -7132,7 +7163,21 @@ var StateManager = class {
       this.currentState = state;
       this.currentMeta = {};
       this.contentPath = contentPath;
+      this.currentSidecarUpdatedAt = 0;
       return { status: "missing", state, meta: {} };
+    }
+    const diskUpdatedAt = result.data.state.updatedAt;
+    if (typeof diskUpdatedAt === "number" && Number.isFinite(diskUpdatedAt) && diskUpdatedAt > 0) {
+      this.currentSidecarUpdatedAt = diskUpdatedAt;
+    } else {
+      const statPath = result.status === "recovered" ? backupPathFor(contentPath) : sidecarPathFor(contentPath);
+      try {
+        const stat = await this.vault.adapter.stat(statPath);
+        const mtime = stat == null ? void 0 : stat.mtime;
+        this.currentSidecarUpdatedAt = typeof mtime === "number" && Number.isFinite(mtime) && mtime > 0 ? mtime : 0;
+      } catch (e) {
+        this.currentSidecarUpdatedAt = 0;
+      }
     }
     this.currentState = this.stateFromSidecar(result.data.state, contentPath);
     this.currentMeta = result.data.meta;
@@ -7155,6 +7200,7 @@ var StateManager = class {
     this.contentPath = null;
     this.currentState = null;
     this.currentMeta = {};
+    this.currentSidecarUpdatedAt = 0;
   }
   /**
    * 更新某题的 meta 字段（内存）+ 调度保存。
@@ -7228,6 +7274,7 @@ var StateManager = class {
         this.contentPath,
         this.buildSidecarData()
       );
+      this.currentSidecarUpdatedAt = Date.now();
     } else {
       await this.writeQueue.enqueue({ quizState: this.currentState });
     }
@@ -7274,6 +7321,7 @@ var StateManager = class {
         this.contentPath,
         this.buildSidecarData()
       );
+      this.currentSidecarUpdatedAt = Date.now();
     } else {
       await this.writeQueue.enqueue({ quizState: null });
     }
@@ -7375,8 +7423,9 @@ var StateManager = class {
   }
   /**
    * 合并 sidecar 冲突副本到当前状态并写盘，然后把副本归档为 ".merged"（不删除用户数据）。
-   * 合并语义见 mergeSidecarData：标量保留当前，answered/meta/memoryCards 取并集（相同条目
-   * 以时间戳/当前进度为准）。currentState 的 answeredQuestions/memoryCards 原地更新内容
+   * 合并语义见 mergeSidecarData：标量保留当前，answered/meta/memoryCards 取并集
+   * （meta 以 entry.ts/源时间戳取新，记忆卡片以 lastReview 取新、缺 lastReview 回退
+   * ts/源时间戳，完全平局当前优先）。currentState 的 answeredQuestions/memoryCards 原地更新内容
    * （保持对象引用，调用方持有的状态对象同步可见）；currentMeta 整体替换为合并结果。
    * 正确/错误计数不在合并内改写（统计口径是累计作答事件数，整体重算会篡改历史；
    * 由调用方按 addedAnswerIds 为新并入的答案逐条补计）。
@@ -7414,7 +7463,7 @@ var StateManager = class {
     }
     const merge = mergeSidecarData(
       this.buildSidecarData(),
-      Date.now(),
+      this.currentSidecarUpdatedAt,
       sources
     );
     const st = this.currentState;
@@ -7430,6 +7479,7 @@ var StateManager = class {
     }
     this.currentMeta = merge.data.meta;
     await this.sidecarQueue.enqueue(this.contentPath, this.buildSidecarData());
+    this.currentSidecarUpdatedAt = Date.now();
     let archived = 0;
     let archiveFailed = 0;
     for (const path of conflictPaths) {

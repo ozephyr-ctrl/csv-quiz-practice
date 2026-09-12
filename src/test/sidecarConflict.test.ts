@@ -115,8 +115,11 @@ describe("mergeSidecarData", () => {
     expect(res.data.meta.q3).toEqual({ mastered: "1", ts: BASE_TS - 100 });
   });
 
-  it("记忆卡片按较新 ts 胜，无 ts 时回退源时间戳", () => {
+  it("无 lastReview 时回退 card.ts/源时间戳取新，无 ts 时用源时间戳", () => {
     const base = baseSidecar();
+    base.state.memoryCards = {
+      q1: cardFor({ due: "2026-02-01T00:00:00.000Z", lastReview: "" }),
+    };
     const conflict: SidecarConflictSource = {
       path: "x",
       tsMs: BASE_TS - 100,
@@ -125,10 +128,10 @@ describe("mergeSidecarData", () => {
         state: {
           ...baseSidecar().state,
           memoryCards: {
-            // 无 ts → 源 ts（较旧）参与，base 卡片胜
-            q1: cardFor({ due: "2026-03-01T00:00:00.000Z" }),
+            // lastReview 为空、无 ts → 源 ts（较旧）参与，base 卡片胜
+            q1: cardFor({ due: "2026-03-01T00:00:00.000Z", lastReview: "" }),
             // base 无 q2 卡 → 补入
-            q2: cardFor({ ts: BASE_TS - 100 }),
+            q2: cardFor({ ts: BASE_TS - 100, lastReview: "" }),
           },
         },
       },
@@ -136,6 +139,209 @@ describe("mergeSidecarData", () => {
     const res = mergeSidecarData(base, BASE_TS, [conflict]);
     expect(res.data.state.memoryCards!.q1.due).toBe("2026-02-01T00:00:00.000Z");
     expect(res.data.state.memoryCards!.q2.ts).toBe(BASE_TS - 100);
+  });
+
+  it("卡片按 lastReview 取新：base lastReview 较新时，副本更新的 ts 不能翻盘（污染场景）", () => {
+    const base = baseSidecar();
+    base.state.memoryCards = {
+      q1: cardFor({
+        due: "2026-02-01T00:00:00.000Z",
+        lastReview: "2026-08-25T00:00:00.000Z",
+      }),
+    };
+    const conflict: SidecarConflictSource = {
+      path: "x",
+      tsMs: BASE_TS + 999_999,
+      data: {
+        ...baseSidecar(),
+        state: {
+          ...baseSidecar().state,
+          memoryCards: {
+            q1: cardFor({
+              due: "2026-03-01T00:00:00.000Z",
+              lastReview: "2026-08-18T00:00:00.000Z",
+              ts: BASE_TS + 999_999,
+            }),
+          },
+        },
+      },
+    };
+    const res = mergeSidecarData(base, BASE_TS + 2_000_000, [conflict]);
+    expect(res.data.state.memoryCards!.q1.due).toBe("2026-02-01T00:00:00.000Z");
+    expect(res.data.state.memoryCards!.q1.lastReview).toBe(
+      "2026-08-25T00:00:00.000Z"
+    );
+  });
+
+  it("事故回归：base 卡 ts 被盖成今天、lastReview 旧 → 仍取 lastReview 较新的副本，输出 ts 归一为 lastReviewMs", () => {
+    const pollutedToday = Date.parse("2026-09-12T10:00:00.000Z");
+    const base = baseSidecar();
+    base.state.memoryCards = {
+      q1: cardFor({
+        due: "2026-02-01T00:00:00.000Z",
+        lastReview: "2026-08-18T00:00:00.000Z",
+        ts: pollutedToday,
+      }),
+    };
+    const sourceReview = "2026-08-25T00:00:00.000Z";
+    const conflict: SidecarConflictSource = {
+      path: "x",
+      tsMs: 1000, // 副本文件时间远早于被污染的 base ts
+      data: {
+        ...baseSidecar(),
+        state: {
+          ...baseSidecar().state,
+          memoryCards: {
+            q1: cardFor({
+              due: "2026-03-01T00:00:00.000Z",
+              lastReview: sourceReview,
+            }),
+          },
+        },
+      },
+    };
+    const res = mergeSidecarData(base, pollutedToday, [conflict]);
+    expect(res.data.state.memoryCards!.q1.due).toBe("2026-03-01T00:00:00.000Z");
+    expect(res.data.state.memoryCards!.q1.lastReview).toBe(sourceReview);
+    expect(res.data.state.memoryCards!.q1.ts).toBe(Date.parse(sourceReview));
+  });
+
+  it("双方 lastReview 均为空 → 仍按 ts/源时间回退决胜；完全平局 base 优先", () => {
+    const base = baseSidecar();
+    base.state.memoryCards = {
+      q1: cardFor({
+        due: "2026-02-01T00:00:00.000Z",
+        lastReview: "",
+        ts: BASE_TS,
+      }),
+      q2: cardFor({
+        due: "2026-02-01T00:00:00.000Z",
+        lastReview: "",
+        ts: BASE_TS,
+      }),
+    };
+    const conflict: SidecarConflictSource = {
+      path: "x",
+      tsMs: BASE_TS,
+      data: {
+        ...baseSidecar(),
+        state: {
+          ...baseSidecar().state,
+          memoryCards: {
+            // q1：副本 ts 更新 → 副本胜
+            q1: cardFor({
+              due: "2026-03-01T00:00:00.000Z",
+              lastReview: "",
+              ts: BASE_TS + 100,
+            }),
+            // q2：与 base 完全平局（ts 相同）→ base 胜
+            q2: cardFor({
+              due: "2026-03-01T00:00:00.000Z",
+              lastReview: "",
+              ts: BASE_TS,
+            }),
+          },
+        },
+      },
+    };
+    const res = mergeSidecarData(base, BASE_TS, [conflict]);
+    expect(res.data.state.memoryCards!.q1.due).toBe("2026-03-01T00:00:00.000Z");
+    expect(res.data.state.memoryCards!.q2.due).toBe("2026-02-01T00:00:00.000Z");
+  });
+
+  it("输出卡 ts 归一：副本卡片无 ts 且 lastReview 较新 → ts=lastReviewMs", () => {
+    const base = baseSidecar();
+    base.state.memoryCards = {};
+    const sourceReview = "2026-08-25T00:00:00.000Z";
+    const conflict: SidecarConflictSource = {
+      path: "x",
+      tsMs: 1, // 源文件时间远早于 lastReview
+      data: {
+        ...baseSidecar(),
+        state: {
+          ...baseSidecar().state,
+          memoryCards: {
+            q7: cardFor({ lastReview: sourceReview }),
+          },
+        },
+      },
+    };
+    const res = mergeSidecarData(base, BASE_TS, [conflict]);
+    expect(res.data.state.memoryCards!.q7.ts).toBe(Date.parse(sourceReview));
+    expect(res.data.state.memoryCards!.q7.ts!).toBeGreaterThan(1);
+  });
+
+  it("原型键题 id 不丢卡：constructor/valueOf 卡片按 lastReview 规则合并并保留", () => {
+    const base = baseSidecar();
+    base.state.memoryCards = {
+      ["constructor"]: cardFor({
+        due: "2026-02-01T00:00:00.000Z",
+        lastReview: "2026-08-25T00:00:00.000Z",
+      }),
+    };
+    const conflict: SidecarConflictSource = {
+      path: "x",
+      tsMs: BASE_TS + 10,
+      data: {
+        ...baseSidecar(),
+        state: {
+          ...baseSidecar().state,
+          memoryCards: {
+            // base 的 lastReview 较新 → 副本更新的 ts 不能翻盘（旧实现直接丢卡）
+            ["constructor"]: cardFor({
+              due: "2026-03-01T00:00:00.000Z",
+              lastReview: "2026-08-18T00:00:00.000Z",
+              ts: BASE_TS + 10,
+            }),
+            // 仅副本存在 → 必须补入（旧实现同样丢卡）
+            ["valueOf"]: cardFor({
+              due: "2026-04-01T00:00:00.000Z",
+              lastReview: "2026-08-20T00:00:00.000Z",
+            }),
+          },
+        },
+      },
+    };
+    const res = mergeSidecarData(base, BASE_TS, [conflict]);
+    const cards = res.data.state.memoryCards!;
+    expect(Object.prototype.hasOwnProperty.call(cards, "constructor")).toBe(true);
+    expect(Object.prototype.hasOwnProperty.call(cards, "valueOf")).toBe(true);
+    expect(cards["constructor"].due).toBe("2026-02-01T00:00:00.000Z");
+    expect(cards["valueOf"].due).toBe("2026-04-01T00:00:00.000Z");
+  });
+
+  it("原型键题 id 不丢 meta：toString 字段按较新 ts 合并、constructor 条目保留", () => {
+    const base = baseSidecar();
+    base.meta = {
+      ["toString"]: { tags: "#base", ts: BASE_TS - 50 },
+      ["constructor"]: { repeat: "base-only" },
+    };
+    const conflict: SidecarConflictSource = {
+      path: "x",
+      tsMs: BASE_TS,
+      data: {
+        ...baseSidecar(),
+        meta: {
+          ["toString"]: { tags: "#source", ts: BASE_TS + 50 },
+        },
+        state: baseSidecar().state,
+      },
+    };
+    const res = mergeSidecarData(base, BASE_TS, [conflict]);
+    expect(Object.prototype.hasOwnProperty.call(res.data.meta, "toString")).toBe(
+      true
+    );
+    expect(
+      Object.prototype.hasOwnProperty.call(res.data.meta, "constructor")
+    ).toBe(true);
+    expect(res.data.meta["toString"]).toEqual({
+      tags: "#source",
+      ts: BASE_TS + 50,
+    });
+    expect(res.data.meta["constructor"]).toEqual({
+      repeat: "base-only",
+      ts: BASE_TS,
+    });
   });
 
   it("标量（位置/筛选/统计）整体保留 base", () => {
@@ -342,5 +548,204 @@ describe("StateManager.mergeSidecarConflicts（端到端）", () => {
     await sm.mergeSidecarConflicts();
     expect(st.answeredQuestions).toBe(answeredRef);
     expect(answeredRef.q5).toBe("D");
+  });
+
+  it("base updatedAt 旧（100）、副本 mtime 新（500）：同 lastReview 卡片取副本（base 不再用 Date.now() 兜底）", async () => {
+    const review = "2026-08-20T00:00:00.000Z";
+    const base = validSidecar();
+    base.state.updatedAt = 100;
+    base.state.memoryCards = {
+      q1: cardFor({ due: "2026-09-01T00:00:00.000Z", lastReview: review }),
+    };
+    const conflict: SidecarData = {
+      version: 1,
+      meta: {},
+      state: {
+        ...validSidecar().state,
+        updatedAt: undefined,
+        memoryCards: {
+          q1: cardFor({ due: "2026-10-01T00:00:00.000Z", lastReview: review }),
+        },
+      },
+    };
+    const files: Record<string, string> = {
+      "bank.csv.sidecar.json": JSON.stringify(base),
+      "bank.csv.sidecar 2.json": JSON.stringify(conflict),
+    };
+    const vault = stubVault(files, { "bank.csv.sidecar 2.json": 500 });
+    const sm = new StateManager(stubPlugin(vault));
+    await sm.loadSidecar("bank.csv", filters);
+
+    const outcome = await sm.mergeSidecarConflicts();
+    expect(outcome.status).toBe("merged");
+    // 副本 mtime 500 > base updatedAt 100 → 同 lastReview 下副本卡片胜；
+    // 旧实现 base 用 Date.now() 兜底，会错误地压掉副本
+    expect(sm.getState()!.memoryCards!.q1.due).toBe(
+      "2026-10-01T00:00:00.000Z"
+    );
+  });
+
+  it("base updatedAt 新（900）、副本 mtime 旧（500）：同 lastReview 卡片取 base", async () => {
+    const review = "2026-08-20T00:00:00.000Z";
+    const base = validSidecar();
+    base.state.updatedAt = 900;
+    base.state.memoryCards = {
+      q1: cardFor({ due: "2026-09-01T00:00:00.000Z", lastReview: review }),
+    };
+    const conflict: SidecarData = {
+      version: 1,
+      meta: {},
+      state: {
+        ...validSidecar().state,
+        updatedAt: undefined,
+        memoryCards: {
+          q1: cardFor({ due: "2026-10-01T00:00:00.000Z", lastReview: review }),
+        },
+      },
+    };
+    const files: Record<string, string> = {
+      "bank.csv.sidecar.json": JSON.stringify(base),
+      "bank.csv.sidecar 2.json": JSON.stringify(conflict),
+    };
+    const vault = stubVault(files, { "bank.csv.sidecar 2.json": 500 });
+    const sm = new StateManager(stubPlugin(vault));
+    await sm.loadSidecar("bank.csv", filters);
+
+    const outcome = await sm.mergeSidecarConflicts();
+    expect(outcome.status).toBe("merged");
+    expect(sm.getState()!.memoryCards!.q1.due).toBe(
+      "2026-09-01T00:00:00.000Z"
+    );
+  });
+
+  it("事故回归：base 卡片 ts 被盖成今天且 lastReview 旧，副本 lastReview 较新但 mtime 更旧 → 内存与写盘均取副本", async () => {
+    const pollutedToday = Date.parse("2026-09-12T10:00:00.000Z");
+    const sourceReview = "2026-08-25T00:00:00.000Z";
+    const base = validSidecar();
+    base.state.updatedAt = pollutedToday;
+    base.state.memoryCards = {
+      q1: cardFor({
+        due: "2026-09-01T00:00:00.000Z",
+        lastReview: "2026-08-18T00:00:00.000Z",
+        ts: pollutedToday,
+      }),
+    };
+    const conflict: SidecarData = {
+      version: 1,
+      meta: {},
+      state: {
+        ...validSidecar().state,
+        updatedAt: undefined,
+        memoryCards: {
+          q1: cardFor({
+            due: "2026-10-01T00:00:00.000Z",
+            lastReview: sourceReview,
+          }),
+        },
+      },
+    };
+    const files: Record<string, string> = {
+      "bank.csv.sidecar.json": JSON.stringify(base),
+      "bank.csv.sidecar 2.json": JSON.stringify(conflict),
+    };
+    const vault = stubVault(files, { "bank.csv.sidecar 2.json": 1000 });
+    const sm = new StateManager(stubPlugin(vault));
+    await sm.loadSidecar("bank.csv", filters);
+
+    const outcome = await sm.mergeSidecarConflicts();
+    expect(outcome.status).toBe("merged");
+
+    const st = sm.getState()!;
+    expect(st.memoryCards!.q1.lastReview).toBe(sourceReview);
+    expect(st.memoryCards!.q1.ts).toBe(Date.parse(sourceReview));
+
+    const written = JSON.parse(files["bank.csv.sidecar.json"]);
+    expect(written.state.memoryCards.q1.lastReview).toBe(sourceReview);
+    expect(written.state.memoryCards.q1.ts).toBe(Date.parse(sourceReview));
+  });
+
+  it("recovered 路径：base 时间戳取 .bak 的 mtime，不取被重写的 canonical（重写后 mtime≈now）", async () => {
+    const review = "2026-08-20T00:00:00.000Z";
+    const baseBak = validSidecar();
+    baseBak.state.updatedAt = undefined;
+    baseBak.meta = { q1: { tags: "#base" } }; // 无 entry.ts 的 meta 字段
+    baseBak.state.memoryCards = {
+      q1: cardFor({ due: "2026-09-01T00:00:00.000Z", lastReview: review }),
+    };
+    const conflict: SidecarData = {
+      version: 1,
+      meta: { q1: { tags: "#conflict" } },
+      state: {
+        ...validSidecar().state,
+        updatedAt: undefined,
+        memoryCards: {
+          q1: cardFor({ due: "2026-10-01T00:00:00.000Z", lastReview: review }),
+        },
+      },
+    };
+    const files: Record<string, string> = {
+      "bank.csv.sidecar.json": "{ broken", // canonical 损坏 → 从 .bak 恢复并重写
+      "bank.csv.sidecar.json.bak": JSON.stringify(baseBak),
+      "bank.csv.sidecar 2.json": JSON.stringify(conflict),
+    };
+    const vault = stubVault(files, {
+      "bank.csv.sidecar.json.bak": 1000,
+      // readSidecar 恢复用 writeSidecar 重写 canonical：模拟其 mtime≈now。
+      // 旧实现 stat canonical 会取到 now，导致恢复出的旧 bak 被当成最新。
+      "bank.csv.sidecar.json": Date.now(),
+      "bank.csv.sidecar 2.json": 2000,
+    });
+    const sm = new StateManager(stubPlugin(vault));
+    const loadResult = await sm.loadSidecar("bank.csv", filters);
+    expect(loadResult.status).toBe("recovered");
+
+    const outcome = await sm.mergeSidecarConflicts();
+    expect(outcome.status).toBe("merged");
+    // 同 lastReview、双方卡片均无 ts：副本 mtime 2000 > bak mtime 1000 → 取副本
+    expect(sm.getState()!.memoryCards!.q1.due).toBe(
+      "2026-10-01T00:00:00.000Z"
+    );
+    // meta 无 entry.ts：副本源时间戳 2000 > base(bak) 1000 → 副本字段胜
+    expect(sm.getMeta().q1.tags).toBe("#conflict");
+  });
+
+  it("saveStateImmediately 刷新 base 时间戳：load 旧（100）后写盘，同 lastReview 且双方无 ts 时取 base", async () => {
+    const review = "2026-08-20T00:00:00.000Z";
+    const base = validSidecar();
+    base.state.updatedAt = 100;
+    base.state.memoryCards = {
+      q1: cardFor({ due: "2026-09-01T00:00:00.000Z", lastReview: review }),
+    };
+    const conflict: SidecarData = {
+      version: 1,
+      meta: {},
+      state: {
+        ...validSidecar().state,
+        updatedAt: undefined,
+        memoryCards: {
+          q1: cardFor({ due: "2026-10-01T00:00:00.000Z", lastReview: review }),
+        },
+      },
+    };
+    const files: Record<string, string> = {
+      "bank.csv.sidecar.json": JSON.stringify(base),
+      "bank.csv.sidecar 2.json": JSON.stringify(conflict),
+    };
+    const vault = stubVault(files, { "bank.csv.sidecar 2.json": 500 });
+    const sm = new StateManager(stubPlugin(vault));
+    await sm.loadSidecar("bank.csv", filters);
+    await sm.saveStateImmediately(sm.getState()!);
+
+    // 写盘已带新 updatedAt（in-file），base marker 亦应刷新为 now
+    const written = JSON.parse(files["bank.csv.sidecar.json"]);
+    expect(written.state.updatedAt).toBeGreaterThan(100);
+
+    const outcome = await sm.mergeSidecarConflicts();
+    expect(outcome.status).toBe("merged");
+    // marker 刷新为 now（> 副本 mtime 500）→ 同 lastReview 下 base 卡片胜；
+    // 若 persistNow 未刷新 marker（仍为 100），副本会错误胜出
+    expect(sm.getState()!.memoryCards!.q1.due).toBe(
+      "2026-09-01T00:00:00.000Z"
+    );
   });
 });

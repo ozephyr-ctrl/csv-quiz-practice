@@ -637,7 +637,9 @@ const META_MERGE_FIELDS: MetaStringField[] = [
  * - answeredQuestions 按 key 取并集，同 key 以 base 为准（无逐条时间戳，取当前进度可预期）；
  * - meta 按 (id, field) 合并，冲突时以较新的写入时间（entry.ts ?? 源时间戳）为准，
  *   时间相同 base 优先；
- * - memoryCards 按 id 取较新卡片（card.ts ?? 源时间戳），时间相同 base 优先。
+ * - memoryCards 按 id 取较新卡片，卡片真实新旧以 lastReview 为准（同步/恢复过程中
+ *   card.ts 可能被旧版合并逻辑污染成「现在」，不能作为唯一依据）；lastReview 缺失/为空
+ *   时回退 (card.ts ?? 源时间戳)，元组字典序相同则 base 优先。
  * 合并为纯函数且幂等：对已合并结果重放相同副本不改变数据。
  */
 export function mergeSidecarData(
@@ -673,9 +675,11 @@ export function mergeSidecarData(
     }
   }
 
-  // meta：按 (id, field) 以写入时间取胜者
+  // meta：按 (id, field) 以写入时间取胜者。
+  // 用 Map 而非普通对象做字典：题 id 可能是 "constructor"/"toString" 等原型属性名，
+  // 普通对象的取值/`in` 会命中 Object.prototype，导致字段比较与写入被静默跳过。
   type Cell = { value: string; ts: number };
-  const cells: Record<string, Partial<Record<keyof SidecarMeta, Cell>>> = {};
+  const cells = new Map<string, Partial<Record<keyof SidecarMeta, Cell>>>();
   for (const src of orderedSources) {
     for (const [id, entry] of Object.entries(src.meta)) {
       if (!entry) continue;
@@ -686,15 +690,20 @@ export function mergeSidecarData(
       for (const field of META_MERGE_FIELDS) {
         const value = entry[field];
         if (typeof value !== "string") continue;
-        const cur = cells[id]?.[field];
+        const fields = cells.get(id);
+        const cur = fields?.[field];
         if (!cur || entryTs >= cur.ts) {
-          (cells[id] ??= {})[field] = { value, ts: entryTs };
+          if (fields) {
+            fields[field] = { value, ts: entryTs };
+          } else {
+            cells.set(id, { [field]: { value, ts: entryTs } });
+          }
         }
       }
     }
   }
   const meta: Record<string, SidecarMeta> = {};
-  for (const [id, fields] of Object.entries(cells)) {
+  for (const [id, fields] of cells) {
     const entry: SidecarMeta = {};
     let maxTs: number | undefined;
     for (const field of META_MERGE_FIELDS) {
@@ -704,11 +713,26 @@ export function mergeSidecarData(
       maxTs = maxTs === undefined ? cell.ts : Math.max(maxTs, cell.ts);
     }
     if (maxTs !== undefined) entry.ts = maxTs;
-    meta[id] = entry;
+    // 原型键（__proto__ 等）经赋值会落成原型而非自有属性；Object.defineProperty
+    // 保证任意合法 id 都能成为 meta 的自有键。
+    Object.defineProperty(meta, id, {
+      value: entry,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
   }
 
-  // memoryCards：按 id 取较新卡片
-  const cards: Record<string, MemoryCard> = {};
+  // memoryCards：按 id 取较新卡片。卡片真实新旧以 lastReview 为准——card.ts 可能被
+  // 旧版合并逻辑（base 时间戳兜底 Date.now()）污染成「现在」，仅凭 ts 会把旧卡片
+  // 误判为较新；lastReview 缺失/为空/不可解析时回退 cardTs。
+  // 以 (lastReviewMs, cardTs) 字典序比较，源按时间升序、base 最后处理 → 完全平局 base 优先。
+  // 同样用 Map 防原型键污染（"constructor" 等 id 在普通对象上会命中 Object.prototype）。
+  const cards = new Map<string, MemoryCard>();
+  const cardKeys = new Map<
+    string,
+    { lastReviewMs: number; cardTs: number }
+  >();
   for (const src of orderedSources) {
     const srcCards = src.state.memoryCards;
     if (!srcCards) continue;
@@ -718,9 +742,29 @@ export function mergeSidecarData(
         typeof card.ts === "number" && Number.isFinite(card.ts)
           ? card.ts
           : src.tsMs;
-      const cur = cards[id];
-      if (!cur || cardTs >= (cur.ts ?? 0)) {
-        cards[id] = { ...card, ts: cardTs };
+      const reviewParsed =
+        typeof card.lastReview === "string" && card.lastReview !== ""
+          ? Date.parse(card.lastReview)
+          : NaN;
+      const lastReviewMs = Number.isFinite(reviewParsed)
+        ? reviewParsed
+        : -Infinity;
+      const cur = cardKeys.get(id);
+      if (
+        !cur ||
+        lastReviewMs > cur.lastReviewMs ||
+        (lastReviewMs === cur.lastReviewMs && cardTs >= cur.cardTs)
+      ) {
+        cards.set(id, {
+          ...card,
+          // ts 归一为 max(cardTs, lastReviewMs)：保证恢复出的较新卡片不会在后续
+          // 合并中再被旧 ts 压住；正常复习时 lastReview ≤ ts，最大值即原 cardTs，行为不变。
+          ts: Math.max(
+            cardTs,
+            lastReviewMs === -Infinity ? 0 : lastReviewMs
+          ),
+        });
+        cardKeys.set(id, { lastReviewMs, cardTs });
       }
     }
   }
@@ -728,11 +772,12 @@ export function mergeSidecarData(
   const state: SidecarState = {
     ...base.state,
     answeredQuestions: answered,
-    // 双方都无卡片时保持 undefined（不写入空对象污染旧格式兼容）
+    // 双方都无卡片时保持 undefined（不写入空对象污染旧格式兼容）。
+    // Object.fromEntries 对 "__proto__" 等键也生成自有属性（不同于赋值）。
     memoryCards:
-      base.state.memoryCards === undefined && Object.keys(cards).length === 0
+      base.state.memoryCards === undefined && cards.size === 0
         ? undefined
-        : cards,
+        : Object.fromEntries(cards),
   };
 
   return {

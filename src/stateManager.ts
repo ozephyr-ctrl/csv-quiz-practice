@@ -11,6 +11,7 @@ import {
   SidecarState,
   SidecarWriteQueue,
   backupSidecar,
+  backupPathFor,
   findSidecarConflictPaths,
   mergeSidecarData,
   normalizeSidecar,
@@ -174,6 +175,11 @@ export class StateManager {
   } = { favorite: "", mastered: "", repeat: "", wrong: "" };
   /** sidecar 串行写队列（同 contentPath 连续入队合并）。 */
   private sidecarQueue: SidecarWriteQueue;
+  /** 最近一次从磁盘载入或成功写入当前 sidecar 的时间（epoch ms；0=未知）。
+   *  冲突合并时作为 base 的时间戳：必须用磁盘侧真实时间（updatedAt/mtime/本插件
+   *  最近成功写入时刻），绝不能用合并时刻 Date.now()——否则 base 条目会以「合并
+   *  当天」压掉冲突副本里较新的状态（真实事故根因之一）。 */
+  private currentSidecarUpdatedAt = 0;
 
   constructor(plugin: Plugin) {
     this.plugin = plugin;
@@ -305,7 +311,9 @@ export class StateManager {
 
   /** 空 sidecar state（「全部重置」时保留文件写入的空状态）。
    *  filterFavorite/filterMastered/filterRepeat/filterWrong 用 loadSidecar 保存的
-   *  defaultFilters 成员填充，避免重置后用户设置的默认筛选丢失；其余字段保持空串。 */
+   *  defaultFilters 成员填充，避免重置后用户设置的默认筛选丢失；其余字段保持空串。
+   *  updatedAt 与 stateToSidecar 一致：文件被同步/复制后 mtime 不再可靠，
+   *  有 in-file 时间戳才能正确参与冲突合并。 */
   private emptySidecarState(): SidecarState {
     return {
       currentIndex: 0,
@@ -323,6 +331,7 @@ export class StateManager {
       filterWrong: this.defaultFilters.wrong,
       filterUnanswered: "",
       answeredQuestions: {},
+      updatedAt: Date.now(),
     };
   }
 
@@ -364,6 +373,7 @@ export class StateManager {
     const result = await readSidecar(this.vault, contentPath);
     if (result.status === "corrupt") {
       // 不动内存，返回 corrupt 由调用方决定是否重建
+      this.currentSidecarUpdatedAt = 0;
       return { status: "corrupt", reason: result.reason };
     }
     if (result.status === "missing") {
@@ -372,9 +382,39 @@ export class StateManager {
       this.currentState = state;
       this.currentMeta = {};
       this.contentPath = contentPath;
+      this.currentSidecarUpdatedAt = 0;
       return { status: "missing", state, meta: {} };
     }
     // ok / recovered
+    // base 时间戳取磁盘侧真实时间：文件内 state.updatedAt 优先（有限且 >0），
+    // 旧文件缺失该字段时回退文件 mtime；都拿不到则 0（未知，合并时照传，
+    // 绝不回退 Date.now()，否则旧备份会压掉较新副本）。
+    const diskUpdatedAt = result.data.state.updatedAt;
+    if (
+      typeof diskUpdatedAt === "number" &&
+      Number.isFinite(diskUpdatedAt) &&
+      diskUpdatedAt > 0
+    ) {
+      this.currentSidecarUpdatedAt = diskUpdatedAt;
+    } else {
+      // recovered：readSidecar 恢复时已用 writeSidecar 重写 canonical，其 mtime≈now，
+      // 不能代表恢复出的旧内容时间；应取 .bak（实际载入的数据来源）的 mtime。
+      // ok：使用 canonical 的 mtime。
+      const statPath =
+        result.status === "recovered"
+          ? backupPathFor(contentPath)
+          : sidecarPathFor(contentPath);
+      try {
+        const stat = await this.vault.adapter.stat(statPath);
+        const mtime = stat?.mtime;
+        this.currentSidecarUpdatedAt =
+          typeof mtime === "number" && Number.isFinite(mtime) && mtime > 0
+            ? mtime
+            : 0;
+      } catch {
+        this.currentSidecarUpdatedAt = 0;
+      }
+    }
     this.currentState = this.stateFromSidecar(result.data.state, contentPath);
     this.currentMeta = result.data.meta;
     this.contentPath = contentPath;
@@ -397,6 +437,7 @@ export class StateManager {
     this.contentPath = null;
     this.currentState = null;
     this.currentMeta = {};
+    this.currentSidecarUpdatedAt = 0;
   }
 
   /**
@@ -489,6 +530,8 @@ export class StateManager {
         this.contentPath,
         this.buildSidecarData()
       );
+      // 写入成功即刷新磁盘侧时间（供后续冲突合并判定 base 新旧）
+      this.currentSidecarUpdatedAt = Date.now();
     } else {
       await this.writeQueue.enqueue({ quizState: this.currentState });
     }
@@ -555,6 +598,7 @@ export class StateManager {
         this.contentPath,
         this.buildSidecarData()
       );
+      this.currentSidecarUpdatedAt = Date.now();
     } else {
       await this.writeQueue.enqueue({ quizState: null });
     }
@@ -695,8 +739,9 @@ export class StateManager {
 
   /**
    * 合并 sidecar 冲突副本到当前状态并写盘，然后把副本归档为 ".merged"（不删除用户数据）。
-   * 合并语义见 mergeSidecarData：标量保留当前，answered/meta/memoryCards 取并集（相同条目
-   * 以时间戳/当前进度为准）。currentState 的 answeredQuestions/memoryCards 原地更新内容
+   * 合并语义见 mergeSidecarData：标量保留当前，answered/meta/memoryCards 取并集
+   * （meta 以 entry.ts/源时间戳取新，记忆卡片以 lastReview 取新、缺 lastReview 回退
+   * ts/源时间戳，完全平局当前优先）。currentState 的 answeredQuestions/memoryCards 原地更新内容
    * （保持对象引用，调用方持有的状态对象同步可见）；currentMeta 整体替换为合并结果。
    * 正确/错误计数不在合并内改写（统计口径是累计作答事件数，整体重算会篡改历史；
    * 由调用方按 addedAnswerIds 为新并入的答案逐条补计）。
@@ -736,9 +781,12 @@ export class StateManager {
       return { status: "none", unreadable };
     }
 
+    // base 时间戳用磁盘侧真实时间（载入时的 updatedAt/mtime，或本插件最近成功写入
+    // 时刻），不能用 Date.now()：合并时刻永远最新，会让 base 旧条目压掉较新副本。
+    // 未知（0）也照传，由 lastReview/内部 ts 决胜。
     const merge = mergeSidecarData(
       this.buildSidecarData(),
-      Date.now(),
+      this.currentSidecarUpdatedAt,
       sources
     );
 
@@ -757,8 +805,9 @@ export class StateManager {
     }
     this.currentMeta = merge.data.meta;
 
-    // 合并属关键操作：绕过防抖直接落盘
+    // 合并属关键操作：绕过防抖直接落盘；成功后刷新磁盘侧时间
     await this.sidecarQueue.enqueue(this.contentPath, this.buildSidecarData());
+    this.currentSidecarUpdatedAt = Date.now();
 
     // 归档冲突副本（改名保留备查；单个失败不阻塞其余）
     let archived = 0;
