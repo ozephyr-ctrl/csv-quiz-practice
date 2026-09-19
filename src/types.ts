@@ -83,8 +83,10 @@ export interface PluginSettings {
   memoryMarkRating: boolean;
   /** 移动端左右滑动切题（左滑下一题/右滑上一题） */
   swipeNavigation: boolean;
-  /** 非记忆模式下答题是否更新 FSRS 卡片（常规模式/随机练习；记忆练习始终更新） */
+  /** 非记忆模式下答题是否更新 FSRS 卡片（常规模式/随机考试；记忆练习始终更新） */
   memoryUpdateInNormalMode: boolean;
+  /** 随机考试每次抽取的题目数量（从当前筛选范围内全部题目抽取，不限未答） */
+  randomExamCount: number;
   /** 键盘绑定总开关（含方向键切题与下面的选项/标记快捷键） */
   keyboardBindingsEnabled: boolean;
   /** 选项快捷键：第 1 个显示的选项（单字符，空 = 不绑定；大小写不敏感） */
@@ -127,6 +129,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   memoryMarkRating: true,
   swipeNavigation: true,
   memoryUpdateInNormalMode: true,
+  randomExamCount: 100,
   keyboardBindingsEnabled: true,
   keyOptionA: "1",
   keyOptionB: "2",

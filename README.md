@@ -84,8 +84,8 @@ Each question bank has a same-name state file next to it (`题库.csv.sidecar.js
 
 ### 练习模式 / Practice Modes
 
-- **随机练习**：按当前筛选条件随机选 **100 道未答题**作为练习集（不足自适应）
-  **Random practice**: pick up to 100 unanswered questions (respecting current filters) as a practice set
+- **随机考试**：按当前筛选条件从**全部题目**（不限未答）随机抽取作为考试集，题数可在设置中修改（默认 100，不足自适应）
+  **Random exam**: pick a configurable number of questions (default 100, respecting current filters, answered or not) as an exam set
 - **记忆练习（FSRS 间隔重复）**：基于记忆曲线的智能复习
   **Memory practice (FSRS spaced repetition)**: smart review based on memory curve
   - 选题 = 到期复习题（按紧迫度排序）+ 每日新题（数量可配置，按自然日累计，每题库独立配额）

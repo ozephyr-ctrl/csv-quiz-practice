@@ -21,6 +21,7 @@ interface PluginHandle {
   resetQuizProgress(choice?: "records" | "cards" | "order" | "all"): Promise<void>;
   reorderQuestions(): Promise<void>;
   syncSwipeNavigation(): void;
+  syncRandomExamCount(): void;
   resetDailyNewQuota(): Promise<void>;
   changeQuizPath(path: string): Promise<void>;
   compileQuizToCqv(): Promise<void>;
@@ -70,6 +71,17 @@ export class CSVQuizSettingTab extends PluginSettingTab {
         control: { type: "toggle", key: "randomOptions" },
       },
       {
+        name: "随机考试题数",
+        desc: "「随机考试」每次随机抽取的题目数量（从当前筛选范围内的全部题目抽取，不限未答；不足时取全部）",
+        control: {
+          type: "number",
+          key: "randomExamCount",
+          min: 1,
+          max: 1000,
+          defaultValue: DEFAULT_SETTINGS.randomExamCount,
+        },
+      },
+      {
         type: "group",
         heading: "记忆练习",
         items: [
@@ -106,7 +118,7 @@ export class CSVQuizSettingTab extends PluginSettingTab {
           },
           {
             name: "非记忆模式答题参与FSRS",
-            desc: "常规模式/随机练习中答题也更新记忆卡片（FSRS 间隔重复）；关闭后仅记忆练习更新卡片",
+            desc: "常规模式/随机考试中答题也更新记忆卡片（FSRS 间隔重复）；关闭后仅记忆练习更新卡片",
             control: { type: "toggle", key: "memoryUpdateInNormalMode" },
           },
         ],
@@ -315,6 +327,13 @@ export class CSVQuizSettingTab extends PluginSettingTab {
       await this.plugin.resetDailyNewQuota();
       return;
     }
+    if (key === "randomExamCount") {
+      (this.plugin.settings as unknown as Record<string, unknown>)[key] = value;
+      await this.plugin.saveSettings();
+      // 随机考试题数变更：即时刷新已打开面板的按钮文案
+      this.plugin.syncRandomExamCount();
+      return;
+    }
     (this.plugin.settings as unknown as Record<string, unknown>)[key] = value;
     await this.plugin.saveSettings();
   }
@@ -370,6 +389,14 @@ export class CSVQuizSettingTab extends PluginSettingTab {
       "开启后每个题目的选项顺序随机排列",
       "randomOptions"
     );
+    this.addNumberSetting(
+      containerEl,
+      "随机考试题数",
+      "「随机考试」每次随机抽取的题目数量（从当前筛选范围内的全部题目抽取，不限未答；不足时取全部）",
+      "randomExamCount",
+      1,
+      1000
+    );
 
     new Setting(containerEl).setName("记忆练习").setHeading();
     this.addToggleSetting(
@@ -407,7 +434,7 @@ export class CSVQuizSettingTab extends PluginSettingTab {
     this.addToggleSetting(
       containerEl,
       "非记忆模式答题参与FSRS",
-      "常规模式/随机练习中答题也更新记忆卡片（FSRS 间隔重复）；关闭后仅记忆练习更新卡片",
+      "常规模式/随机考试中答题也更新记忆卡片（FSRS 间隔重复）；关闭后仅记忆练习更新卡片",
       "memoryUpdateInNormalMode"
     );
 
@@ -636,6 +663,10 @@ export class CSVQuizSettingTab extends PluginSettingTab {
               // 每日新题数变更：重置当日配额（日期/计数/已选未答），使新设置立即生效
               if (key === "memoryDailyNew") {
                 void this.plugin.resetDailyNewQuota();
+              }
+              // 随机考试题数变更：即时刷新已打开面板的按钮文案
+              if (key === "randomExamCount") {
+                this.plugin.syncRandomExamCount();
               }
             }
           })

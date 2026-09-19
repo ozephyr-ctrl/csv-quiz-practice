@@ -408,6 +408,15 @@ export default class CSVQuizPlugin extends Plugin {
     }
   }
 
+  /** 「随机考试题数」设置变更后同步视图按钮文案（即时生效）。 */
+  syncRandomExamCount(): void {
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
+    const view = leaf?.view as QuizView | undefined;
+    if (view) {
+      view.syncRandomExamCount();
+    }
+  }
+
   /** 设置被外部（如重置顺序时的 auto-off）改动后，重建设置页 UI 以同步控件显示值。 */
   syncSettingsUI(): void {
     this.settingTab?.display();

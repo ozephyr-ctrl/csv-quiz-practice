@@ -1012,10 +1012,10 @@ export class QuizView extends ItemView {
       });
     }
 
-    // 随机练习：按当前筛选条件随机选未答题（最多 100 道，不足自适应）
+    // 随机考试：按当前筛选条件从全部题目（不限未答）随机抽取，题数可在设置中修改
     const practiceRow = filterBody.createDiv("csv-quiz-filter-row");
     this.practiceBtn = practiceRow.createEl("button", {
-      text: "🎲 随机练习（100 题）",
+      text: `🎲 随机考试（${settings.randomExamCount} 题）`,
       cls: "csv-quiz-btn csv-quiz-btn-sm csv-quiz-practice-btn",
     });
     this.practiceBtn.addEventListener("click", () => {
@@ -1051,7 +1051,7 @@ export class QuizView extends ItemView {
   private practiceCountEl!: HTMLElement;
   private memoryBtn!: HTMLButtonElement;
   private memoryCountEl!: HTMLElement;
-  /** 随机练习模式：练习集为临时会话，不持久化，重开面板回到常规模式。 */
+  /** 随机考试模式：考试集为临时会话，不持久化，重开面板回到常规模式。 */
   private practiceActive: boolean = false;
   private practiceIds: string[] = [];
   /** 进入练习前的常规模式定位题号，退出时据此恢复位置。 */
@@ -1171,9 +1171,9 @@ export class QuizView extends ItemView {
     this.applyFiltersAndReset();
   }
 
-  /** 随机练习：按当前筛选条件筛出未答题，随机取最多 100 道作为练习集（不足自适应）。 */
+  /** 随机考试：按当前筛选条件从全部题目（不限未答）随机取设置题数作为考试集（不足自适应）。 */
   private async enableRandomPractice(): Promise<void> {
-    // F3: 记忆练习确认弹窗 await 期间禁止进入随机练习，避免双模式并存
+    // F3: 记忆练习确认弹窗 await 期间禁止进入随机考试，避免双模式并存
     if (this.practiceActive || this.memoryEnabling) return;
     // 先保存编辑区未提交的修改（此时 filteredQuestions/currentIndex/编辑区 DOM 仍一致），
     // 再互斥退出另一练习模式——退出会重置列表与定位，之后保存会把编辑错位应用到别的题
@@ -1183,15 +1183,12 @@ export class QuizView extends ItemView {
     if (this.memoryActive) this.exitMemoryPractice();
 
     const pool = this.applyFiltersTo(this.orderedQuestions);
-    const unanswered = pool.filter(
-      (q) => this.answeredQuestions[q.id] === undefined
-    );
-    if (unanswered.length === 0) {
-      new Notice("没有未答题，无法开始随机练习");
+    if (pool.length === 0) {
+      new Notice("当前筛选条件下没有题目，无法开始随机考试");
       return;
     }
 
-    const picked = shuffle(unanswered).slice(0, 100);
+    const picked = shuffle(pool).slice(0, this.getSettings().randomExamCount);
     this.practiceFocusId = this.filteredQuestions[this.currentIndex]?.id ?? null;
     this.practiceIds = picked.map((q) => q.id);
     this.practiceActive = true;
@@ -1206,7 +1203,7 @@ export class QuizView extends ItemView {
     this.cancelAutoNext();
     this.renderQuestion();
     this.saveState();
-    new Notice(`随机练习开始：${picked.length} 题`);
+    new Notice(`随机考试开始：${picked.length} 题`);
   }
 
   /** 退出练习模式：恢复常规筛选结果并定位到进入前的位置。不渲染、不保存，由调用方决定。 */
@@ -1241,7 +1238,7 @@ export class QuizView extends ItemView {
       this.exitRandomPractice();
       this.renderQuestion();
       this.saveState();
-      new Notice("已退出随机练习");
+      new Notice("已退出随机考试");
     } else {
       void this.enableRandomPractice();
     }
@@ -1289,7 +1286,7 @@ export class QuizView extends ItemView {
         // L2: 弹窗期间视图被关闭 → 中止（finally 会复位 memoryEnabling）
         if (this.isClosed) return;
         if (res !== "reset") return;
-        // F3: 弹窗 await 期间用户可能已进入随机练习（当时 practiceActive 仍为 false），
+        // F3: 弹窗 await 期间用户可能已进入随机考试（当时 practiceActive 仍为 false），
         // 确认后退出它，由记忆练习接管（与"进入任一练习模式前互斥退出另一个"语义一致）
         if (this.practiceActive) this.exitRandomPractice();
         // 清空进度（与 resetProgress 的清空逻辑等价；不弹提示、不退出面板）
@@ -1422,14 +1419,16 @@ export class QuizView extends ItemView {
   private updatePracticeButton(): void {
     if (!this.practiceBtn) return;
     if (this.practiceActive) {
-      this.practiceBtn.setText("退出随机练习");
+      this.practiceBtn.setText("退出随机考试");
       this.practiceBtn.addClass("csv-quiz-practice-btn-active");
       const answered = this.practiceIds.filter((id) =>
         this.practiceAnswered.has(id)
       ).length;
       this.practiceCountEl.setText(` 已完成 ${answered}/${this.practiceIds.length}`);
     } else {
-      this.practiceBtn.setText("🎲 随机练习（100 题）");
+      this.practiceBtn.setText(
+        `🎲 随机考试（${this.getSettings().randomExamCount} 题）`
+      );
       this.practiceBtn.removeClass("csv-quiz-practice-btn-active");
       this.practiceCountEl.setText("");
     }
@@ -1540,7 +1539,7 @@ export class QuizView extends ItemView {
   }
 
   private reFilterForNavigation(): void {
-    // 练习模式：练习集为固定随机快照（≤100 题），导航时不得重建为完整筛选结果
+    // 练习模式：练习集为固定随机快照（≤设置题数），导航时不得重建为完整筛选结果
     if (this.practiceActive || this.memoryActive) return;
     const prevId = this.filteredQuestions[this.currentIndex]?.id;
     this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
@@ -1936,7 +1935,7 @@ export class QuizView extends ItemView {
     const isCorrect = selectedStr === this.normalizeAnswer(question.answer);
     this.showingAnswer = true;
     await this.recordAnswer(question, selectedStr, isCorrect);
-    // 更新 FSRS 卡片：记忆练习始终更新；常规/随机练习按设置（非记忆模式参与 FSRS）
+    // 更新 FSRS 卡片：记忆练习始终更新；常规/随机考试按设置（非记忆模式参与 FSRS）
     if (this.memoryActive || this.getSettings().memoryUpdateInNormalMode) {
       this.applyMemoryReview(question.id, isCorrect);
     }
@@ -2531,7 +2530,7 @@ export class QuizView extends ItemView {
       normalizeAnswerValue(question.answer);
     this.showingAnswer = true;
     await this.recordAnswer(question, selectedKey, isCorrect);
-    // 更新 FSRS 卡片：记忆练习始终更新；常规/随机练习按设置（非记忆模式参与 FSRS）
+    // 更新 FSRS 卡片：记忆练习始终更新；常规/随机考试按设置（非记忆模式参与 FSRS）
     if (this.memoryActive || this.getSettings().memoryUpdateInNormalMode) {
       this.applyMemoryReview(question.id, isCorrect);
     }
@@ -2779,6 +2778,11 @@ export class QuizView extends ItemView {
     } else {
       this.contentEl.removeAttribute("data-ignore-swipe");
     }
+  }
+
+  /** 「随机考试题数」设置变更后即时刷新按钮文案。 */
+  syncRandomExamCount(): void {
+    this.updatePracticeButton();
   }
 
   /** 滑动切题：touchstart 记录起点；边缘让位、可交互元素豁免。 */

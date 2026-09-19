@@ -485,6 +485,7 @@ var DEFAULT_SETTINGS = {
   memoryMarkRating: true,
   swipeNavigation: true,
   memoryUpdateInNormalMode: true,
+  randomExamCount: 100,
   keyboardBindingsEnabled: true,
   keyOptionA: "1",
   keyOptionB: "2",
@@ -1402,6 +1403,17 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
         control: { type: "toggle", key: "randomOptions" }
       },
       {
+        name: "\u968F\u673A\u8003\u8BD5\u9898\u6570",
+        desc: "\u300C\u968F\u673A\u8003\u8BD5\u300D\u6BCF\u6B21\u968F\u673A\u62BD\u53D6\u7684\u9898\u76EE\u6570\u91CF\uFF08\u4ECE\u5F53\u524D\u7B5B\u9009\u8303\u56F4\u5185\u7684\u5168\u90E8\u9898\u76EE\u62BD\u53D6\uFF0C\u4E0D\u9650\u672A\u7B54\uFF1B\u4E0D\u8DB3\u65F6\u53D6\u5168\u90E8\uFF09",
+        control: {
+          type: "number",
+          key: "randomExamCount",
+          min: 1,
+          max: 1e3,
+          defaultValue: DEFAULT_SETTINGS.randomExamCount
+        }
+      },
+      {
         type: "group",
         heading: "\u8BB0\u5FC6\u7EC3\u4E60",
         items: [
@@ -1438,7 +1450,7 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
           },
           {
             name: "\u975E\u8BB0\u5FC6\u6A21\u5F0F\u7B54\u9898\u53C2\u4E0EFSRS",
-            desc: "\u5E38\u89C4\u6A21\u5F0F/\u968F\u673A\u7EC3\u4E60\u4E2D\u7B54\u9898\u4E5F\u66F4\u65B0\u8BB0\u5FC6\u5361\u7247\uFF08FSRS \u95F4\u9694\u91CD\u590D\uFF09\uFF1B\u5173\u95ED\u540E\u4EC5\u8BB0\u5FC6\u7EC3\u4E60\u66F4\u65B0\u5361\u7247",
+            desc: "\u5E38\u89C4\u6A21\u5F0F/\u968F\u673A\u8003\u8BD5\u4E2D\u7B54\u9898\u4E5F\u66F4\u65B0\u8BB0\u5FC6\u5361\u7247\uFF08FSRS \u95F4\u9694\u91CD\u590D\uFF09\uFF1B\u5173\u95ED\u540E\u4EC5\u8BB0\u5FC6\u7EC3\u4E60\u66F4\u65B0\u5361\u7247",
             control: { type: "toggle", key: "memoryUpdateInNormalMode" }
           }
         ]
@@ -1642,6 +1654,12 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
       await this.plugin.resetDailyNewQuota();
       return;
     }
+    if (key === "randomExamCount") {
+      this.plugin.settings[key] = value;
+      await this.plugin.saveSettings();
+      this.plugin.syncRandomExamCount();
+      return;
+    }
     this.plugin.settings[key] = value;
     await this.plugin.saveSettings();
   }
@@ -1687,6 +1705,14 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
       "\u5F00\u542F\u540E\u6BCF\u4E2A\u9898\u76EE\u7684\u9009\u9879\u987A\u5E8F\u968F\u673A\u6392\u5217",
       "randomOptions"
     );
+    this.addNumberSetting(
+      containerEl,
+      "\u968F\u673A\u8003\u8BD5\u9898\u6570",
+      "\u300C\u968F\u673A\u8003\u8BD5\u300D\u6BCF\u6B21\u968F\u673A\u62BD\u53D6\u7684\u9898\u76EE\u6570\u91CF\uFF08\u4ECE\u5F53\u524D\u7B5B\u9009\u8303\u56F4\u5185\u7684\u5168\u90E8\u9898\u76EE\u62BD\u53D6\uFF0C\u4E0D\u9650\u672A\u7B54\uFF1B\u4E0D\u8DB3\u65F6\u53D6\u5168\u90E8\uFF09",
+      "randomExamCount",
+      1,
+      1e3
+    );
     new import_obsidian3.Setting(containerEl).setName("\u8BB0\u5FC6\u7EC3\u4E60").setHeading();
     this.addToggleSetting(
       containerEl,
@@ -1723,7 +1749,7 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
     this.addToggleSetting(
       containerEl,
       "\u975E\u8BB0\u5FC6\u6A21\u5F0F\u7B54\u9898\u53C2\u4E0EFSRS",
-      "\u5E38\u89C4\u6A21\u5F0F/\u968F\u673A\u7EC3\u4E60\u4E2D\u7B54\u9898\u4E5F\u66F4\u65B0\u8BB0\u5FC6\u5361\u7247\uFF08FSRS \u95F4\u9694\u91CD\u590D\uFF09\uFF1B\u5173\u95ED\u540E\u4EC5\u8BB0\u5FC6\u7EC3\u4E60\u66F4\u65B0\u5361\u7247",
+      "\u5E38\u89C4\u6A21\u5F0F/\u968F\u673A\u8003\u8BD5\u4E2D\u7B54\u9898\u4E5F\u66F4\u65B0\u8BB0\u5FC6\u5361\u7247\uFF08FSRS \u95F4\u9694\u91CD\u590D\uFF09\uFF1B\u5173\u95ED\u540E\u4EC5\u8BB0\u5FC6\u7EC3\u4E60\u66F4\u65B0\u5361\u7247",
       "memoryUpdateInNormalMode"
     );
     new import_obsidian3.Setting(containerEl).setName("\u952E\u76D8\u7ED1\u5B9A").setHeading();
@@ -1889,6 +1915,9 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
           void this.plugin.saveSettings();
           if (key === "memoryDailyNew") {
             void this.plugin.resetDailyNewQuota();
+          }
+          if (key === "randomExamCount") {
+            this.plugin.syncRandomExamCount();
           }
         }
       })
@@ -4367,7 +4396,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     /** 本实例是否已计入 openViewCount。 */
     this.counted = false;
     this.textFilterTimer = null;
-    /** 随机练习模式：练习集为临时会话，不持久化，重开面板回到常规模式。 */
+    /** 随机考试模式：考试集为临时会话，不持久化，重开面板回到常规模式。 */
     this.practiceActive = false;
     this.practiceIds = [];
     /** 进入练习前的常规模式定位题号，退出时据此恢复位置。 */
@@ -5087,7 +5116,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     }
     const practiceRow = filterBody.createDiv("csv-quiz-filter-row");
     this.practiceBtn = practiceRow.createEl("button", {
-      text: "\u{1F3B2} \u968F\u673A\u7EC3\u4E60\uFF08100 \u9898\uFF09",
+      text: `\u{1F3B2} \u968F\u673A\u8003\u8BD5\uFF08${settings.randomExamCount} \u9898\uFF09`,
       cls: "csv-quiz-btn csv-quiz-btn-sm csv-quiz-practice-btn"
     });
     this.practiceBtn.addEventListener("click", () => {
@@ -5169,7 +5198,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     this.syncBoolChips();
     this.applyFiltersAndReset();
   }
-  /** 随机练习：按当前筛选条件筛出未答题，随机取最多 100 道作为练习集（不足自适应）。 */
+  /** 随机考试：按当前筛选条件从全部题目（不限未答）随机取设置题数作为考试集（不足自适应）。 */
   async enableRandomPractice() {
     var _a, _b;
     if (this.practiceActive || this.memoryEnabling) return;
@@ -5177,14 +5206,11 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     if (this.isClosed) return;
     if (this.memoryActive) this.exitMemoryPractice();
     const pool = this.applyFiltersTo(this.orderedQuestions);
-    const unanswered = pool.filter(
-      (q) => this.answeredQuestions[q.id] === void 0
-    );
-    if (unanswered.length === 0) {
-      new import_obsidian6.Notice("\u6CA1\u6709\u672A\u7B54\u9898\uFF0C\u65E0\u6CD5\u5F00\u59CB\u968F\u673A\u7EC3\u4E60");
+    if (pool.length === 0) {
+      new import_obsidian6.Notice("\u5F53\u524D\u7B5B\u9009\u6761\u4EF6\u4E0B\u6CA1\u6709\u9898\u76EE\uFF0C\u65E0\u6CD5\u5F00\u59CB\u968F\u673A\u8003\u8BD5");
       return;
     }
-    const picked = shuffle(unanswered).slice(0, 100);
+    const picked = shuffle(pool).slice(0, this.getSettings().randomExamCount);
     this.practiceFocusId = (_b = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id) != null ? _b : null;
     this.practiceIds = picked.map((q) => q.id);
     this.practiceActive = true;
@@ -5197,7 +5223,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     this.cancelAutoNext();
     this.renderQuestion();
     this.saveState();
-    new import_obsidian6.Notice(`\u968F\u673A\u7EC3\u4E60\u5F00\u59CB\uFF1A${picked.length} \u9898`);
+    new import_obsidian6.Notice(`\u968F\u673A\u8003\u8BD5\u5F00\u59CB\uFF1A${picked.length} \u9898`);
   }
   /** 退出练习模式：恢复常规筛选结果并定位到进入前的位置。不渲染、不保存，由调用方决定。 */
   exitRandomPractice() {
@@ -5229,7 +5255,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       this.exitRandomPractice();
       this.renderQuestion();
       this.saveState();
-      new import_obsidian6.Notice("\u5DF2\u9000\u51FA\u968F\u673A\u7EC3\u4E60");
+      new import_obsidian6.Notice("\u5DF2\u9000\u51FA\u968F\u673A\u8003\u8BD5");
     } else {
       void this.enableRandomPractice();
     }
@@ -5376,14 +5402,16 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
   updatePracticeButton() {
     if (!this.practiceBtn) return;
     if (this.practiceActive) {
-      this.practiceBtn.setText("\u9000\u51FA\u968F\u673A\u7EC3\u4E60");
+      this.practiceBtn.setText("\u9000\u51FA\u968F\u673A\u8003\u8BD5");
       this.practiceBtn.addClass("csv-quiz-practice-btn-active");
       const answered = this.practiceIds.filter(
         (id) => this.practiceAnswered.has(id)
       ).length;
       this.practiceCountEl.setText(` \u5DF2\u5B8C\u6210 ${answered}/${this.practiceIds.length}`);
     } else {
-      this.practiceBtn.setText("\u{1F3B2} \u968F\u673A\u7EC3\u4E60\uFF08100 \u9898\uFF09");
+      this.practiceBtn.setText(
+        `\u{1F3B2} \u968F\u673A\u8003\u8BD5\uFF08${this.getSettings().randomExamCount} \u9898\uFF09`
+      );
       this.practiceBtn.removeClass("csv-quiz-practice-btn-active");
       this.practiceCountEl.setText("");
     }
@@ -6425,6 +6453,10 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     } else {
       this.contentEl.removeAttribute("data-ignore-swipe");
     }
+  }
+  /** 「随机考试题数」设置变更后即时刷新按钮文案。 */
+  syncRandomExamCount() {
+    this.updatePracticeButton();
   }
   /** 滑动切题：touchstart 记录起点；边缘让位、可交互元素豁免。 */
   handleSwipeStart(e) {
@@ -7866,6 +7898,14 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
     const view = leaf == null ? void 0 : leaf.view;
     if (view) {
       view.syncSwipeNavigation();
+    }
+  }
+  /** 「随机考试题数」设置变更后同步视图按钮文案（即时生效）。 */
+  syncRandomExamCount() {
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
+    const view = leaf == null ? void 0 : leaf.view;
+    if (view) {
+      view.syncRandomExamCount();
     }
   }
   /** 设置被外部（如重置顺序时的 auto-off）改动后，重建设置页 UI 以同步控件显示值。 */
