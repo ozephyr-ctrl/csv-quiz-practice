@@ -61,6 +61,8 @@ export interface QuizSessionState {
   memoryPendingNew?: string[];
   /** 记忆练习是否已初始化过（至少判分一次）；仅删除记忆卡片时保留，避免重复触发首次启用重置提示。旧进度无此字段。 */
   memoryInitialized?: boolean;
+  /** 每日答题事件数（本地自然日 "YYYY-MM-DD" → 次数，含常规/随机考试/记忆练习）。供练习面板统计与折线图；旧进度无此字段。 */
+  dailyAnswers?: Record<string, number>;
 }
 
 export interface PluginSettings {
@@ -70,6 +72,8 @@ export interface PluginSettings {
   autoNextDelay: number;
   filterPanelOpen: boolean;
   editPanelOpen: boolean;
+  /** 打开刷题面板时练习栏（入口/统计/折线图）默认是否展开 */
+  practicePanelOpen: boolean;
   defaultFilterFavorite: string;
   defaultFilterMastered: string;
   defaultFilterRepeat: string;
@@ -119,6 +123,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   autoNextDelay: 1,
   filterPanelOpen: true,
   editPanelOpen: true,
+  practicePanelOpen: true,
   defaultFilterFavorite: "",
   defaultFilterMastered: "",
   defaultFilterRepeat: "",

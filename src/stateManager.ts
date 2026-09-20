@@ -4,6 +4,7 @@ import {
   PluginSettings,
 } from "./types";
 import { normalizeMemoryCards } from "./utils";
+import { normalizeDailyAnswers } from "./practiceStats";
 import {
   SidecarConflictSource,
   SidecarData,
@@ -246,6 +247,7 @@ export class StateManager {
       memoryPendingNew: toStrArray(r.memoryPendingNew),
       memoryInitialized:
         typeof r.memoryInitialized === "boolean" ? r.memoryInitialized : undefined,
+      dailyAnswers: normalizeDailyAnswers(r.dailyAnswers),
     };
   }
 
@@ -279,6 +281,7 @@ export class StateManager {
       memoryNewCountToday: s.memoryNewCountToday,
       memoryPendingNew: s.memoryPendingNew,
       memoryInitialized: s.memoryInitialized,
+      dailyAnswers: s.dailyAnswers,
     };
   }
 
@@ -512,6 +515,7 @@ export class StateManager {
       memoryNewCountToday: s.memoryNewCountToday,
       memoryPendingNew: s.memoryPendingNew,
       memoryInitialized: s.memoryInitialized,
+      dailyAnswers: s.dailyAnswers,
       // 冲突合并时间戳：每次写盘刷新（供同步冲突合并判定文件新旧）
       updatedAt: Date.now(),
     };

@@ -1,6 +1,7 @@
 import { Notice, Vault } from "obsidian";
 import { MemoryCard } from "./types";
 import { normalizeMemoryCards } from "./utils";
+import { normalizeDailyAnswers } from "./practiceStats";
 
 /** sidecar 中 B 类覆盖 + C 类状态的合并存储层（同层）。键为题 id。 */
 export interface SidecarMeta {
@@ -43,6 +44,8 @@ export interface SidecarState {
   memoryPendingNew?: string[];
   /** 记忆练习是否已初始化过（至少判分一次）；仅删除记忆卡片时保留，避免重复触发首次启用重置提示。旧进度无此字段。 */
   memoryInitialized?: boolean;
+  /** 每日答题事件数（"YYYY-MM-DD" → 次数）。供练习面板统计与折线图；旧进度无此字段。 */
+  dailyAnswers?: Record<string, number>;
   /** 该 sidecar 最近一次写盘时间（epoch ms）。供同步冲突合并时判定文件新旧；旧文件缺失。 */
   updatedAt?: number;
 }
@@ -413,6 +416,7 @@ export function normalizeSidecar(raw: unknown): SidecarData | null {
       memoryNewCountToday: toOptNumber(s.memoryNewCountToday),
       memoryPendingNew: toOptStrArray(s.memoryPendingNew),
       memoryInitialized: toOptBool(s.memoryInitialized),
+      dailyAnswers: normalizeDailyAnswers(s.dailyAnswers),
       updatedAt: toOptNumber(s.updatedAt),
     },
   };

@@ -1,6 +1,6 @@
 {
   "name": "csv-quiz-practice",
-  "version": "3.1.13",
+  "version": "3.2.0",
   "description": "Obsidian plugin for CSV-based quiz practice",
   "main": "main.js",
   "scripts": {

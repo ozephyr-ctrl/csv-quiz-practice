@@ -219,6 +219,11 @@ export class CSVQuizSettingTab extends PluginSettingTab {
         control: { type: "toggle", key: "editPanelOpen" },
       },
       {
+        name: "默认展开练习栏",
+        desc: "打开刷题面板时练习栏（练习入口/分类统计/折线图）默认是否展开",
+        control: { type: "toggle", key: "practicePanelOpen" },
+      },
+      {
         type: "group",
         heading: "标记筛选默认值",
         items: [
@@ -507,6 +512,12 @@ export class CSVQuizSettingTab extends PluginSettingTab {
       "默认展开编辑栏",
       "打开刷题面板时标签/分类编辑栏默认是否展开",
       "editPanelOpen"
+    );
+    this.addToggleSetting(
+      containerEl,
+      "默认展开练习栏",
+      "打开刷题面板时练习栏（练习入口/分类统计/折线图）默认是否展开",
+      "practicePanelOpen"
     );
 
     new Setting(containerEl).setName("标记筛选默认值").setHeading();

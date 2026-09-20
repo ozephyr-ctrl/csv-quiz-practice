@@ -103,6 +103,16 @@ export function quizStateEquals(
   // 记忆练习初始化标记为可选字段（旧进度无），缺失视为 false
   if (!!a.memoryInitialized !== !!b.memoryInitialized) return false;
 
+  // 每日答题量为可选字段（旧进度无），缺失视为空对象
+  const ad = a.dailyAnswers || {};
+  const bd = b.dailyAnswers || {};
+  const adk = Object.keys(ad);
+  const bdk = Object.keys(bd);
+  if (adk.length !== bdk.length) return false;
+  for (const k of adk) {
+    if (ad[k] !== bd[k]) return false;
+  }
+
   return true;
 }
 

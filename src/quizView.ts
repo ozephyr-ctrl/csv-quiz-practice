@@ -32,7 +32,6 @@ import {
   shuffle,
   sortByDisplayOrder,
   quizStateEquals,
-  countDueCards,
   normalizeAnswerValue,
   resolveKeyBinding,
 } from "./utils";
@@ -46,9 +45,25 @@ import {
 import { ProgressModal } from "./progressModal";
 import { fsrs, createEmptyCard, Rating, type Card } from "ts-fsrs";
 import Papa from "papaparse";
+import {
+  computePracticeStats,
+  buildDailySeries,
+  dateKey,
+  pruneDailyAnswers,
+} from "./practiceStats";
+import { PracticeChart } from "./practiceChart";
 
 /** FSRS 调度器单例：纯函数调度、不持有状态，可跨会话复用（模块级）。 */
 const memoryScheduler = fsrs();
+
+/** 两个 id 集合是否相同（大小相等且元素互相包含）。 */
+function sameIdSet(a: Set<string>, b: Set<string> | null): boolean {
+  if (!b || a.size !== b.size) return false;
+  for (const id of a) {
+    if (!b.has(id)) return false;
+  }
+  return true;
+}
 
 export class QuizView extends ItemView {
   private plugin: Plugin;
@@ -174,6 +189,9 @@ export class QuizView extends ItemView {
       window.clearInterval(this.autoSaveTimer);
       this.autoSaveTimer = null;
     }
+    // 练习面板折线图：停掉 rAF/ResizeObserver 等监听
+    this.practiceChart?.destroy();
+    this.practiceChart = null;
     // 4B: 面板关闭停止活跃备份定时器
     this.backupTimer.stop();
     this.stateManager.cancelScheduledSave();
@@ -278,6 +296,12 @@ export class QuizView extends ItemView {
     // Edit area (collapsible inputs) — moved below filter
     this.editArea = this.contentEl.createDiv("csv-quiz-edit-area");
 
+    // Practice panel (练习)：底部可展开控件，与筛选条件/标签分类同级；
+    // 内容（练习入口/分类统计/折线图）由 buildPracticePanel 填充
+    this.practicePanelEl = this.contentEl.createDiv(
+      "csv-quiz-filter-panel csv-quiz-practice-panel"
+    );
+
     // Bottom spacer to avoid iOS toolbar overlap
     this.contentEl.createDiv("csv-quiz-bottom-spacer");
 
@@ -351,6 +375,8 @@ export class QuizView extends ItemView {
 
     // Build filter panel
     this.buildFilterPanel(settings);
+    // Build practice panel (练习)：入口/统计/折线图
+    this.buildPracticePanel(settings);
 
     // 在任何弹窗 await 之前清空内存进度：若用户在弹窗期间关闭标签页，
     // onClose() 会因 getState() 为 null 而跳过保存，避免用默认值覆盖磁盘进度。
@@ -600,6 +626,8 @@ export class QuizView extends ItemView {
       // （在内存状态流向 applyRestore 前完成）。不能整体重算——统计口径是累计
       // 作答事件数（同一题重刷每次 +1），按唯一题重算会篡改历史正确率。
       this.addStatsForAnswers(outcome.addedAnswerIds ?? []);
+      // 并入的卡片/答案影响练习面板统计与到期预测
+      this.practiceStatsDirty = true;
 
       const parts = [
         `已合并 ${outcome.mergedSources} 个冲突副本`,
@@ -745,6 +773,8 @@ export class QuizView extends ItemView {
     this.memoryNewCountToday = 0;
     this.memoryPendingNew = [];
     this.memoryInitialized = false;
+    this.dailyAnswers = {};
+    this.practiceStatsDirty = true;
     this.currentShuffledQId = null;
     this.selectedOption = null;
     this.selectedOptions = [];
@@ -791,6 +821,9 @@ export class QuizView extends ItemView {
     this.memoryPendingNew = savedState.memoryPendingNew || [];
     // C-1: 记忆练习初始化标记跨会话恢复
     this.memoryInitialized = !!savedState.memoryInitialized;
+    // 每日答题量跨会话恢复（旧进度无此字段按空处理）
+    this.dailyAnswers = savedState.dailyAnswers || {};
+    this.practiceStatsDirty = true;
     // M4: 清理题库中已不存在的僵尸记忆卡片（applyRestore 在 loadQuestions 之后调用，allQuestions 已填充）
     this.pruneMemoryCards();
   }
@@ -1012,8 +1045,58 @@ export class QuizView extends ItemView {
       });
     }
 
-    // 随机考试：按当前筛选条件从全部题目（不限未答）随机抽取，题数可在设置中修改
-    const practiceRow = filterBody.createDiv("csv-quiz-filter-row");
+    // 随机考试 / 记忆练习入口已移至练习面板（buildPracticePanel，v3.2.0）
+  }
+
+  /**
+   * 练习面板（底部可展开控件，与筛选条件/标签分类同级）：
+   * - 分类统计：今日已练习 / 目前已到期 / 预计今日内到期
+   * - 练习入口：随机考试 / 记忆练习（自筛选面板迁入）
+   * - 折线图：共 y 轴双系列（每日已答题量 / 预计到期题目量），横轴按日，可左右滑动
+   */
+  private buildPracticePanel(settings: PluginSettings): void {
+    this.practicePanelEl.empty();
+
+    const toggleHeader = this.practicePanelEl.createDiv(
+      "csv-quiz-filter-toggle"
+    );
+    const toggleIcon = toggleHeader.createSpan("csv-quiz-filter-icon");
+    toggleHeader.createEl("span", { text: "练习" });
+
+    const panelOpen = settings.practicePanelOpen;
+    const body = this.practicePanelEl.createDiv("csv-quiz-filter-body");
+    this.practiceBodyEl = body;
+    body.classList.toggle("csv-quiz-filter-body-hidden", !panelOpen);
+    toggleIcon.textContent = panelOpen ? "▼" : "▶";
+
+    toggleHeader.addEventListener("click", () => {
+      const isHidden = body.classList.contains("csv-quiz-filter-body-hidden");
+      body.classList.toggle("csv-quiz-filter-body-hidden");
+      toggleIcon.textContent = isHidden ? "▼" : "▶";
+      // 展开后画布才有尺寸：强制重建序列并把视窗定位到今日
+      if (isHidden) this.updatePracticeStats(true);
+    });
+
+    // 分类统计行
+    const statRow = body.createDiv("csv-quiz-stat-row");
+    this.statPracticedEl = this.buildStatChip(
+      statRow,
+      "今日已练习",
+      "csv-quiz-stat-value-practiced"
+    );
+    this.statDueNowEl = this.buildStatChip(
+      statRow,
+      "目前已到期",
+      "csv-quiz-stat-value-due"
+    );
+    this.statDueTodayEl = this.buildStatChip(
+      statRow,
+      "预计今日内到期",
+      "csv-quiz-stat-value-forecast"
+    );
+
+    // 练习入口行（自筛选面板迁入，行为不变）
+    const practiceRow = body.createDiv("csv-quiz-filter-row csv-quiz-practice-row");
     this.practiceBtn = practiceRow.createEl("button", {
       text: `🎲 随机考试（${settings.randomExamCount} 题）`,
       cls: "csv-quiz-btn csv-quiz-btn-sm csv-quiz-practice-btn",
@@ -1039,6 +1122,99 @@ export class QuizView extends ItemView {
         cls: "csv-quiz-practice-count",
       });
     }
+
+    // 折线图（图例 + 画布）。图例点击切换系列可见性
+    const chartBox = body.createDiv("csv-quiz-chart-box");
+    const legend = chartBox.createDiv("csv-quiz-chart-legend");
+    this.buildLegendChip(legend, "每日答题", "answered");
+    this.buildLegendChip(legend, "预计到期", "due");
+    const canvas = chartBox.createEl("canvas", {
+      cls: "csv-quiz-chart-canvas",
+    });
+    this.practiceChart = new PracticeChart(canvas, { height: 190 });
+  }
+
+  /** 统计芯片：数值 + 标签，返回数值元素（供后续 setText 刷新）。 */
+  private buildStatChip(
+    parent: HTMLElement,
+    label: string,
+    valueCls: string
+  ): HTMLElement {
+    const chip = parent.createDiv("csv-quiz-stat-chip");
+    const value = chip.createSpan({
+      cls: `csv-quiz-stat-value ${valueCls}`,
+      text: "0",
+    });
+    chip.createSpan({ cls: "csv-quiz-stat-label", text: label });
+    return value;
+  }
+
+  /** 图例芯片：点击切换对应系列可见性。 */
+  private buildLegendChip(
+    parent: HTMLElement,
+    label: string,
+    series: "answered" | "due"
+  ): void {
+    const chip = parent.createSpan({
+      cls: "csv-quiz-legend-chip",
+      attr: { "data-series": series },
+    });
+    chip.createSpan({ cls: `csv-quiz-legend-dot csv-quiz-legend-dot-${series}` });
+    chip.createSpan({ text: label });
+    chip.addEventListener("click", () => {
+      const visible = this.practiceChart?.toggleSeries(series) ?? true;
+      chip.classList.toggle("csv-quiz-legend-chip-off", !visible);
+    });
+  }
+
+  /**
+   * 当前筛选范围（常规模式口径）的题 id 集合：练习面板到期统计与折线图到期系列
+   * 随筛选变化。练习模式下 filteredQuestions 是练习集快照，改用 applyFiltersTo
+   * 的常规筛选结果（与进入记忆练习的取池口径一致）。
+   */
+  private currentFilterScopeIds(): Set<string> {
+    const source =
+      this.practiceActive || this.memoryActive
+        ? this.applyFiltersTo(this.orderedQuestions)
+        : this.filteredQuestions;
+    return new Set(source.map((q) => q.id));
+  }
+
+  /**
+   * 同步练习面板：三项统计文本每次刷新（O(筛选数+卡片数)）；到期统计随当前筛选
+   * （今日已练习为全库答题事件口径）。折线图仅在面板可见且数据脏/筛选变化（或强制）
+   * 时重建序列，避免每次切题重绘画布。force=true（面板展开/首次）额外把视窗定位到今日。
+   */
+  private updatePracticeStats(force: boolean = false): void {
+    if (!this.statPracticedEl || !this.practiceChart) return;
+    const now = new Date();
+    const scopeIds = this.currentFilterScopeIds();
+    const scopeChanged = !sameIdSet(scopeIds, this.lastScopeIds);
+    this.lastScopeIds = scopeIds;
+    const stats = computePracticeStats(
+      this.memoryCards,
+      this.dailyAnswers,
+      now,
+      scopeIds
+    );
+    this.statPracticedEl.setText(String(stats.practicedToday));
+    this.statDueNowEl.setText(String(stats.dueNow));
+    this.statDueTodayEl.setText(String(stats.dueLaterToday));
+
+    const panelVisible = !this.practiceBodyEl.classList.contains(
+      "csv-quiz-filter-body-hidden"
+    );
+    if (!panelVisible) {
+      // 折叠期间数据/筛选仍在变：置脏，展开时一次性重建
+      this.practiceStatsDirty = true;
+      return;
+    }
+    if (!force && !this.practiceStatsDirty && !scopeChanged) return;
+    const series = buildDailySeries(this.dailyAnswers, this.memoryCards, now, {
+      scopeIds,
+    });
+    this.practiceChart.setData(series.points, series.todayIndex, force);
+    this.practiceStatsDirty = false;
   }
 
   private cat1Select!: HTMLSelectElement;
@@ -1051,6 +1227,19 @@ export class QuizView extends ItemView {
   private practiceCountEl!: HTMLElement;
   private memoryBtn!: HTMLButtonElement;
   private memoryCountEl!: HTMLElement;
+  /** 练习面板（底部可展开控件，与筛选条件/标签分类同级）的容器与部件引用。 */
+  private practicePanelEl!: HTMLElement;
+  private practiceBodyEl!: HTMLElement;
+  private statPracticedEl!: HTMLElement;
+  private statDueNowEl!: HTMLElement;
+  private statDueTodayEl!: HTMLElement;
+  private practiceChart: PracticeChart | null = null;
+  /** 每日答题事件数（"YYYY-MM-DD" → 次数），随进度持久化（练习面板统计/折线图数据源）。 */
+  private dailyAnswers: Record<string, number> = {};
+  /** 练习面板折线图数据脏标记：答题/卡片/按日计数变化后置位，面板可见时重建序列。 */
+  private practiceStatsDirty: boolean = true;
+  /** 上次练习面板到期统计使用的筛选范围（变化时重建折线图序列）。 */
+  private lastScopeIds: Set<string> | null = null;
   /** 随机考试模式：考试集为临时会话，不持久化，重开面板回到常规模式。 */
   private practiceActive: boolean = false;
   private practiceIds: string[] = [];
@@ -1115,6 +1304,7 @@ export class QuizView extends ItemView {
     this.syncBoolChips();
 
     this.updatePracticeButton();
+    this.updatePracticeStats();
   }
 
   /** 自由文本筛选：输入防抖 200ms 后应用（与其它筛选一致的 applyFiltersAndReset 行为）。 */
@@ -1300,6 +1490,8 @@ export class QuizView extends ItemView {
         this.memoryNewCountToday = 0;
         this.memoryPendingNew = [];
         this.memoryInitialized = false;
+        this.dailyAnswers = {};
+        this.practiceStatsDirty = true;
         this.currentIndex = 0;
         this.currentShuffledQId = null;
         this.selectedOption = null;
@@ -1433,7 +1625,8 @@ export class QuizView extends ItemView {
       this.practiceCountEl.setText("");
     }
 
-    // 记忆练习按钮：活动时显示完成计数，非活动时显示今日待复习题数（纯全局计数，不受筛选影响）
+    // 记忆练习按钮：活动时显示完成计数，非活动时显示今日待复习题数
+    // （随当前筛选口径，与练习面板"目前已到期"芯片一致；状态栏提醒仍为全库口径）
     if (!this.memoryBtn) return;
     if (this.memoryActive) {
       this.memoryBtn.setText("退出记忆练习");
@@ -1445,9 +1638,15 @@ export class QuizView extends ItemView {
     } else {
       this.memoryBtn.setText("🧠 记忆练习");
       this.memoryBtn.removeClass("csv-quiz-practice-btn-active");
-      // L4/A3: 非法 due 不计入"今日待复习"（公共到期计数函数）
-      const dueCount = countDueCards(this.memoryCards);
-      this.memoryCountEl.setText(dueCount > 0 ? ` 今日待复习 ${dueCount} 题` : "");
+      // L4/A3: 非法 due 不计入（computePracticeStats 同口径）；范围为当前筛选内到期题，
+      // 与点击进入记忆练习实际抽取的到期集一致
+      const { dueNow } = computePracticeStats(
+        this.memoryCards,
+        undefined,
+        new Date(),
+        this.currentFilterScopeIds()
+      );
+      this.memoryCountEl.setText(dueNow > 0 ? ` 今日待复习 ${dueNow} 题` : "");
     }
   }
 
@@ -1785,8 +1984,9 @@ export class QuizView extends ItemView {
     // Navigation
     this.updateNavigation();
 
-    // 练习模式：同步按钮完成计数
+    // 练习模式：同步按钮完成计数；同步练习面板统计与折线图
     this.updatePracticeButton();
+    this.updatePracticeStats();
   }
 
   /** 题目页眉底部：可折叠的记忆卡片信息栏（仅展示，不编辑）。 */
@@ -1976,6 +2176,12 @@ export class QuizView extends ItemView {
     isCorrect: boolean
   ): Promise<void> {
     this.answeredQuestions[question.id] = selectedStr;
+    // 每日答题量 +1（练习面板统计/折线图数据源）；跨入新自然日时顺带裁剪旧键
+    const key = dateKey(new Date());
+    const prev = this.dailyAnswers[key];
+    this.dailyAnswers[key] = (prev ?? 0) + 1;
+    if (prev === undefined) pruneDailyAnswers(this.dailyAnswers, new Date());
+    this.practiceStatsDirty = true;
     // 练习模式：记录本次会话已答（渲染/计数/完成检测均基于 practiceAnswered）
     if (this.practiceActive || this.memoryActive) {
       this.practiceAnswered.add(question.id);
@@ -2083,6 +2289,8 @@ export class QuizView extends ItemView {
         // 冲突合并时间戳：记录卡片写入时间（较新者胜）
         ts: Date.now(),
       };
+      // 卡片变化影响练习面板统计与到期预测序列
+      this.practiceStatsDirty = true;
       if (!correct) {
         // 答错计入 wrong 标记并写入 sidecar meta（内存操作 + 调度保存，无失败路径）
         if (q && q.wrong !== "1") {
@@ -2190,6 +2398,7 @@ export class QuizView extends ItemView {
             state.correctCount = 0;
             state.wrongCount = 0;
             state.answeredQuestions = {};
+            state.dailyAnswers = {};
           }
           if (choice !== "records") {
             state.memoryCards = {};
@@ -2261,6 +2470,7 @@ export class QuizView extends ItemView {
       this.correctCount = 0;
       this.wrongCount = 0;
       this.answeredQuestions = {};
+      this.dailyAnswers = {};
     }
     if (choice !== "records") {
       this.memoryCards = {};
@@ -2268,6 +2478,7 @@ export class QuizView extends ItemView {
       this.memoryNewCountToday = 0;
       this.memoryPendingNew = [];
     }
+    this.practiceStatsDirty = true;
     // 重置后按当前设置重建题目顺序（随机开启则重排，关闭则恢复 CSV 默认顺序）
     this.rebuildOrderAndLocate(this.getSettings().randomOrder, null);
     this.currentIndex = 0;
@@ -2799,7 +3010,7 @@ export class QuizView extends ItemView {
     if (
       target &&
       target.closest(
-        "a, button, input, textarea, select, label, [contenteditable]"
+        "a, button, input, textarea, select, label, [contenteditable], .csv-quiz-chart-box"
       )
     ) {
       return;
@@ -3413,6 +3624,8 @@ export class QuizView extends ItemView {
       memoryPendingNew: this.memoryPendingNew,
       // C-1: 记忆练习初始化标记随进度持久化
       memoryInitialized: this.memoryInitialized,
+      // 每日答题量随进度持久化（练习面板统计/折线图）
+      dailyAnswers: this.dailyAnswers,
     };
   }
 
@@ -3426,6 +3639,9 @@ export class QuizView extends ItemView {
       displayOrder: [...state.displayOrder],
       answeredQuestions: { ...state.answeredQuestions },
       memoryCards: state.memoryCards ? { ...state.memoryCards } : state.memoryCards,
+      dailyAnswers: state.dailyAnswers
+        ? { ...state.dailyAnswers }
+        : state.dailyAnswers,
     };
   }
 

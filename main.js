@@ -475,6 +475,7 @@ var DEFAULT_SETTINGS = {
   autoNextDelay: 1,
   filterPanelOpen: true,
   editPanelOpen: true,
+  practicePanelOpen: true,
   defaultFilterFavorite: "",
   defaultFilterMastered: "",
   defaultFilterRepeat: "",
@@ -828,6 +829,14 @@ function quizStateEquals(a, b) {
     if (ap[i] !== bp[i]) return false;
   }
   if (!!a.memoryInitialized !== !!b.memoryInitialized) return false;
+  const ad = a.dailyAnswers || {};
+  const bd = b.dailyAnswers || {};
+  const adk = Object.keys(ad);
+  const bdk = Object.keys(bd);
+  if (adk.length !== bdk.length) return false;
+  for (const k of adk) {
+    if (ad[k] !== bd[k]) return false;
+  }
   return true;
 }
 function countDueCards(cards, now = /* @__PURE__ */ new Date()) {
@@ -914,6 +923,147 @@ function resolveKeyBinding(settings, key) {
     if (b && b === k) return { kind: "mark", field };
   }
   return null;
+}
+
+// src/practiceStats.ts
+function dateKey(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+    d.getDate()
+  ).padStart(2, "0")}`;
+}
+var DATE_KEY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+function parseDateKey(key) {
+  const m = DATE_KEY_RE.exec(key);
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const day = Number(m[3]);
+  const d = new Date(y, mo - 1, day);
+  if (d.getFullYear() !== y || d.getMonth() !== mo - 1 || d.getDate() !== day) {
+    return null;
+  }
+  return d.getTime();
+}
+function startOfDayMs(d) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
+function addDaysMs(dayMs, n) {
+  const d = new Date(dayMs);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n).getTime();
+}
+function computePracticeStats(cards, dailyAnswers, now, scopeIds) {
+  const nowMs = now.getTime();
+  const nextDayMs = addDaysMs(startOfDayMs(now), 1);
+  let dueNow = 0;
+  let dueLaterToday = 0;
+  if (cards) {
+    for (const [id, c] of Object.entries(cards)) {
+      if (!c || typeof c !== "object") continue;
+      if (scopeIds && !scopeIds.has(id)) continue;
+      const t = new Date(c.due).getTime();
+      if (Number.isNaN(t)) continue;
+      if (t <= nowMs) {
+        dueNow++;
+      } else if (t < nextDayMs) {
+        dueLaterToday++;
+      }
+    }
+  }
+  const today = dailyAnswers ? dailyAnswers[dateKey(now)] : void 0;
+  return {
+    practicedToday: typeof today === "number" && Number.isFinite(today) ? today : 0,
+    dueNow,
+    dueLaterToday
+  };
+}
+function buildDailySeries(dailyAnswers, cards, now, options = {}) {
+  var _a, _b;
+  const historyDays = (_a = options.historyDays) != null ? _a : 180;
+  const forecastDays = (_b = options.forecastDays) != null ? _b : 30;
+  const todayMs = startOfDayMs(now);
+  const startLimitMs = addDaysMs(todayMs, -historyDays);
+  const endMs = addDaysMs(todayMs, forecastDays);
+  let earliestMs = null;
+  if (dailyAnswers) {
+    for (const key of Object.keys(dailyAnswers)) {
+      const ms = parseDateKey(key);
+      if (ms !== null && (earliestMs === null || ms < earliestMs)) {
+        earliestMs = ms;
+      }
+    }
+  }
+  const startMs = Math.max(
+    startLimitMs,
+    Math.min(todayMs, earliestMs != null ? earliestMs : todayMs)
+  );
+  const points = [];
+  const indexByKey = /* @__PURE__ */ new Map();
+  for (let ms = startMs; ms <= endMs; ms = addDaysMs(ms, 1)) {
+    const key = dateKey(new Date(ms));
+    indexByKey.set(key, points.length);
+    points.push({ key, ms, answered: 0, due: 0 });
+  }
+  const todayIndex = Math.max(
+    0,
+    Math.round((todayMs - startMs) / 864e5)
+  );
+  if (dailyAnswers) {
+    for (const [key, value] of Object.entries(dailyAnswers)) {
+      const idx = indexByKey.get(key);
+      if (idx === void 0) continue;
+      const v = typeof value === "number" && Number.isFinite(value) ? value : 0;
+      points[idx].answered = Math.max(0, v);
+    }
+  }
+  if (cards) {
+    const todayKey = dateKey(now);
+    for (const [id, c] of Object.entries(cards)) {
+      if (!c || typeof c !== "object") continue;
+      if (options.scopeIds && !options.scopeIds.has(id)) continue;
+      const t = new Date(c.due).getTime();
+      if (Number.isNaN(t)) continue;
+      const key = t < todayMs ? todayKey : dateKey(new Date(t));
+      const idx = indexByKey.get(key);
+      if (idx !== void 0) points[idx].due++;
+    }
+  }
+  return { points, todayIndex };
+}
+var MAX_DAILY_ANSWER_KEYS = 400;
+var MAX_DAILY_ANSWER_VALUE = 1e6;
+function normalizeDailyAnswers(raw) {
+  if (raw === void 0 || raw === null) return void 0;
+  if (typeof raw !== "object") return void 0;
+  const result = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (parseDateKey(key) === null) continue;
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+      continue;
+    }
+    result[key] = Math.min(Math.round(value), MAX_DAILY_ANSWER_VALUE);
+  }
+  return result;
+}
+function pruneDailyAnswers(record, now, keepDays = 180) {
+  const cutoffMs = addDaysMs(startOfDayMs(now), -keepDays);
+  let changed = false;
+  for (const key of Object.keys(record)) {
+    const ms = parseDateKey(key);
+    if (ms === null || ms < cutoffMs) {
+      delete record[key];
+      changed = true;
+    }
+  }
+  const keys = Object.keys(record);
+  if (keys.length > MAX_DAILY_ANSWER_KEYS) {
+    keys.sort();
+    const overflow = keys.length - MAX_DAILY_ANSWER_KEYS;
+    for (let i = 0; i < overflow; i++) {
+      delete record[keys[i]];
+    }
+    changed = true;
+  }
+  return changed;
 }
 
 // src/sidecar.ts
@@ -1137,6 +1287,7 @@ function normalizeSidecar(raw) {
       memoryNewCountToday: toOptNumber(s.memoryNewCountToday),
       memoryPendingNew: toOptStrArray(s.memoryPendingNew),
       memoryInitialized: toOptBool(s.memoryInitialized),
+      dailyAnswers: normalizeDailyAnswers(s.dailyAnswers),
       updatedAt: toOptNumber(s.updatedAt)
     }
   };
@@ -1551,6 +1702,11 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
         control: { type: "toggle", key: "editPanelOpen" }
       },
       {
+        name: "\u9ED8\u8BA4\u5C55\u5F00\u7EC3\u4E60\u680F",
+        desc: "\u6253\u5F00\u5237\u9898\u9762\u677F\u65F6\u7EC3\u4E60\u680F\uFF08\u7EC3\u4E60\u5165\u53E3/\u5206\u7C7B\u7EDF\u8BA1/\u6298\u7EBF\u56FE\uFF09\u9ED8\u8BA4\u662F\u5426\u5C55\u5F00",
+        control: { type: "toggle", key: "practicePanelOpen" }
+      },
+      {
         type: "group",
         heading: "\u6807\u8BB0\u7B5B\u9009\u9ED8\u8BA4\u503C",
         items: [
@@ -1820,6 +1976,12 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
       "\u9ED8\u8BA4\u5C55\u5F00\u7F16\u8F91\u680F",
       "\u6253\u5F00\u5237\u9898\u9762\u677F\u65F6\u6807\u7B7E/\u5206\u7C7B\u7F16\u8F91\u680F\u9ED8\u8BA4\u662F\u5426\u5C55\u5F00",
       "editPanelOpen"
+    );
+    this.addToggleSetting(
+      containerEl,
+      "\u9ED8\u8BA4\u5C55\u5F00\u7EC3\u4E60\u680F",
+      "\u6253\u5F00\u5237\u9898\u9762\u677F\u65F6\u7EC3\u4E60\u680F\uFF08\u7EC3\u4E60\u5165\u53E3/\u5206\u7C7B\u7EDF\u8BA1/\u6298\u7EBF\u56FE\uFF09\u9ED8\u8BA4\u662F\u5426\u5C55\u5F00",
+      "practicePanelOpen"
     );
     new import_obsidian3.Setting(containerEl).setName("\u6807\u8BB0\u7B5B\u9009\u9ED8\u8BA4\u503C").setHeading();
     this.addFilterDefaultSetting(
@@ -4345,7 +4507,420 @@ var fsrs = (params) => {
 
 // src/quizView.ts
 var import_papaparse2 = __toESM(require_papaparse_min());
+
+// src/practiceChart.ts
+var _PracticeChart = class _PracticeChart {
+  constructor(canvas, options = {}) {
+    this.points = [];
+    this.todayIndex = 0;
+    /** 视窗起始的浮点天数（null = 尚未初始化，首次绘制时定位到今日附近）。 */
+    this.offset = null;
+    this.cssW = 0;
+    this.cssH = 0;
+    this.dpr = 1;
+    this.rafId = null;
+    this.momentumRafId = null;
+    this.resizeObserver = null;
+    this.destroyed = false;
+    this.seriesVisible = {
+      answered: true,
+      due: true
+    };
+    this.colors = {
+      answered: "#4caf50",
+      due: "#ff9800",
+      text: "#999999",
+      grid: "#dddddd",
+      accent: "#7c3aed"
+    };
+    /** 拖动状态（pointerdown 起始；velocity 单位 px/ms，供惯性用）。 */
+    this.pan = {
+      active: false,
+      pointerId: -1,
+      lastX: 0,
+      lastT: 0,
+      velocity: 0
+    };
+    var _a;
+    this.canvas = canvas;
+    this.height = (_a = options.height) != null ? _a : 190;
+    canvas.style.height = `${this.height}px`;
+    this.ctx = canvas.getContext("2d");
+    this.bindInteraction();
+    if (typeof ResizeObserver !== "undefined") {
+      this.resizeObserver = new ResizeObserver(() => this.handleResize());
+      this.resizeObserver.observe(canvas);
+    }
+    this.handleResize();
+  }
+  /** 更新数据。resetView=true 时把视窗重置到今日附近（面板展开/首次显示用）。 */
+  setData(points, todayIndex, resetView = false) {
+    this.points = points;
+    this.todayIndex = todayIndex;
+    if (resetView) this.offset = null;
+    this.clampOffset();
+    this.scheduleDraw();
+  }
+  /** 切换系列可见性，返回切换后的状态。 */
+  toggleSeries(series) {
+    this.seriesVisible[series] = !this.seriesVisible[series];
+    this.scheduleDraw();
+    return this.seriesVisible[series];
+  }
+  destroy() {
+    var _a;
+    this.destroyed = true;
+    if (this.rafId !== null) {
+      window.cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    }
+    this.stopMomentum();
+    (_a = this.resizeObserver) == null ? void 0 : _a.disconnect();
+    this.resizeObserver = null;
+  }
+  /* ===================== 尺寸与绘制调度 ===================== */
+  handleResize() {
+    if (this.destroyed) return;
+    const cssW = this.canvas.clientWidth;
+    const cssH = this.canvas.clientHeight || this.height;
+    if (cssW === 0) {
+      this.cssW = 0;
+      return;
+    }
+    if (cssW === this.cssW && cssH === this.cssH) return;
+    this.cssW = cssW;
+    this.cssH = cssH;
+    this.dpr = Math.max(1, window.devicePixelRatio || 1);
+    this.canvas.width = Math.round(cssW * this.dpr);
+    this.canvas.height = Math.round(cssH * this.dpr);
+    this.readColors();
+    this.clampOffset();
+    this.scheduleDraw();
+  }
+  /** 从画布继承的主题 CSS 变量读色（失败回退内置色）。 */
+  readColors() {
+    try {
+      const cs = getComputedStyle(this.canvas);
+      const pick = (name, fallback) => {
+        const v = cs.getPropertyValue(name).trim();
+        return v || fallback;
+      };
+      this.colors = {
+        answered: pick("--color-green", this.colors.answered),
+        due: pick("--color-orange", this.colors.due),
+        text: pick("--text-muted", this.colors.text),
+        grid: pick("--background-modifier-border", this.colors.grid),
+        accent: pick("--interactive-accent", this.colors.accent)
+      };
+    } catch (e) {
+    }
+  }
+  scheduleDraw() {
+    if (this.destroyed || this.rafId !== null) return;
+    this.rafId = window.requestAnimationFrame(() => {
+      this.rafId = null;
+      this.draw();
+    });
+  }
+  /* ===================== 布局计算 ===================== */
+  plotWidth() {
+    return Math.max(
+      50,
+      this.cssW - _PracticeChart.PAD_L - _PracticeChart.PAD_R
+    );
+  }
+  /** 单日像素宽：目标可见天数随宽度自适应（窄屏≈12 天，宽屏≤30 天）；数据少时拉伸填满。 */
+  computeDayWidth() {
+    const targetVisible = Math.min(
+      30,
+      Math.max(12, Math.round(this.plotWidth() / 32))
+    );
+    const byTarget = this.plotWidth() / targetVisible;
+    if (this.points.length === 0) return byTarget;
+    return Math.max(byTarget, this.plotWidth() / this.points.length);
+  }
+  visibleDays(dayWidth) {
+    return this.plotWidth() / dayWidth;
+  }
+  maxOffset(dayWidth) {
+    return Math.max(0, this.points.length - this.visibleDays(dayWidth));
+  }
+  clampOffset() {
+    if (this.offset === null || this.cssW === 0 || this.points.length === 0) {
+      return;
+    }
+    const dayWidth = this.computeDayWidth();
+    this.offset = Math.min(
+      Math.max(this.offset, 0),
+      this.maxOffset(dayWidth)
+    );
+  }
+  /* ===================== 绘制 ===================== */
+  draw() {
+    if (this.destroyed || this.ctx === null || this.cssW === 0) return;
+    const ctx = this.ctx;
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.clearRect(0, 0, this.cssW, this.cssH);
+    const W = this.cssW;
+    const H = this.cssH;
+    const padL = _PracticeChart.PAD_L;
+    const padR = _PracticeChart.PAD_R;
+    const padT = _PracticeChart.PAD_T;
+    const padB = _PracticeChart.PAD_B;
+    const plotW = this.plotWidth();
+    const plotH = H - padT - padB;
+    if (this.points.length === 0) {
+      ctx.fillStyle = this.colors.text;
+      ctx.font = "12px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("\u6682\u65E0\u6570\u636E", W / 2, H / 2);
+      return;
+    }
+    const dayWidth = this.computeDayWidth();
+    if (this.offset === null) {
+      this.offset = Math.min(
+        Math.max(this.todayIndex + 0.5 - this.visibleDays(dayWidth) * 0.72, 0),
+        this.maxOffset(dayWidth)
+      );
+    }
+    const offset = this.offset;
+    const xOf = (i) => padL + (i - offset) * dayWidth;
+    const i0 = Math.max(0, Math.floor(offset));
+    const i1 = Math.min(this.points.length - 1, Math.ceil(offset + this.visibleDays(dayWidth)));
+    let peak = 0;
+    for (let i = i0; i <= i1; i++) {
+      const p = this.points[i];
+      if (this.seriesVisible.answered && p.answered > peak) peak = p.answered;
+      if (this.seriesVisible.due && p.due > peak) peak = p.due;
+    }
+    const step = Math.max(1, niceStep(Math.max(1, peak) / 4));
+    const yMax = Math.max(step, Math.ceil(peak / step) * step);
+    const yOf = (v) => padT + plotH - v / yMax * plotH;
+    ctx.font = "10px sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "right";
+    for (let v = 0; v <= yMax + 1e-9; v += step) {
+      const y = yOf(v);
+      ctx.strokeStyle = this.colors.grid;
+      ctx.globalAlpha = v === 0 ? 0.9 : 0.45;
+      ctx.beginPath();
+      ctx.moveTo(padL, y);
+      ctx.lineTo(W - padR, y);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = this.colors.text;
+      ctx.fillText(String(v), padL - 6, y);
+    }
+    const todayX = xOf(this.todayIndex + 0.5);
+    if (todayX < W - padR) {
+      ctx.fillStyle = this.colors.accent;
+      ctx.globalAlpha = 0.05;
+      ctx.fillRect(todayX, padT, W - padR - todayX, plotH);
+      ctx.globalAlpha = 1;
+    }
+    if (todayX >= padL - 1 && todayX <= W - padR + 1) {
+      ctx.save();
+      ctx.strokeStyle = this.colors.accent;
+      ctx.globalAlpha = 0.55;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(todayX, padT - 4);
+      ctx.lineTo(todayX, H - padB);
+      ctx.stroke();
+      ctx.restore();
+      ctx.fillStyle = this.colors.accent;
+      ctx.font = "10px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.fillText("\u4ECA\u5929", todayX, padT - 5);
+    }
+    ctx.fillStyle = this.colors.text;
+    ctx.font = "10px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    const labelStep = Math.max(1, Math.ceil(52 / dayWidth));
+    for (let i = i0; i <= i1; i++) {
+      if (i % labelStep !== 0) continue;
+      const x = xOf(i);
+      if (x < padL + 8 || x > W - padR - 8) continue;
+      const d = new Date(this.points[i].ms);
+      ctx.fillText(`${d.getMonth() + 1}/${d.getDate()}`, x, H - padB + 5);
+    }
+    const drawSeries = (getValue, color) => {
+      const start = Math.max(0, i0 - 1);
+      const end = Math.min(this.points.length - 1, i1 + 1);
+      const grad = ctx.createLinearGradient(0, padT, 0, padT + plotH);
+      grad.addColorStop(0, withAlpha(color, 0.18));
+      grad.addColorStop(1, withAlpha(color, 0.02));
+      ctx.beginPath();
+      ctx.moveTo(xOf(start), yOf(getValue(this.points[start])));
+      for (let i = start + 1; i <= end; i++) {
+        ctx.lineTo(xOf(i), yOf(getValue(this.points[i])));
+      }
+      ctx.lineTo(xOf(end), padT + plotH);
+      ctx.lineTo(xOf(start), padT + plotH);
+      ctx.closePath();
+      ctx.fillStyle = grad;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(xOf(start), yOf(getValue(this.points[start])));
+      for (let i = start + 1; i <= end; i++) {
+        ctx.lineTo(xOf(i), yOf(getValue(this.points[i])));
+      }
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.stroke();
+    };
+    if (this.seriesVisible.due) {
+      drawSeries((p) => p.due, this.colors.due);
+    }
+    if (this.seriesVisible.answered) {
+      drawSeries((p) => p.answered, this.colors.answered);
+    }
+    let hasAny = false;
+    for (const p of this.points) {
+      if (p.answered > 0 || p.due > 0) {
+        hasAny = true;
+        break;
+      }
+    }
+    if (!hasAny) {
+      ctx.fillStyle = this.colors.text;
+      ctx.font = "12px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("\u6682\u65E0\u7EC3\u4E60\u6570\u636E\uFF0C\u7B54\u9898\u540E\u5F00\u59CB\u8BB0\u5F55", W / 2, padT + plotH / 2);
+    }
+  }
+  /* ===================== 交互：拖动 / 惯性 / 滚轮 ===================== */
+  bindInteraction() {
+    const c = this.canvas;
+    c.addEventListener("pointerdown", (e) => {
+      if (this.destroyed || !e.isPrimary || this.pan.active) return;
+      this.stopMomentum();
+      this.pan.active = true;
+      this.pan.pointerId = e.pointerId;
+      this.pan.lastX = e.clientX;
+      this.pan.lastT = e.timeStamp;
+      this.pan.velocity = 0;
+      try {
+        c.setPointerCapture(e.pointerId);
+      } catch (e2) {
+      }
+    });
+    c.addEventListener("pointermove", (e) => {
+      if (!this.pan.active || e.pointerId !== this.pan.pointerId) return;
+      const dx = e.clientX - this.pan.lastX;
+      const dt = Math.max(1, e.timeStamp - this.pan.lastT);
+      this.pan.velocity = 0.75 * this.pan.velocity + 0.25 * (dx / dt);
+      this.pan.lastX = e.clientX;
+      this.pan.lastT = e.timeStamp;
+      this.applyPanDelta(dx);
+    });
+    const endPan = (e) => {
+      if (!this.pan.active || e.pointerId !== this.pan.pointerId) return;
+      this.pan.active = false;
+      try {
+        c.releasePointerCapture(e.pointerId);
+      } catch (e2) {
+      }
+      if (Math.abs(this.pan.velocity) > 0.05) this.startMomentum();
+    };
+    c.addEventListener("pointerup", endPan);
+    c.addEventListener("pointercancel", endPan);
+    c.addEventListener(
+      "wheel",
+      (e) => {
+        if (this.destroyed || this.points.length === 0) return;
+        const horizontal = Math.abs(e.deltaX) > Math.abs(e.deltaY);
+        const shiftVertical = e.shiftKey && e.deltaY !== 0 && e.deltaX === 0;
+        if (!horizontal && !shiftVertical) return;
+        e.preventDefault();
+        const delta = horizontal ? e.deltaX : e.deltaY;
+        this.applyPanDelta(delta);
+        this.stopMomentum();
+      },
+      { passive: false }
+    );
+  }
+  /** 按像素位移平移视窗（右拖看历史、左拖看未来），并夹紧到数据区间。 */
+  applyPanDelta(dxPx) {
+    var _a;
+    if (this.cssW === 0 || this.points.length === 0) return;
+    const dayWidth = this.computeDayWidth();
+    const base = (_a = this.offset) != null ? _a : 0;
+    this.offset = Math.min(
+      Math.max(base - dxPx / dayWidth, 0),
+      this.maxOffset(dayWidth)
+    );
+    this.scheduleDraw();
+  }
+  /** 松手后的惯性滚动：速度按帧衰减（≈0.94/16ms），触边即停。 */
+  startMomentum() {
+    if (this.momentumRafId !== null || this.destroyed) return;
+    let lastT = performance.now();
+    let velocity = this.pan.velocity;
+    const tick = () => {
+      if (this.destroyed) {
+        this.momentumRafId = null;
+        return;
+      }
+      const now = performance.now();
+      const dt = Math.min(40, Math.max(1, now - lastT));
+      lastT = now;
+      velocity *= Math.pow(0.94, dt / 16);
+      const before = this.offset;
+      this.applyPanDelta(velocity * dt);
+      const stopped = Math.abs(velocity) < 0.02 || this.offset === before;
+      if (stopped) {
+        this.momentumRafId = null;
+        return;
+      }
+      this.momentumRafId = window.requestAnimationFrame(tick);
+    };
+    this.momentumRafId = window.requestAnimationFrame(tick);
+  }
+  stopMomentum() {
+    if (this.momentumRafId !== null) {
+      window.cancelAnimationFrame(this.momentumRafId);
+      this.momentumRafId = null;
+    }
+  }
+};
+_PracticeChart.PAD_L = 34;
+_PracticeChart.PAD_R = 10;
+_PracticeChart.PAD_T = 20;
+_PracticeChart.PAD_B = 20;
+var PracticeChart = _PracticeChart;
+function niceStep(raw) {
+  const pow = Math.pow(10, Math.floor(Math.log10(Math.max(1, raw))));
+  for (const m of [1, 2, 5, 10]) {
+    const s = m * pow;
+    if (s >= raw - 1e-9) return s;
+  }
+  return 10 * pow;
+}
+function withAlpha(color, alpha) {
+  const m = /^#([0-9a-f]{6})$/i.exec(color.trim());
+  if (!m) return color;
+  const r = parseInt(m[1].slice(0, 2), 16);
+  const g = parseInt(m[1].slice(2, 4), 16);
+  const b = parseInt(m[1].slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+// src/quizView.ts
 var memoryScheduler = fsrs();
+function sameIdSet(a, b) {
+  if (!b || a.size !== b.size) return false;
+  for (const id of a) {
+    if (!b.has(id)) return false;
+  }
+  return true;
+}
 var _QuizView = class _QuizView extends import_obsidian6.ItemView {
   constructor(leaf, plugin, stateManager, vault, csvWriteQueue) {
     super(leaf);
@@ -4396,6 +4971,13 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     /** 本实例是否已计入 openViewCount。 */
     this.counted = false;
     this.textFilterTimer = null;
+    this.practiceChart = null;
+    /** 每日答题事件数（"YYYY-MM-DD" → 次数），随进度持久化（练习面板统计/折线图数据源）。 */
+    this.dailyAnswers = {};
+    /** 练习面板折线图数据脏标记：答题/卡片/按日计数变化后置位，面板可见时重建序列。 */
+    this.practiceStatsDirty = true;
+    /** 上次练习面板到期统计使用的筛选范围（变化时重建折线图序列）。 */
+    this.lastScopeIds = null;
     /** 随机考试模式：考试集为临时会话，不持久化，重开面板回到常规模式。 */
     this.practiceActive = false;
     this.practiceIds = [];
@@ -4466,6 +5048,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     await this.initializeFromState();
   }
   async onClose() {
+    var _a;
     if (this.isClosed) return;
     this.isClosed = true;
     if (this.counted) {
@@ -4477,6 +5060,8 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       window.clearInterval(this.autoSaveTimer);
       this.autoSaveTimer = null;
     }
+    (_a = this.practiceChart) == null ? void 0 : _a.destroy();
+    this.practiceChart = null;
     this.backupTimer.stop();
     this.stateManager.cancelScheduledSave();
     this.exitRandomPractice();
@@ -4551,6 +5136,9 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       "csv-quiz-filter-panel"
     );
     this.editArea = this.contentEl.createDiv("csv-quiz-edit-area");
+    this.practicePanelEl = this.contentEl.createDiv(
+      "csv-quiz-filter-panel csv-quiz-practice-panel"
+    );
     this.contentEl.createDiv("csv-quiz-bottom-spacer");
     this.contentEl.setAttribute("tabindex", "-1");
     this.registerDomEvent(this.contentEl, "click", (e) => {
@@ -4593,6 +5181,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     const inMemoryState = this.stateManager.getState();
     const inMemoryMeta = this.stateManager.getMeta();
     this.buildFilterPanel(settings);
+    this.buildPracticePanel(settings);
     this.stateManager.setState(null);
     const status = await this.loadQuestions();
     if (this.isClosed) return;
@@ -4776,6 +5365,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         return;
       }
       this.addStatsForAnswers((_a = outcome.addedAnswerIds) != null ? _a : []);
+      this.practiceStatsDirty = true;
       const parts = [
         `\u5DF2\u5408\u5E76 ${outcome.mergedSources} \u4E2A\u51B2\u7A81\u526F\u672C`,
         `\u5E76\u5165 ${outcome.addedAnswers} \u6761\u7B54\u9898\u8BB0\u5F55`
@@ -4898,6 +5488,8 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     this.memoryNewCountToday = 0;
     this.memoryPendingNew = [];
     this.memoryInitialized = false;
+    this.dailyAnswers = {};
+    this.practiceStatsDirty = true;
     this.currentShuffledQId = null;
     this.selectedOption = null;
     this.selectedOptions = [];
@@ -4934,6 +5526,8 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     this.memoryNewCountToday = savedState.memoryNewCountToday || 0;
     this.memoryPendingNew = savedState.memoryPendingNew || [];
     this.memoryInitialized = !!savedState.memoryInitialized;
+    this.dailyAnswers = savedState.dailyAnswers || {};
+    this.practiceStatsDirty = true;
     this.pruneMemoryCards();
   }
   /** 清理题库中已不存在的僵尸记忆卡片（CSV 删题后保持计数一致）。 */
@@ -5114,7 +5708,48 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         void this.toggleBoolFilter(bf.key, "0");
       });
     }
-    const practiceRow = filterBody.createDiv("csv-quiz-filter-row");
+  }
+  /**
+   * 练习面板（底部可展开控件，与筛选条件/标签分类同级）：
+   * - 分类统计：今日已练习 / 目前已到期 / 预计今日内到期
+   * - 练习入口：随机考试 / 记忆练习（自筛选面板迁入）
+   * - 折线图：共 y 轴双系列（每日已答题量 / 预计到期题目量），横轴按日，可左右滑动
+   */
+  buildPracticePanel(settings) {
+    this.practicePanelEl.empty();
+    const toggleHeader = this.practicePanelEl.createDiv(
+      "csv-quiz-filter-toggle"
+    );
+    const toggleIcon = toggleHeader.createSpan("csv-quiz-filter-icon");
+    toggleHeader.createEl("span", { text: "\u7EC3\u4E60" });
+    const panelOpen = settings.practicePanelOpen;
+    const body = this.practicePanelEl.createDiv("csv-quiz-filter-body");
+    this.practiceBodyEl = body;
+    body.classList.toggle("csv-quiz-filter-body-hidden", !panelOpen);
+    toggleIcon.textContent = panelOpen ? "\u25BC" : "\u25B6";
+    toggleHeader.addEventListener("click", () => {
+      const isHidden = body.classList.contains("csv-quiz-filter-body-hidden");
+      body.classList.toggle("csv-quiz-filter-body-hidden");
+      toggleIcon.textContent = isHidden ? "\u25BC" : "\u25B6";
+      if (isHidden) this.updatePracticeStats(true);
+    });
+    const statRow = body.createDiv("csv-quiz-stat-row");
+    this.statPracticedEl = this.buildStatChip(
+      statRow,
+      "\u4ECA\u65E5\u5DF2\u7EC3\u4E60",
+      "csv-quiz-stat-value-practiced"
+    );
+    this.statDueNowEl = this.buildStatChip(
+      statRow,
+      "\u76EE\u524D\u5DF2\u5230\u671F",
+      "csv-quiz-stat-value-due"
+    );
+    this.statDueTodayEl = this.buildStatChip(
+      statRow,
+      "\u9884\u8BA1\u4ECA\u65E5\u5185\u5230\u671F",
+      "csv-quiz-stat-value-forecast"
+    );
+    const practiceRow = body.createDiv("csv-quiz-filter-row csv-quiz-practice-row");
     this.practiceBtn = practiceRow.createEl("button", {
       text: `\u{1F3B2} \u968F\u673A\u8003\u8BD5\uFF08${settings.randomExamCount} \u9898\uFF09`,
       cls: "csv-quiz-btn csv-quiz-btn-sm csv-quiz-practice-btn"
@@ -5137,6 +5772,81 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         cls: "csv-quiz-practice-count"
       });
     }
+    const chartBox = body.createDiv("csv-quiz-chart-box");
+    const legend = chartBox.createDiv("csv-quiz-chart-legend");
+    this.buildLegendChip(legend, "\u6BCF\u65E5\u7B54\u9898", "answered");
+    this.buildLegendChip(legend, "\u9884\u8BA1\u5230\u671F", "due");
+    const canvas = chartBox.createEl("canvas", {
+      cls: "csv-quiz-chart-canvas"
+    });
+    this.practiceChart = new PracticeChart(canvas, { height: 190 });
+  }
+  /** 统计芯片：数值 + 标签，返回数值元素（供后续 setText 刷新）。 */
+  buildStatChip(parent, label, valueCls) {
+    const chip = parent.createDiv("csv-quiz-stat-chip");
+    const value = chip.createSpan({
+      cls: `csv-quiz-stat-value ${valueCls}`,
+      text: "0"
+    });
+    chip.createSpan({ cls: "csv-quiz-stat-label", text: label });
+    return value;
+  }
+  /** 图例芯片：点击切换对应系列可见性。 */
+  buildLegendChip(parent, label, series) {
+    const chip = parent.createSpan({
+      cls: "csv-quiz-legend-chip",
+      attr: { "data-series": series }
+    });
+    chip.createSpan({ cls: `csv-quiz-legend-dot csv-quiz-legend-dot-${series}` });
+    chip.createSpan({ text: label });
+    chip.addEventListener("click", () => {
+      var _a, _b;
+      const visible = (_b = (_a = this.practiceChart) == null ? void 0 : _a.toggleSeries(series)) != null ? _b : true;
+      chip.classList.toggle("csv-quiz-legend-chip-off", !visible);
+    });
+  }
+  /**
+   * 当前筛选范围（常规模式口径）的题 id 集合：练习面板到期统计与折线图到期系列
+   * 随筛选变化。练习模式下 filteredQuestions 是练习集快照，改用 applyFiltersTo
+   * 的常规筛选结果（与进入记忆练习的取池口径一致）。
+   */
+  currentFilterScopeIds() {
+    const source = this.practiceActive || this.memoryActive ? this.applyFiltersTo(this.orderedQuestions) : this.filteredQuestions;
+    return new Set(source.map((q) => q.id));
+  }
+  /**
+   * 同步练习面板：三项统计文本每次刷新（O(筛选数+卡片数)）；到期统计随当前筛选
+   * （今日已练习为全库答题事件口径）。折线图仅在面板可见且数据脏/筛选变化（或强制）
+   * 时重建序列，避免每次切题重绘画布。force=true（面板展开/首次）额外把视窗定位到今日。
+   */
+  updatePracticeStats(force = false) {
+    if (!this.statPracticedEl || !this.practiceChart) return;
+    const now = /* @__PURE__ */ new Date();
+    const scopeIds = this.currentFilterScopeIds();
+    const scopeChanged = !sameIdSet(scopeIds, this.lastScopeIds);
+    this.lastScopeIds = scopeIds;
+    const stats = computePracticeStats(
+      this.memoryCards,
+      this.dailyAnswers,
+      now,
+      scopeIds
+    );
+    this.statPracticedEl.setText(String(stats.practicedToday));
+    this.statDueNowEl.setText(String(stats.dueNow));
+    this.statDueTodayEl.setText(String(stats.dueLaterToday));
+    const panelVisible = !this.practiceBodyEl.classList.contains(
+      "csv-quiz-filter-body-hidden"
+    );
+    if (!panelVisible) {
+      this.practiceStatsDirty = true;
+      return;
+    }
+    if (!force && !this.practiceStatsDirty && !scopeChanged) return;
+    const series = buildDailySeries(this.dailyAnswers, this.memoryCards, now, {
+      scopeIds
+    });
+    this.practiceChart.setData(series.points, series.todayIndex, force);
+    this.practiceStatsDirty = false;
   }
   updateFilterUI() {
     if (!this.cat1Select) return;
@@ -5150,6 +5860,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     this.populateTagChips();
     this.syncBoolChips();
     this.updatePracticeButton();
+    this.updatePracticeStats();
   }
   /** 自由文本筛选：输入防抖 200ms 后应用（与其它筛选一致的 applyFiltersAndReset 行为）。 */
   scheduleTextFilter() {
@@ -5298,6 +6009,8 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         this.memoryNewCountToday = 0;
         this.memoryPendingNew = [];
         this.memoryInitialized = false;
+        this.dailyAnswers = {};
+        this.practiceStatsDirty = true;
         this.currentIndex = 0;
         this.currentShuffledQId = null;
         this.selectedOption = null;
@@ -5426,8 +6139,13 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     } else {
       this.memoryBtn.setText("\u{1F9E0} \u8BB0\u5FC6\u7EC3\u4E60");
       this.memoryBtn.removeClass("csv-quiz-practice-btn-active");
-      const dueCount = countDueCards(this.memoryCards);
-      this.memoryCountEl.setText(dueCount > 0 ? ` \u4ECA\u65E5\u5F85\u590D\u4E60 ${dueCount} \u9898` : "");
+      const { dueNow } = computePracticeStats(
+        this.memoryCards,
+        void 0,
+        /* @__PURE__ */ new Date(),
+        this.currentFilterScopeIds()
+      );
+      this.memoryCountEl.setText(dueNow > 0 ? ` \u4ECA\u65E5\u5F85\u590D\u4E60 ${dueNow} \u9898` : "");
     }
   }
   populateTagChips() {
@@ -5669,6 +6387,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     this.renderEditArea(question);
     this.updateNavigation();
     this.updatePracticeButton();
+    this.updatePracticeStats();
   }
   /** 题目页眉底部：可折叠的记忆卡片信息栏（仅展示，不编辑）。 */
   renderCardPanel(question) {
@@ -5819,6 +6538,11 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
   /** 记录答题结果：计数、答题记录、错题标记（答对清除、答错置位）写入 sidecar meta。不负责渲染。 */
   async recordAnswer(question, selectedStr, isCorrect) {
     this.answeredQuestions[question.id] = selectedStr;
+    const key = dateKey(/* @__PURE__ */ new Date());
+    const prev = this.dailyAnswers[key];
+    this.dailyAnswers[key] = (prev != null ? prev : 0) + 1;
+    if (prev === void 0) pruneDailyAnswers(this.dailyAnswers, /* @__PURE__ */ new Date());
+    this.practiceStatsDirty = true;
     if (this.practiceActive || this.memoryActive) {
       this.practiceAnswered.add(question.id);
     }
@@ -5903,6 +6627,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         // 冲突合并时间戳：记录卡片写入时间（较新者胜）
         ts: Date.now()
       };
+      this.practiceStatsDirty = true;
       if (!correct) {
         if (q && q.wrong !== "1") {
           q.wrong = "1";
@@ -5991,6 +6716,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
             state.correctCount = 0;
             state.wrongCount = 0;
             state.answeredQuestions = {};
+            state.dailyAnswers = {};
           }
           if (choice !== "records") {
             state.memoryCards = {};
@@ -6040,6 +6766,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       this.correctCount = 0;
       this.wrongCount = 0;
       this.answeredQuestions = {};
+      this.dailyAnswers = {};
     }
     if (choice !== "records") {
       this.memoryCards = {};
@@ -6047,6 +6774,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       this.memoryNewCountToday = 0;
       this.memoryPendingNew = [];
     }
+    this.practiceStatsDirty = true;
     this.rebuildOrderAndLocate(this.getSettings().randomOrder, null);
     this.currentIndex = 0;
     this.currentShuffledQId = null;
@@ -6468,7 +7196,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     if (Math.min(tc.clientX, window.innerWidth - tc.clientX) < 12) return;
     const target = e.target;
     if (target && target.closest(
-      "a, button, input, textarea, select, label, [contenteditable]"
+      "a, button, input, textarea, select, label, [contenteditable], .csv-quiz-chart-box"
     )) {
       return;
     }
@@ -6934,7 +7662,9 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       // A1: 当日已选未答的新题 id 随进度持久化
       memoryPendingNew: this.memoryPendingNew,
       // C-1: 记忆练习初始化标记随进度持久化
-      memoryInitialized: this.memoryInitialized
+      memoryInitialized: this.memoryInitialized,
+      // 每日答题量随进度持久化（练习面板统计/折线图）
+      dailyAnswers: this.dailyAnswers
     };
   }
   /** 引用字段浅拷贝快照：供脏检查基准使用。
@@ -6946,7 +7676,8 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       ...state,
       displayOrder: [...state.displayOrder],
       answeredQuestions: { ...state.answeredQuestions },
-      memoryCards: state.memoryCards ? { ...state.memoryCards } : state.memoryCards
+      memoryCards: state.memoryCards ? { ...state.memoryCards } : state.memoryCards,
+      dailyAnswers: state.dailyAnswers ? { ...state.dailyAnswers } : state.dailyAnswers
     };
   }
   saveState() {
@@ -7084,7 +7815,8 @@ var StateManager = class {
       memoryNewDate: toStr(r.memoryNewDate),
       memoryNewCountToday: toNumber(r.memoryNewCountToday),
       memoryPendingNew: toStrArray(r.memoryPendingNew),
-      memoryInitialized: typeof r.memoryInitialized === "boolean" ? r.memoryInitialized : void 0
+      memoryInitialized: typeof r.memoryInitialized === "boolean" ? r.memoryInitialized : void 0,
+      dailyAnswers: normalizeDailyAnswers(r.dailyAnswers)
     };
   }
   /**
@@ -7113,7 +7845,8 @@ var StateManager = class {
       memoryNewDate: s.memoryNewDate,
       memoryNewCountToday: s.memoryNewCountToday,
       memoryPendingNew: s.memoryPendingNew,
-      memoryInitialized: s.memoryInitialized
+      memoryInitialized: s.memoryInitialized,
+      dailyAnswers: s.dailyAnswers
     };
   }
   /** 新题库空会话状态（sidecar 缺失初始化用）：默认筛选取自 defaultFilters，其余为默认值。 */
@@ -7290,6 +8023,7 @@ var StateManager = class {
       memoryNewCountToday: s.memoryNewCountToday,
       memoryPendingNew: s.memoryPendingNew,
       memoryInitialized: s.memoryInitialized,
+      dailyAnswers: s.dailyAnswers,
       // 冲突合并时间戳：每次写盘刷新（供同步冲突合并判定文件新旧）
       updatedAt: Date.now()
     };

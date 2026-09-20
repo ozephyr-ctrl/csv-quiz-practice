@@ -167,6 +167,25 @@ describe("quizStateEquals", () => {
     };
     expect(quizStateEquals(base, withEmptyAnswer)).toBe(false);
   });
+
+  it("dailyAnswers 按日计数差异可检出（练习面板折线图数据源）", () => {
+    const withDaily: QuizSessionState = {
+      ...base,
+      dailyAnswers: { "2026-09-20": 3 },
+    };
+    expect(quizStateEquals(base, withDaily)).toBe(false);
+    expect(quizStateEquals(withDaily, { ...withDaily })).toBe(true);
+    expect(
+      quizStateEquals(withDaily, { ...withDaily, dailyAnswers: { "2026-09-20": 4 } })
+    ).toBe(false);
+  });
+
+  it("dailyAnswers 缺失按空对象处理（旧进度兼容）", () => {
+    const legacy = { ...base } as Partial<QuizSessionState>;
+    delete legacy.dailyAnswers;
+    const freshEmpty: QuizSessionState = { ...base, dailyAnswers: {} };
+    expect(quizStateEquals(legacy as QuizSessionState, freshEmpty)).toBe(true);
+  });
 });
 
 describe("shuffle / sortByDisplayOrder", () => {
