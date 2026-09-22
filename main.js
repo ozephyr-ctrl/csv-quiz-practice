@@ -4680,7 +4680,7 @@ var _PracticeChart = class _PracticeChart {
     const dayWidth = this.computeDayWidth();
     if (this.offset === null) {
       this.offset = Math.min(
-        Math.max(this.todayIndex + 0.5 - this.visibleDays(dayWidth) * 0.72, 0),
+        Math.max(this.todayIndex - this.visibleDays(dayWidth) * 0.72, 0),
         this.maxOffset(dayWidth)
       );
     }
@@ -4712,7 +4712,7 @@ var _PracticeChart = class _PracticeChart {
       ctx.fillStyle = this.colors.text;
       ctx.fillText(String(v), padL - 6, y);
     }
-    const todayX = xOf(this.todayIndex + 0.5);
+    const todayX = xOf(this.todayIndex);
     if (todayX < W - padR) {
       ctx.fillStyle = this.colors.accent;
       ctx.globalAlpha = 0.05;

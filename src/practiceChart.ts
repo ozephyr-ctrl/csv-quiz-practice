@@ -206,7 +206,7 @@ export class PracticeChart {
     // 首次绘制：把今日定位在视窗约 72% 处（左侧看历史、右侧看预测）
     if (this.offset === null) {
       this.offset = Math.min(
-        Math.max(this.todayIndex + 0.5 - this.visibleDays(dayWidth) * 0.72, 0),
+        Math.max(this.todayIndex - this.visibleDays(dayWidth) * 0.72, 0),
         this.maxOffset(dayWidth)
       );
     }
@@ -244,8 +244,10 @@ export class PracticeChart {
       ctx.fillText(String(v), padL - 6, y);
     }
 
-    // 未来预测区（今日右侧）淡色底 + 今日竖虚线
-    const todayX = xOf(this.todayIndex + 0.5);
+    // 未来预测区（今日右侧）淡色底 + 今日竖虚线。
+    // 虚线取 xOf(todayIndex)：与今日数据点/日期标签同一横坐标（折线图点位约定，
+    // 不能用柱状图的 +0.5 格子边界，否则虚线偏到峰值右侧像标在明天）。
+    const todayX = xOf(this.todayIndex);
     if (todayX < W - padR) {
       ctx.fillStyle = this.colors.accent;
       ctx.globalAlpha = 0.05;
