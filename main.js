@@ -1151,19 +1151,27 @@ var DEFAULT_RENAME_RETRY_BUDGET_MS = 3e4;
 var DEFAULT_RENAME_RETRY_BASE_DELAY_MS = 50;
 var DEFAULT_RENAME_RETRY_MAX_DELAY_MS = 250;
 function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  const host = typeof window !== "undefined" ? window : globalThis;
+  return new Promise((resolve) => host.setTimeout(resolve, ms));
 }
-function tryRequireNodeFsPromises() {
-  try {
-    return require("fs").promises;
-  } catch (e) {
+var fsPromisesCache;
+async function loadNodeFsPromises() {
+  if (fsPromisesCache !== void 0) return fsPromisesCache;
+  if (!import_obsidian2.Platform.isDesktop) {
+    fsPromisesCache = null;
     return null;
   }
+  try {
+    fsPromisesCache = (await import("fs")).promises;
+  } catch (e) {
+    fsPromisesCache = null;
+  }
+  return fsPromisesCache;
 }
 async function renameOverwriteOnce(vault, sourcePath, destPath) {
   const adapter = vault.adapter;
   if (typeof adapter.getFullPath === "function") {
-    const fsp = tryRequireNodeFsPromises();
+    const fsp = await loadNodeFsPromises();
     if (fsp) {
       await fsp.rename(
         adapter.getFullPath(sourcePath),
@@ -4667,7 +4675,6 @@ var _PracticeChart = class _PracticeChart {
     const padR = _PracticeChart.PAD_R;
     const padT = _PracticeChart.PAD_T;
     const padB = _PracticeChart.PAD_B;
-    const plotW = this.plotWidth();
     const plotH = H - padT - padB;
     if (this.points.length === 0) {
       ctx.fillStyle = this.colors.text;
@@ -8488,7 +8495,7 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
     this.settings = {
       ...DEFAULT_SETTINGS,
       ...clean,
-      csvPath: raw.csvPath || DEFAULT_SETTINGS.csvPath,
+      csvPath: typeof raw.csvPath === "string" && raw.csvPath ? raw.csvPath : DEFAULT_SETTINGS.csvPath,
       autoNextDelay: toNumber(
         raw.autoNextDelay,
         DEFAULT_SETTINGS.autoNextDelay

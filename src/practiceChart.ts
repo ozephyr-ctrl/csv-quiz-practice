@@ -190,7 +190,6 @@ export class PracticeChart {
     const padR = PracticeChart.PAD_R;
     const padT = PracticeChart.PAD_T;
     const padB = PracticeChart.PAD_B;
-    const plotW = this.plotWidth();
     const plotH = H - padT - padB;
 
     if (this.points.length === 0) {

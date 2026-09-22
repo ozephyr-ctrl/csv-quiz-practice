@@ -225,7 +225,10 @@ export default class CSVQuizPlugin extends Plugin {
     this.settings = {
       ...DEFAULT_SETTINGS,
       ...clean,
-      csvPath: (raw.csvPath as string | undefined) || DEFAULT_SETTINGS.csvPath,
+      csvPath:
+        typeof raw.csvPath === "string" && raw.csvPath
+          ? raw.csvPath
+          : DEFAULT_SETTINGS.csvPath,
       autoNextDelay: toNumber(
         raw.autoNextDelay,
         DEFAULT_SETTINGS.autoNextDelay

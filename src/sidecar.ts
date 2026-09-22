@@ -1,4 +1,4 @@
-import { Notice, Vault } from "obsidian";
+import { Notice, Platform, Vault } from "obsidian";
 import { MemoryCard } from "./types";
 import { normalizeMemoryCards } from "./utils";
 import { normalizeDailyAnswers } from "./practiceStats";
@@ -188,22 +188,33 @@ const DEFAULT_RENAME_RETRY_BUDGET_MS = 30000;
 const DEFAULT_RENAME_RETRY_BASE_DELAY_MS = 50;
 const DEFAULT_RENAME_RETRY_MAX_DELAY_MS = 250;
 
-/** 睡眠指定毫秒（用全局 setTimeout：vitest 为 node 环境，无 window）。 */
+/** 睡眠指定毫秒（window.setTimeout 保证 popout 兼容；vitest 为 node 环境无 window，退回 globalThis）。 */
 function sleep(ms: number): Promise<void> {
-  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+  const host: { setTimeout: (cb: () => void, ms: number) => number } =
+    typeof window !== "undefined" ? window : globalThis;
+  return new Promise<void>((resolve) => host.setTimeout(resolve, ms));
 }
 
 /**
- * 懒加载 Node fs.promises。必须放在函数内 try/catch：
+ * 懒加载 Node fs.promises（动态 import + Platform.isDesktop 守卫，结果缓存）。
  * manifest 是 isDesktopOnly:false，esbuild 将 fs 标记 external，若在模块顶层
- * import/require fs，移动端加载插件即崩溃。require 不可用（移动端）时返回 null。
+ * 静态 import fs，移动端加载插件即崩溃；动态 import（esbuild cjs 输出保留原生
+ * import()）由 Platform.isDesktop 守卫短路，移动端永不触发。加载失败（异常
+ * 环境）返回 null。
  */
-function tryRequireNodeFsPromises(): typeof import("fs").promises | null {
-  try {
-    return (require("fs") as typeof import("fs")).promises;
-  } catch {
+let fsPromisesCache: typeof import("fs").promises | null | undefined;
+async function loadNodeFsPromises(): Promise<typeof import("fs").promises | null> {
+  if (fsPromisesCache !== undefined) return fsPromisesCache;
+  if (!Platform.isDesktop) {
+    fsPromisesCache = null;
     return null;
   }
+  try {
+    fsPromisesCache = (await import("fs")).promises;
+  } catch {
+    fsPromisesCache = null;
+  }
+  return fsPromisesCache;
 }
 
 /**
@@ -212,7 +223,7 @@ function tryRequireNodeFsPromises(): typeof import("fs").promises | null {
  * remove 的 EBUSY）。**一旦进入快路径，任何错误（含非可重试的 ENOENT，典型
  * 源 tmp 被同步服务/杀软清掉）都直接抛给重试循环，绝不 fall through**——
  * 否则源缺失时兜底会先 remove 掉唯一有效的目标文件，再 rename 失败造成数据丢失。
- * 仅当 getFullPath 缺失或 require("fs") 失败（移动端/异常环境）时才走兜底路径：
+ * 仅当 getFullPath 缺失或 fs 不可用（移动端/异常环境）时才走兜底路径：
  * 目标存在则先 remove 再 adapter.rename（Obsidian rename 不覆盖已存在目标）。
  */
 async function renameOverwriteOnce(
@@ -224,7 +235,7 @@ async function renameOverwriteOnce(
     getFullPath?: (p: string) => string;
   };
   if (typeof adapter.getFullPath === "function") {
-    const fsp = tryRequireNodeFsPromises();
+    const fsp = await loadNodeFsPromises();
     if (fsp) {
       // 桌面快路径：错误一律上报（可重试错误由外层退避重试；非可重试立即抛）
       await fsp.rename(

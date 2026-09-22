@@ -11,3 +11,8 @@ export class Vault {}
 export class App {}
 export class Editor {}
 export class MarkdownView {}
+
+/** 测试跑在 node（桌面语义）：sidecar 的 fs 快路径（动态 import fs）保持可测。 */
+export class Platform {
+  static isDesktop = true;
+}
