@@ -838,6 +838,9 @@
 .csv-quiz-progress-list {
   max-height: 60vh;
   overflow-y: auto;
+  /* 虚拟滚动的几何完全由 spacer 驱动：禁用滚动锚定，防行高残余失配时
+     浏览器对 scrollTop 的同向补偿放大滚动距离（滑动速度不可控） */
+  overflow-anchor: none;
 }
 .csv-quiz-progress-row {
   display: flex;

@@ -2612,7 +2612,7 @@ var _ProgressModal = class _ProgressModal extends import_obsidian5.Modal {
     const bottomSpacer = list.createDiv();
     const probe = renderRow(questions[0]);
     viewport.appendChild(probe);
-    let rowHeight = probe.offsetHeight || _ProgressModal.FALLBACK_ROW_HEIGHT;
+    let rowHeight = probe.getBoundingClientRect().height || _ProgressModal.FALLBACK_ROW_HEIGHT;
     const total = questions.length;
     let renderedStart = 0;
     let renderedEnd = 0;
@@ -2668,7 +2668,7 @@ var _ProgressModal = class _ProgressModal extends import_obsidian5.Modal {
         const first = viewport.querySelector(
           ".csv-quiz-progress-row"
         );
-        const measured = (_a = first == null ? void 0 : first.offsetHeight) != null ? _a : 0;
+        const measured = (_a = first == null ? void 0 : first.getBoundingClientRect().height) != null ? _a : 0;
         if (measured > 0 && measured !== rowHeight) {
           rowHeight = measured;
           scrollToCurrent();

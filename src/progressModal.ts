@@ -146,11 +146,15 @@ export class ProgressModal extends Modal {
     const viewport = list.createDiv();
     const bottomSpacer = list.createDiv();
 
-    // 行高实测：先插入首行读 offsetHeight（行均为单行文本，结构一致高度相同）。
-    // onOpen 时 modal 若尚未完成布局，实测可能为 0/偏差，由下方 rAF 复测兜底
+    // 行高实测：先插入首行读实际渲染高度（行均为单行文本，结构一致高度相同）。
+    // 必须用 getBoundingClientRect().height（含小数）：offsetHeight 取整后与实际
+    // 分数行高（主题 line-height/缩放下是常态）不符，spacer 按整数算会让每次
+    // 窗口重建扰动视口几何，Chromium 滚动锚定随之同向补偿 scrollTop，
+    // 滚动距离被间歇放大约 3 倍（滑动速度不可控）。
+    // onOpen 时 modal 若尚未完成布局，实测可能为 0，由下方 rAF 复测兜底
     const probe = renderRow(questions[0]);
     viewport.appendChild(probe);
-    let rowHeight = probe.offsetHeight || ProgressModal.FALLBACK_ROW_HEIGHT;
+    let rowHeight = probe.getBoundingClientRect().height || ProgressModal.FALLBACK_ROW_HEIGHT;
 
     const total = questions.length;
     let renderedStart = 0;
@@ -218,7 +222,9 @@ export class ProgressModal extends Modal {
         const first = viewport.querySelector<HTMLElement>(
           ".csv-quiz-progress-row"
         );
-        const measured = first?.offsetHeight ?? 0;
+        // 与初始实测同口径：getBoundingClientRect().height 保留小数，
+        // offsetHeight 取整会重新引入行高失配
+        const measured = first?.getBoundingClientRect().height ?? 0;
         if (measured > 0 && measured !== rowHeight) {
           rowHeight = measured;
           scrollToCurrent();
