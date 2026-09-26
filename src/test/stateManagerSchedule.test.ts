@@ -35,6 +35,7 @@ function dummyState(): QuizSessionState {
     displayOrder: [],
     filterText: "",
     filterTags: "",
+    filterTagsExcluded: "",
     filterCat1: "",
     filterCat2: "",
     filterCat3: "",

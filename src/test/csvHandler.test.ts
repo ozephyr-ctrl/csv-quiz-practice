@@ -83,36 +83,56 @@ describe("filterQuestions", () => {
   );
 
   it("多标签交集匹配（词边界，前缀不误命中）", () => {
-    const out = filterQuestions(questions, "#tag1 #tag2", "", "", "");
+    const out = filterQuestions(questions, "#tag1 #tag2", "", "", "", "");
     expect(out.map((q) => q.id)).toEqual(["1", "3", "4"]);
     // #tag 不应命中 #tag1（词边界）
-    const out2 = filterQuestions(questions, "#tag", "", "", "");
+    const out2 = filterQuestions(questions, "#tag", "", "", "", "");
     expect(out2).toHaveLength(0);
   });
 
+  it("标签排除筛选：题含任一排除标签即滤除（词边界）", () => {
+    // 排除 #only2 → 只剩不含它的题
+    expect(filterQuestions(questions, "", "#only2", "", "", "").map((q) => q.id))
+      .toEqual(["1", "3", "4"]);
+    // 词边界：排除 #tag 不应滤除只含 #tag1 的题
+    expect(filterQuestions(questions, "", "#tag", "", "", "").map((q) => q.id))
+      .toEqual(["1", "2", "3", "4"]);
+  });
+
+  it("标签三态组合：包含 AND 排除（含全部包含标签且不含任一排除标签）", () => {
+    // 包含 #tag1 且排除 #only2
+    expect(filterQuestions(questions, "#tag1", "#only2", "", "", "").map((q) => q.id))
+      .toEqual(["1", "3", "4"]);
+    // 包含与排除矛盾（同标签）→ 空
+    expect(filterQuestions(questions, "#tag1", "#tag1", "", "", "")).toHaveLength(0);
+    // 多排除标签任一命中即滤除
+    expect(filterQuestions(questions, "", "#only2 #nope", "", "", "").map((q) => q.id))
+      .toEqual(["1", "3", "4"]);
+  });
+
   it("分类筛选", () => {
-    const out = filterQuestions(questions, "", "math", "", "");
+    const out = filterQuestions(questions, "", "", "math", "", "");
     expect(out.map((q) => q.id)).toEqual(["3"]);
   });
 
   it("标记三态筛选（不限/是/否）", () => {
-    expect(filterQuestions(questions, "", "", "", "", "1").map((q) => q.id)).toEqual(["2"]);
-    expect(filterQuestions(questions, "", "", "", "", "0").map((q) => q.id)).toEqual(["1", "3", "4"]);
-    expect(filterQuestions(questions, "", "", "", "", "", "", "", "1").map((q) => q.id)).toEqual(["4"]);
+    expect(filterQuestions(questions, "", "", "", "", "", "1").map((q) => q.id)).toEqual(["2"]);
+    expect(filterQuestions(questions, "", "", "", "", "", "0").map((q) => q.id)).toEqual(["1", "3", "4"]);
+    expect(filterQuestions(questions, "", "", "", "", "", "", "", "", "1").map((q) => q.id)).toEqual(["4"]);
   });
 
   it("未答筛选：空串答案视为已答（=== undefined 语义）", () => {
     const answered = { "1": "", "2": "B" }; // "1" 为空选判错，仍是已答
-    expect(filterQuestions(questions, "", "", "", "", "", "", "", "", "", "1", answered).map((q) => q.id))
+    expect(filterQuestions(questions, "", "", "", "", "", "", "", "", "", "", "1", answered).map((q) => q.id))
       .toEqual(["3", "4"]);
-    expect(filterQuestions(questions, "", "", "", "", "", "", "", "", "", "0", answered).map((q) => q.id))
+    expect(filterQuestions(questions, "", "", "", "", "", "", "", "", "", "", "0", answered).map((q) => q.id))
       .toEqual(["1", "2"]);
   });
 
   it("自由文本筛选匹配题干与选项（不区分大小写）", () => {
-    expect(filterQuestions(questions, "", "", "", "", "", "", "", "", "3 题干").map((q) => q.id))
+    expect(filterQuestions(questions, "", "", "", "", "", "", "", "", "", "3 题干").map((q) => q.id))
       .toEqual(["3"]);
-    expect(filterQuestions(questions, "", "", "", "", "", "", "", "", "甲").map((q) => q.id))
+    expect(filterQuestions(questions, "", "", "", "", "", "", "", "", "", "甲").map((q) => q.id))
       .toEqual(["1", "2", "3", "4"]);
   });
 });

@@ -25,6 +25,8 @@ export interface SidecarState {
   displayOrder: string[];
   filterText: string;
   filterTags: string;
+  /** 排除标签筛选（空格分隔；题含任一排除标签即被滤除）。旧进度无此字段。 */
+  filterTagsExcluded: string;
   filterCat1: string;
   filterCat2: string;
   filterCat3: string;
@@ -412,6 +414,7 @@ export function normalizeSidecar(raw: unknown): SidecarData | null {
       displayOrder: toStrArray(s.displayOrder),
       filterText: toStr(s.filterText),
       filterTags: toStr(s.filterTags),
+      filterTagsExcluded: toStr(s.filterTagsExcluded),
       filterCat1: toStr(s.filterCat1),
       filterCat2: toStr(s.filterCat2),
       filterCat3: toStr(s.filterCat3),

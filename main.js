@@ -780,6 +780,7 @@ function quizStateEquals(a, b) {
   if (a.wrongCount !== b.wrongCount) return false;
   if (a.filterText !== b.filterText) return false;
   if (a.filterTags !== b.filterTags) return false;
+  if ((a.filterTagsExcluded || "") !== (b.filterTagsExcluded || "")) return false;
   if (a.filterCat1 !== b.filterCat1) return false;
   if (a.filterCat2 !== b.filterCat2) return false;
   if (a.filterCat3 !== b.filterCat3) return false;
@@ -1281,6 +1282,7 @@ function normalizeSidecar(raw) {
       displayOrder: toStrArray(s.displayOrder),
       filterText: toStr(s.filterText),
       filterTags: toStr(s.filterTags),
+      filterTagsExcluded: toStr(s.filterTagsExcluded),
       filterCat1: toStr(s.filterCat1),
       filterCat2: toStr(s.filterCat2),
       filterCat3: toStr(s.filterCat3),
@@ -2216,7 +2218,7 @@ async function readCSVFile(vault, path) {
 async function writeCSVFile(vault, path, content) {
   await vault.adapter.write(path, "\uFEFF" + content);
 }
-function filterQuestions(questions, filterTags, filterCat1, filterCat2, filterCat3, filterFavorite = "", filterMastered = "", filterRepeat = "", filterWrong = "", filterText = "", filterUnanswered = "", answeredQuestions = {}) {
+function filterQuestions(questions, filterTags, filterTagsExcluded = "", filterCat1 = "", filterCat2 = "", filterCat3 = "", filterFavorite = "", filterMastered = "", filterRepeat = "", filterWrong = "", filterText = "", filterUnanswered = "", answeredQuestions = {}) {
   return questions.filter((q) => {
     const text = filterText.trim().toLowerCase();
     if (text) {
@@ -2227,13 +2229,20 @@ function filterQuestions(questions, filterTags, filterCat1, filterCat2, filterCa
       const answered = filterUnanswered === "1" ? (q2) => answeredQuestions[q2.id] === void 0 : (q2) => answeredQuestions[q2.id] !== void 0;
       if (!answered(q)) return false;
     }
-    if (filterTags && filterTags.trim() !== "") {
-      const tagFilters = filterTags.trim().split(/\s+/).filter((t) => t.length > 0);
-      for (const tag of tagFilters) {
+    if (filterTags.trim() !== "" || filterTagsExcluded.trim() !== "") {
+      const hasTag = (tag) => {
         const tagStr = tag.startsWith("#") ? tag : "#" + tag;
         const escaped = tagStr.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
         const re = new RegExp(`(?:^|\\s)${escaped}(?:$|\\s)`);
-        if (!re.test(q.tags)) return false;
+        return re.test(q.tags);
+      };
+      for (const tag of filterTags.trim().split(/\s+/)) {
+        if (tag.length === 0) continue;
+        if (!hasTag(tag)) return false;
+      }
+      for (const tag of filterTagsExcluded.trim().split(/\s+/)) {
+        if (tag.length === 0) continue;
+        if (hasTag(tag)) return false;
       }
     }
     if (filterCat1 && q.category1 !== filterCat1) return false;
@@ -4940,6 +4949,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     this.wrongCount = 0;
     this.filterText = "";
     this.filterTags = "";
+    this.filterTagsExcluded = "";
     this.filterCat1 = "";
     this.filterCat2 = "";
     this.filterCat3 = "";
@@ -5467,6 +5477,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     if (savedState) {
       this.filterText = savedState.filterText || "";
       this.filterTags = savedState.filterTags || "";
+      this.filterTagsExcluded = savedState.filterTagsExcluded || "";
       this.filterCat1 = savedState.filterCat1 || "";
       this.filterCat2 = savedState.filterCat2 || "";
       this.filterCat3 = savedState.filterCat3 || "";
@@ -5505,6 +5516,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
   applyRestore(settings, savedState) {
     this.filterText = savedState.filterText || "";
     this.filterTags = savedState.filterTags || "";
+    this.filterTagsExcluded = savedState.filterTagsExcluded || "";
     this.filterCat1 = savedState.filterCat1 || "";
     this.filterCat2 = savedState.filterCat2 || "";
     this.filterCat3 = savedState.filterCat3 || "";
@@ -6158,9 +6170,9 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
   populateTagChips() {
     if (!this.tagsContainer) return;
     this.tagsContainer.empty();
-    const selectedSet = new Set(
-      this.filterTags.trim().split(/\s+/).filter((t) => t.length > 0)
-    );
+    const parseTags = (s) => s.trim().split(/\s+/).filter((t) => t.length > 0);
+    const selectedSet = new Set(parseTags(this.filterTags));
+    const excludedSet = new Set(parseTags(this.filterTagsExcluded));
     const allTags = getUniqueTags(this.allQuestions);
     if (allTags.length === 0) {
       this.tagsContainer.createEl("span", {
@@ -6170,23 +6182,33 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       return;
     }
     for (const tag of allTags) {
+      const state = excludedSet.has(tag) ? "excluded" : selectedSet.has(tag) ? "included" : "none";
       const chip = this.tagsContainer.createEl("span", {
         text: tag,
-        cls: "csv-quiz-tag-chip" + (selectedSet.has(tag) ? " csv-quiz-tag-chip-selected" : "")
+        cls: "csv-quiz-tag-chip" + (state === "included" ? " csv-quiz-tag-chip-selected" : "") + (state === "excluded" ? " csv-quiz-tag-chip-excluded" : ""),
+        attr: {
+          title: state === "none" ? "\u70B9\u51FB\uFF1A\u5305\u542B\u6B64\u6807\u7B7E" : state === "included" ? "\u70B9\u51FB\uFF1A\u6392\u9664\u6B64\u6807\u7B7E" : "\u70B9\u51FB\uFF1A\u53D6\u6D88\u7B5B\u9009"
+        }
       });
       chip.dataset.tag = tag;
       chip.addEventListener("click", () => {
         void (async () => {
           await this.saveCurrentEdit();
           const tagStr = chip.dataset.tag;
-          const current = this.filterTags.trim().split(/\s+/).filter((t) => t.length > 0);
-          const idx = current.indexOf(tagStr);
-          if (idx >= 0) {
-            current.splice(idx, 1);
+          const includes = parseTags(this.filterTags);
+          const excludes = parseTags(this.filterTagsExcluded);
+          if (state === "excluded") {
+            this.filterTagsExcluded = excludes.filter((t) => t !== tagStr).join(" ");
+          } else if (state === "included") {
+            this.filterTags = includes.filter((t) => t !== tagStr).join(" ");
+            this.filterTagsExcluded = [
+              ...excludes.filter((t) => t !== tagStr),
+              tagStr
+            ].join(" ");
           } else {
-            current.push(tagStr);
+            this.filterTags = [...includes, tagStr].join(" ");
+            this.filterTagsExcluded = excludes.filter((t) => t !== tagStr).join(" ");
           }
-          this.filterTags = current.join(" ");
           this.populateTagChips();
           this.applyFiltersAndReset();
         })();
@@ -6212,6 +6234,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     return filterQuestions(
       questions,
       this.filterTags,
+      this.filterTagsExcluded,
       this.filterCat1,
       this.filterCat2,
       this.filterCat3,
@@ -7653,6 +7676,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       displayOrder: this.displayOrder,
       filterText: this.filterText,
       filterTags: this.filterTags,
+      filterTagsExcluded: this.filterTagsExcluded,
       filterCat1: this.filterCat1,
       filterCat2: this.filterCat2,
       filterCat3: this.filterCat3,
@@ -7809,6 +7833,7 @@ var StateManager = class {
       displayOrder: toStrArray(r.displayOrder),
       filterText: toStr(r.filterText),
       filterTags: toStr(r.filterTags),
+      filterTagsExcluded: toStr(r.filterTagsExcluded),
       filterCat1: toStr(r.filterCat1),
       filterCat2: toStr(r.filterCat2),
       filterCat3: toStr(r.filterCat3),
@@ -7839,6 +7864,7 @@ var StateManager = class {
       displayOrder: s.displayOrder,
       filterText: s.filterText,
       filterTags: s.filterTags,
+      filterTagsExcluded: s.filterTagsExcluded,
       filterCat1: s.filterCat1,
       filterCat2: s.filterCat2,
       filterCat3: s.filterCat3,
@@ -7866,6 +7892,7 @@ var StateManager = class {
       displayOrder: [],
       filterText: "",
       filterTags: "",
+      filterTagsExcluded: "",
       filterCat1: "",
       filterCat2: "",
       filterCat3: "",
@@ -7890,6 +7917,7 @@ var StateManager = class {
       displayOrder: [],
       filterText: "",
       filterTags: "",
+      filterTagsExcluded: "",
       filterCat1: "",
       filterCat2: "",
       filterCat3: "",
@@ -8016,6 +8044,7 @@ var StateManager = class {
       displayOrder: s.displayOrder,
       filterText: s.filterText,
       filterTags: s.filterTags,
+      filterTagsExcluded: s.filterTagsExcluded,
       filterCat1: s.filterCat1,
       filterCat2: s.filterCat2,
       filterCat3: s.filterCat3,

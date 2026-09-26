@@ -129,6 +129,17 @@
   border-color: var(--interactive-accent);
 }
 
+/* 三态标签筛选的“排除”态：红底白字（与布尔筛选“否”反向芯片一致） */
+.csv-quiz-tag-chip-excluded {
+  background: var(--color-red);
+  color: white;
+  border-color: var(--color-red);
+}
+
+.csv-quiz-tag-chip-excluded:hover {
+  color: white;
+}
+
 .csv-quiz-tag-chip-empty {
   cursor: default;
   opacity: 0.5;

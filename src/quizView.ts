@@ -81,6 +81,7 @@ export class QuizView extends ItemView {
 
   private filterText: string = "";
   private filterTags: string = "";
+  private filterTagsExcluded: string = "";
   private filterCat1: string = "";
   private filterCat2: string = "";
   private filterCat3: string = "";
@@ -744,6 +745,7 @@ export class QuizView extends ItemView {
     if (savedState) {
       this.filterText = savedState.filterText || "";
       this.filterTags = savedState.filterTags || "";
+      this.filterTagsExcluded = savedState.filterTagsExcluded || "";
       this.filterCat1 = savedState.filterCat1 || "";
       this.filterCat2 = savedState.filterCat2 || "";
       this.filterCat3 = savedState.filterCat3 || "";
@@ -787,6 +789,7 @@ export class QuizView extends ItemView {
   ): void {
     this.filterText = savedState.filterText || "";
     this.filterTags = savedState.filterTags || "";
+    this.filterTagsExcluded = savedState.filterTagsExcluded || "";
     this.filterCat1 = savedState.filterCat1 || "";
     this.filterCat2 = savedState.filterCat2 || "";
     this.filterCat3 = savedState.filterCat3 || "";
@@ -973,7 +976,7 @@ export class QuizView extends ItemView {
       this.scheduleTextFilter();
     });
 
-    // Tag filter
+    // Tag filter（三态：点击芯片循环 无视→包含(紫)→排除(红)→无视，与标记筛选同向组合）
     const tagRow = filterBody.createDiv("csv-quiz-filter-row");
     tagRow.createEl("label", { text: "标签: ", cls: "csv-quiz-filter-label" });
     this.tagsContainer = tagRow.createDiv("csv-quiz-tags-container");
@@ -1654,12 +1657,13 @@ export class QuizView extends ItemView {
     if (!this.tagsContainer) return;
     this.tagsContainer.empty();
 
-    const selectedSet = new Set(
-      this.filterTags
+    const parseTags = (s: string): string[] =>
+      s
         .trim()
         .split(/\s+/)
-        .filter((t) => t.length > 0)
-    );
+        .filter((t) => t.length > 0);
+    const selectedSet = new Set(parseTags(this.filterTags));
+    const excludedSet = new Set(parseTags(this.filterTagsExcluded));
 
     const allTags = getUniqueTags(this.allQuestions);
     if (allTags.length === 0) {
@@ -1671,26 +1675,53 @@ export class QuizView extends ItemView {
     }
 
     for (const tag of allTags) {
+      // 三态：无视（默认白）→ 包含（紫）→ 排除（红）→ 无视；一个标签即一个筛选
+      const state = excludedSet.has(tag)
+        ? "excluded"
+        : selectedSet.has(tag)
+          ? "included"
+          : "none";
       const chip = this.tagsContainer.createEl("span", {
         text: tag,
-        cls: "csv-quiz-tag-chip" + (selectedSet.has(tag) ? " csv-quiz-tag-chip-selected" : ""),
+        cls:
+          "csv-quiz-tag-chip" +
+          (state === "included" ? " csv-quiz-tag-chip-selected" : "") +
+          (state === "excluded" ? " csv-quiz-tag-chip-excluded" : ""),
+        attr: {
+          title:
+            state === "none"
+              ? "点击：包含此标签"
+              : state === "included"
+                ? "点击：排除此标签"
+                : "点击：取消筛选",
+        },
       });
       chip.dataset.tag = tag;
       chip.addEventListener("click", () => {
         void (async () => {
           await this.saveCurrentEdit();
           const tagStr = chip.dataset.tag!;
-          const current = this.filterTags
-            .trim()
-            .split(/\s+/)
-            .filter((t) => t.length > 0);
-          const idx = current.indexOf(tagStr);
-          if (idx >= 0) {
-            current.splice(idx, 1);
+          const includes = parseTags(this.filterTags);
+          const excludes = parseTags(this.filterTagsExcluded);
+          if (state === "excluded") {
+            // 排除 → 无视
+            this.filterTagsExcluded = excludes
+              .filter((t) => t !== tagStr)
+              .join(" ");
+          } else if (state === "included") {
+            // 包含 → 排除
+            this.filterTags = includes.filter((t) => t !== tagStr).join(" ");
+            this.filterTagsExcluded = [
+              ...excludes.filter((t) => t !== tagStr),
+              tagStr,
+            ].join(" ");
           } else {
-            current.push(tagStr);
+            // 无视 → 包含（防御：损坏状态两集合同含时先从排除侧移除）
+            this.filterTags = [...includes, tagStr].join(" ");
+            this.filterTagsExcluded = excludes
+              .filter((t) => t !== tagStr)
+              .join(" ");
           }
-          this.filterTags = current.join(" ");
           this.populateTagChips();
           this.applyFiltersAndReset();
         })();
@@ -1724,6 +1755,7 @@ export class QuizView extends ItemView {
     return filterQuestions(
       questions,
       this.filterTags,
+      this.filterTagsExcluded,
       this.filterCat1,
       this.filterCat2,
       this.filterCat3,
@@ -3607,6 +3639,7 @@ export class QuizView extends ItemView {
       displayOrder: this.displayOrder,
       filterText: this.filterText,
       filterTags: this.filterTags,
+      filterTagsExcluded: this.filterTagsExcluded,
       filterCat1: this.filterCat1,
       filterCat2: this.filterCat2,
       filterCat3: this.filterCat3,

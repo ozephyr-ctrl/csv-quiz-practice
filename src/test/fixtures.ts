@@ -28,6 +28,7 @@ export function validSidecar(): SidecarData {
       displayOrder: ["q1", "q2"],
       filterText: "",
       filterTags: "",
+      filterTagsExcluded: "",
       filterCat1: "",
       filterCat2: "",
       filterCat3: "",

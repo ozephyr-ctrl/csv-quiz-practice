@@ -41,6 +41,8 @@ export interface QuizSessionState {
   displayOrder: string[];
   filterText: string;
   filterTags: string;
+  /** 排除标签筛选（空格分隔；题含任一排除标签即被滤除，与布尔筛选"否"同向）。旧进度无此字段。 */
+  filterTagsExcluded: string;
   filterCat1: string;
   filterCat2: string;
   filterCat3: string;

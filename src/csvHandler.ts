@@ -110,9 +110,10 @@ async function writeCSVFile(
 export function filterQuestions(
   questions: Question[],
   filterTags: string,
-  filterCat1: string,
-  filterCat2: string,
-  filterCat3: string,
+  filterTagsExcluded: string = "",
+  filterCat1: string = "",
+  filterCat2: string = "",
+  filterCat3: string = "",
   filterFavorite: string = "",
   filterMastered: string = "",
   filterRepeat: string = "",
@@ -139,16 +140,22 @@ export function filterQuestions(
       if (!answered(q)) return false;
     }
 
-    if (filterTags && filterTags.trim() !== "") {
-      const tagFilters = filterTags
-        .trim()
-        .split(/\s+/)
-        .filter((t) => t.length > 0);
-      for (const tag of tagFilters) {
+    // 标签三态筛选：包含集为 AND（题须含全部包含标签），
+    // 排除集任一命中即滤除（与布尔筛选"否"同向，各标签条件相与）
+    if (filterTags.trim() !== "" || filterTagsExcluded.trim() !== "") {
+      const hasTag = (tag: string): boolean => {
         const tagStr = tag.startsWith("#") ? tag : "#" + tag;
         const escaped = tagStr.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
         const re = new RegExp(`(?:^|\\s)${escaped}(?:$|\\s)`);
-        if (!re.test(q.tags)) return false;
+        return re.test(q.tags);
+      };
+      for (const tag of filterTags.trim().split(/\s+/)) {
+        if (tag.length === 0) continue;
+        if (!hasTag(tag)) return false;
+      }
+      for (const tag of filterTagsExcluded.trim().split(/\s+/)) {
+        if (tag.length === 0) continue;
+        if (hasTag(tag)) return false;
       }
     }
 

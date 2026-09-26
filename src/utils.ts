@@ -42,6 +42,8 @@ export function quizStateEquals(
   if (a.wrongCount !== b.wrongCount) return false;
   if (a.filterText !== b.filterText) return false;
   if (a.filterTags !== b.filterTags) return false;
+  // 排除标签筛选：旧运行时状态可能缺字段，缺失按空串比较
+  if ((a.filterTagsExcluded || "") !== (b.filterTagsExcluded || "")) return false;
   if (a.filterCat1 !== b.filterCat1) return false;
   if (a.filterCat2 !== b.filterCat2) return false;
   if (a.filterCat3 !== b.filterCat3) return false;

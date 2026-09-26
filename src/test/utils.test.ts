@@ -112,6 +112,7 @@ describe("quizStateEquals", () => {
     displayOrder: ["1", "2", "3"],
     filterText: "",
     filterTags: "#a",
+    filterTagsExcluded: "",
     filterCat1: "",
     filterCat2: "",
     filterCat3: "",
