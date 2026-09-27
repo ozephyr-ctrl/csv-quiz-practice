@@ -5,6 +5,7 @@ import {
   startOfDayMs,
   addDaysMs,
   computePracticeStats,
+  collectDueLaterTodayIds,
   buildDailySeries,
   normalizeDailyAnswers,
   pruneDailyAnswers,
@@ -126,6 +127,42 @@ describe("computePracticeStats", () => {
     const none = computePracticeStats(cards, undefined, NOW, new Set());
     expect(none.dueNow).toBe(0);
     expect(none.dueLaterToday).toBe(0);
+  });
+});
+
+describe("collectDueLaterTodayIds", () => {
+  it("只收当前时刻 < due < 明日 0 点的卡片，两端都不含", () => {
+    const cards: Record<string, MemoryCard> = {
+      overdue: card(new Date(2026, 8, 19).toISOString()), // 逾期（已到期）
+      dueNow: card(NOW.toISOString()), // 恰好此刻（已到期）
+      morning: card(new Date(2026, 8, 20, 13).toISOString()), // 今日稍晚
+      evening: card(new Date(2026, 8, 20, 23, 30).toISOString()), // 今日更晚
+      tomorrow: card(new Date(2026, 8, 21).toISOString()), // 明日 0 点（不含）
+      invalid: card("not-a-date"),
+    };
+    const ids = collectDueLaterTodayIds(cards, NOW);
+    expect(ids).toEqual(["morning", "evening"]);
+  });
+
+  it("按 due 升序返回（最紧迫在前），与记忆练习到期题排序一致", () => {
+    const cards: Record<string, MemoryCard> = {
+      late: card(new Date(2026, 8, 20, 22).toISOString()),
+      early: card(new Date(2026, 8, 20, 13).toISOString()),
+      mid: card(new Date(2026, 8, 20, 18).toISOString()),
+    };
+    expect(collectDueLaterTodayIds(cards, NOW)).toEqual(["early", "mid", "late"]);
+  });
+
+  it("无卡片返回空数组；scopeIds 提供时只计筛选范围内的题", () => {
+    expect(collectDueLaterTodayIds(undefined, NOW)).toEqual([]);
+    const cards: Record<string, MemoryCard> = {
+      q1: card(new Date(2026, 8, 20, 18).toISOString()),
+      q2: card(new Date(2026, 8, 20, 19).toISOString()),
+    };
+    // 全库口径两条都在；限定 q1 后只剩 q1；空范围全无
+    expect(collectDueLaterTodayIds(cards, NOW)).toEqual(["q1", "q2"]);
+    expect(collectDueLaterTodayIds(cards, NOW, new Set(["q1"]))).toEqual(["q1"]);
+    expect(collectDueLaterTodayIds(cards, NOW, new Set())).toEqual([]);
   });
 });
 

@@ -977,6 +977,21 @@ function computePracticeStats(cards, dailyAnswers, now, scopeIds) {
     dueLaterToday
   };
 }
+function collectDueLaterTodayIds(cards, now, scopeIds) {
+  if (!cards) return [];
+  const nowMs = now.getTime();
+  const nextDayMs = addDaysMs(startOfDayMs(now), 1);
+  const hits = [];
+  for (const [id, c] of Object.entries(cards)) {
+    if (!c || typeof c !== "object") continue;
+    if (scopeIds && !scopeIds.has(id)) continue;
+    const t = new Date(c.due).getTime();
+    if (Number.isNaN(t) || t <= nowMs || t >= nextDayMs) continue;
+    hits.push({ id, dueMs: t });
+  }
+  hits.sort((a, b) => a.dueMs - b.dueMs);
+  return hits.map((h) => h.id);
+}
 function buildDailySeries(dailyAnswers, cards, now, options = {}) {
   var _a, _b;
   const historyDays = (_a = options.historyDays) != null ? _a : 180;
@@ -5020,8 +5035,10 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     /** 练习模式本次会话的答题统计（不累加全局统计） */
     this.practiceCorrect = 0;
     this.practiceWrong = 0;
-    /** 记忆练习集中每题的来源（复习/新题），用于题目页眉显著标注。 */
+    /** 记忆练习集中每题的来源（复习/新题/提前复习），用于题目页眉显著标注。 */
     this.practiceSource = {};
+    /** 本轮记忆练习是否已询问过「提前复习今日预计到期题」（每次进入记忆练习重置，防完成分支反复弹窗）。 */
+    this.memoryEarlyAsked = false;
     /** 记忆卡片信息栏折叠状态（默认收起，仅影响本栏显示，不重渲染题目）。 */
     this.cardPanelOpen = false;
     /** 滑动切题手势状态 */
@@ -5993,15 +6010,16 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
   /**
    * 记忆练习：到期题（FSRS due 已到）按紧迫度优先 + 每日新题（随机取），
    * 均受当前筛选条件影响。练习集为临时会话，不持久化。
+   * 到期与新题均为空但今日还有预计到期的题时，询问是否提前复习（startMemorySession）。
    */
   async enableMemoryPractice() {
-    var _a, _b;
     if (!this.getSettings().memoryEnabled) {
       new import_obsidian6.Notice("\u8BB0\u5FC6\u7EC3\u4E60\u5DF2\u5173\u95ED\uFF0C\u8BF7\u5728\u8BBE\u7F6E\u4E2D\u5F00\u542F");
       return;
     }
     if (this.memoryActive || this.memoryEnabling) return;
     this.memoryEnabling = true;
+    this.memoryEarlyAsked = false;
     try {
       await this.saveCurrentEdit();
       if (this.isClosed) return;
@@ -6044,8 +6062,8 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         return t !== null && t <= now.getTime();
       }).sort(
         (a, b) => {
-          var _a2, _b2;
-          return ((_a2 = this.parseDueTime(this.memoryCards[a.id])) != null ? _a2 : 0) - ((_b2 = this.parseDueTime(this.memoryCards[b.id])) != null ? _b2 : 0);
+          var _a, _b;
+          return ((_a = this.parseDueTime(this.memoryCards[a.id])) != null ? _a : 0) - ((_b = this.parseDueTime(this.memoryCards[b.id])) != null ? _b : 0);
         }
       );
       const today = (() => {
@@ -6071,28 +6089,132 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       this.memoryNewCountToday = (this.memoryNewCountToday || 0) + freshNew.length;
       this.memoryPendingNew = fresh.map((q) => q.id);
       if (due.length === 0 && fresh.length === 0) {
-        new import_obsidian6.Notice("\u4ECA\u65E5\u6CA1\u6709\u5F85\u590D\u4E60\u6216\u53EF\u5B66\u4E60\u7684\u65B0\u9898");
+        const early = this.earlyDueQuestions(pool, now);
+        if (early.length === 0) {
+          new import_obsidian6.Notice("\u4ECA\u65E5\u6CA1\u6709\u5F85\u590D\u4E60\u6216\u53EF\u5B66\u4E60\u7684\u65B0\u9898");
+          return;
+        }
+        this.memoryEarlyAsked = true;
+        const modal = new ChoiceModal(this.app, {
+          title: "\u63D0\u524D\u590D\u4E60\u4ECA\u65E5\u9884\u8BA1\u5230\u671F\u9898",
+          message: `\u4ECA\u65E5\u5DF2\u65E0\u5230\u671F\u9898\u4E0E\u65B0\u9898\uFF0C\u4F46\u6709 ${early.length} \u9898\u9884\u8BA1\u4ECA\u65E5\u5185\u5230\u671F\uFF08\u76EE\u524D\u5C1A\u672A\u5230\u671F\uFF09\u3002\u662F\u5426\u63D0\u524D\u5F00\u59CB\u590D\u4E60\uFF1F\u63D0\u524D\u4F5C\u7B54\u5C06\u6309\u5B9E\u9645\u4F5C\u7B54\u65F6\u95F4\u91CD\u65B0\u8BA1\u7B97\u8BB0\u5FC6\u95F4\u9694\u3002`,
+          options: [
+            { label: `\u63D0\u524D\u5F00\u59CB\uFF08${early.length} \u9898\uFF09`, value: "start", cta: true },
+            { label: "\u53D6\u6D88", value: "cancel" }
+          ]
+        });
+        modal.open();
+        const res = await modal.promise;
+        if (this.isClosed) return;
+        if (res !== "start") return;
+        if (this.practiceActive) this.exitRandomPractice();
+        this.startMemorySession(
+          [],
+          [],
+          early,
+          `\u8BB0\u5FC6\u7EC3\u4E60\uFF1A\u63D0\u524D\u590D\u4E60 ${early.length} \u9898`
+        );
         return;
       }
-      this.practiceFocusId = (_b = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id) != null ? _b : null;
-      this.memoryIds = [...due.map((q) => q.id), ...fresh.map((q) => q.id)];
-      this.filteredQuestions = [...due, ...fresh];
-      this.currentIndex = 0;
-      this.memoryActive = true;
-      this.practiceAnswered = /* @__PURE__ */ new Set();
-      this.practiceCorrect = 0;
-      this.practiceWrong = 0;
-      this.practiceSource = {};
-      for (const q of due) this.practiceSource[q.id] = "review";
-      for (const q of fresh) this.practiceSource[q.id] = "new";
-      this.currentShuffledQId = null;
-      this.cancelAutoNext();
-      this.renderQuestion();
-      this.saveState();
-      new import_obsidian6.Notice(`\u8BB0\u5FC6\u7EC3\u4E60\uFF1A\u5230\u671F ${due.length} \u9898 + \u65B0\u9898 ${fresh.length} \u9898`);
+      this.startMemorySession(
+        due,
+        fresh,
+        [],
+        `\u8BB0\u5FC6\u7EC3\u4E60\uFF1A\u5230\u671F ${due.length} \u9898 + \u65B0\u9898 ${fresh.length} \u9898`
+      );
     } finally {
       this.memoryEnabling = false;
     }
+  }
+  /**
+   * 构建并进入记忆练习会话（常规入口与提前复习入口共用）：按 到期题 → 新题 →
+   * 提前复习题 的顺序组成练习集，重置会话统计并定位到第 1 题。
+   */
+  startMemorySession(review, fresh, early, notice) {
+    var _a, _b;
+    this.practiceFocusId = (_b = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id) != null ? _b : null;
+    this.memoryIds = [
+      ...review.map((q) => q.id),
+      ...fresh.map((q) => q.id),
+      ...early.map((q) => q.id)
+    ];
+    this.filteredQuestions = [...review, ...fresh, ...early];
+    this.currentIndex = 0;
+    this.memoryActive = true;
+    this.practiceAnswered = /* @__PURE__ */ new Set();
+    this.practiceCorrect = 0;
+    this.practiceWrong = 0;
+    this.practiceSource = {};
+    for (const q of review) this.practiceSource[q.id] = "review";
+    for (const q of fresh) this.practiceSource[q.id] = "new";
+    for (const q of early) this.practiceSource[q.id] = "early";
+    this.currentShuffledQId = null;
+    this.cancelAutoNext();
+    this.renderQuestion();
+    this.saveState();
+    new import_obsidian6.Notice(notice);
+  }
+  /**
+   * 筛选池中「预计今日内到期但目前未到期」的题（与练习面板"预计今日内到期"
+   * 统计及 collectDueLaterTodayIds 同口径），按 due 升序（最紧迫在前）。
+   */
+  earlyDueQuestions(pool, now) {
+    const byId = new Map(pool.map((q) => [q.id, q]));
+    const ids = collectDueLaterTodayIds(
+      this.memoryCards,
+      now,
+      new Set(pool.map((q) => q.id))
+    );
+    return ids.map((id) => byId.get(id)).filter((q) => q !== void 0);
+  }
+  /**
+   * 记忆练习本轮答完（剩余为 0）后：若当前筛选内还有预计今日内到期的题且本轮
+   * 尚未询问过，弹窗询问是否提前开始复习；确认则把这些题全部追加进当前练习集
+   * （已在集内的题不重复添加）并跳到第一题。每轮记忆练习最多询问一次。
+   */
+  async askEarlyReviewOnComplete() {
+    if (this.isClosed || !this.memoryActive || this.memoryEarlyAsked) return;
+    if (!this.filteredQuestions.every((q) => this.practiceAnswered.has(q.id))) {
+      return;
+    }
+    const inSession = new Set(this.memoryIds);
+    const early = this.earlyDueQuestions(
+      this.applyFiltersTo(this.orderedQuestions),
+      /* @__PURE__ */ new Date()
+    ).filter((q) => !inSession.has(q.id));
+    if (early.length === 0) return;
+    this.memoryEarlyAsked = true;
+    const modal = new ChoiceModal(this.app, {
+      title: "\u63D0\u524D\u590D\u4E60\u4ECA\u65E5\u9884\u8BA1\u5230\u671F\u9898",
+      message: `\u672C\u8F6E\u8BB0\u5FC6\u7EC3\u4E60\u5DF2\u7B54\u5B8C\uFF0C\u4F46\u4ECA\u65E5\u8FD8\u6709 ${early.length} \u9898\u9884\u8BA1\u5230\u671F\uFF08\u76EE\u524D\u5C1A\u672A\u5230\u671F\uFF09\u3002\u662F\u5426\u73B0\u5728\u63D0\u524D\u590D\u4E60\uFF1F\u63D0\u524D\u4F5C\u7B54\u5C06\u6309\u5B9E\u9645\u4F5C\u7B54\u65F6\u95F4\u91CD\u65B0\u8BA1\u7B97\u8BB0\u5FC6\u95F4\u9694\u3002`,
+      options: [
+        { label: `\u63D0\u524D\u5F00\u59CB\uFF08${early.length} \u9898\uFF09`, value: "start", cta: true },
+        { label: "\u53D6\u6D88", value: "cancel" }
+      ]
+    });
+    modal.open();
+    const res = await modal.promise;
+    if (this.isClosed || res !== "start") return;
+    if (!this.memoryActive) return;
+    const current = new Set(this.memoryIds);
+    const add = early.filter((q) => !current.has(q.id));
+    if (add.length === 0) return;
+    this.filteredQuestions.push(...add);
+    this.memoryIds.push(...add.map((q) => q.id));
+    for (const q of add) this.practiceSource[q.id] = "early";
+    const idx = this.filteredQuestions.findIndex((q) => q.id === add[0].id);
+    if (idx < 0) return;
+    this.currentIndex = idx;
+    this.currentShuffledQId = null;
+    this.cancelAutoNext();
+    this.renderQuestion();
+    this.saveState();
+    new import_obsidian6.Notice(`\u5DF2\u52A0\u5165 ${add.length} \u9898\u63D0\u524D\u590D\u4E60`);
+  }
+  /** 练习模式本轮全部答完：提示完成；记忆练习触发提前复习询问（剩余为 0 且今日还有预计到期题）。 */
+  onPracticeRoundComplete() {
+    new import_obsidian6.Notice(`\u7EC3\u4E60\u5B8C\u6210\uFF01\u5171 ${this.filteredQuestions.length} \u9898`);
+    if (this.memoryActive) void this.askEarlyReviewOnComplete();
   }
   /** 退出记忆练习模式：恢复常规筛选结果并定位到进入前的位置。不渲染、不保存，由调用方决定。 */
   exitMemoryPractice() {
@@ -6331,10 +6453,10 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       });
     }
     if (this.memoryActive && this.practiceSource[question.id]) {
-      const srcNew = this.practiceSource[question.id] === "new";
+      const src = this.practiceSource[question.id];
       this.questionArea.createEl("span", {
-        text: srcNew ? "\u{1F195} \u65B0\u9898" : "\u{1F501} \u590D\u4E60",
-        cls: "csv-quiz-source-badge" + (srcNew ? " csv-quiz-source-badge-new" : " csv-quiz-source-badge-review")
+        text: src === "new" ? "\u{1F195} \u65B0\u9898" : src === "early" ? "\u26A1 \u63D0\u524D\u590D\u4E60" : "\u{1F501} \u590D\u4E60",
+        cls: "csv-quiz-source-badge" + (src === "new" ? " csv-quiz-source-badge-new" : src === "early" ? " csv-quiz-source-badge-early" : " csv-quiz-source-badge-review")
       });
     }
     const stemDiv = this.questionArea.createDiv("csv-quiz-stem");
@@ -7053,7 +7175,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         } else {
           this.currentIndex = newIdx;
           if ((this.practiceActive || this.memoryActive) && this.filteredQuestions.every((q) => this.practiceAnswered.has(q.id))) {
-            new import_obsidian6.Notice(`\u7EC3\u4E60\u5B8C\u6210\uFF01\u5171 ${this.filteredQuestions.length} \u9898`);
+            this.onPracticeRoundComplete();
           }
           return;
         }
@@ -7196,7 +7318,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         }
       }
       if ((this.practiceActive || this.memoryActive) && this.filteredQuestions.every((q) => this.practiceAnswered.has(q.id))) {
-        new import_obsidian6.Notice(`\u7EC3\u4E60\u5B8C\u6210\uFF01\u5171 ${this.filteredQuestions.length} \u9898`);
+        this.onPracticeRoundComplete();
       } else {
         new import_obsidian6.Notice("\u6CA1\u6709\u66F4\u591A\u672A\u7B54\u9898");
       }

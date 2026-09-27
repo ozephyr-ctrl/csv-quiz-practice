@@ -92,6 +92,31 @@ export function computePracticeStats(
   };
 }
 
+/**
+ * 收集「预计今日内到期但目前未到期」的卡片 id（当前时刻 < due < 明日 0 点，
+ * 与 computePracticeStats 的 dueLaterToday 同口径），按 due 升序返回（最紧迫在前，
+ * 与记忆练习到期题的排序一致）。due 非法的卡片不计入；scopeIds 提供时只计范围内的题。
+ */
+export function collectDueLaterTodayIds(
+  cards: Record<string, MemoryCard> | undefined,
+  now: Date,
+  scopeIds?: Set<string>
+): string[] {
+  if (!cards) return [];
+  const nowMs = now.getTime();
+  const nextDayMs = addDaysMs(startOfDayMs(now), 1);
+  const hits: Array<{ id: string; dueMs: number }> = [];
+  for (const [id, c] of Object.entries(cards)) {
+    if (!c || typeof c !== "object") continue;
+    if (scopeIds && !scopeIds.has(id)) continue;
+    const t = new Date(c.due).getTime();
+    if (Number.isNaN(t) || t <= nowMs || t >= nextDayMs) continue;
+    hits.push({ id, dueMs: t });
+  }
+  hits.sort((a, b) => a.dueMs - b.dueMs);
+  return hits.map((h) => h.id);
+}
+
 /** 折线图单日数据点。 */
 export interface ChartDayPoint {
   /** 本地自然日键 "YYYY-MM-DD"。 */

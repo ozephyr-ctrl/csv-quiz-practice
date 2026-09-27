@@ -48,6 +48,7 @@ import Papa from "papaparse";
 import {
   computePracticeStats,
   buildDailySeries,
+  collectDueLaterTodayIds,
   dateKey,
   pruneDailyAnswers,
 } from "./practiceStats";
@@ -1268,8 +1269,10 @@ export class QuizView extends ItemView {
   /** 练习模式本次会话的答题统计（不累加全局统计） */
   private practiceCorrect: number = 0;
   private practiceWrong: number = 0;
-  /** 记忆练习集中每题的来源（复习/新题），用于题目页眉显著标注。 */
-  private practiceSource: Record<string, "new" | "review"> = {};
+  /** 记忆练习集中每题的来源（复习/新题/提前复习），用于题目页眉显著标注。 */
+  private practiceSource: Record<string, "new" | "review" | "early"> = {};
+  /** 本轮记忆练习是否已询问过「提前复习今日预计到期题」（每次进入记忆练习重置，防完成分支反复弹窗）。 */
+  private memoryEarlyAsked: boolean = false;
   /** 记忆卡片信息栏折叠状态（默认收起，仅影响本栏显示，不重渲染题目）。 */
   private cardPanelOpen: boolean = false;
   /** 滑动切题手势状态 */
@@ -1440,6 +1443,7 @@ export class QuizView extends ItemView {
   /**
    * 记忆练习：到期题（FSRS due 已到）按紧迫度优先 + 每日新题（随机取），
    * 均受当前筛选条件影响。练习集为临时会话，不持久化。
+   * 到期与新题均为空但今日还有预计到期的题时，询问是否提前复习（startMemorySession）。
    */
   private async enableMemoryPractice(): Promise<void> {
     // M3: memoryEnabled 设置项必须 gate 行为
@@ -1450,6 +1454,8 @@ export class QuizView extends ItemView {
     // M2: 防双开——确认框 await 期间禁止重复进入
     if (this.memoryActive || this.memoryEnabling) return;
     this.memoryEnabling = true;
+    // 本轮（本次进入记忆练习）重置「提前复习」询问标记
+    this.memoryEarlyAsked = false;
     try {
       // 先保存编辑区未提交的修改（此时 filteredQuestions/currentIndex/编辑区 DOM 仍一致），
       // 再互斥退出另一练习模式——退出会重置列表与定位，之后保存会把编辑错位应用到别的题
@@ -1543,32 +1549,153 @@ export class QuizView extends ItemView {
       this.memoryPendingNew = fresh.map((q) => q.id);
 
       if (due.length === 0 && fresh.length === 0) {
-        new Notice("今日没有待复习或可学习的新题");
+        // 无到期题与新题：若今日还有预计到期的题（当前时刻 < due < 明日 0 点），
+        // 询问是否提前开始复习；确认则把这些题全部纳入本轮练习集
+        const early = this.earlyDueQuestions(pool, now);
+        if (early.length === 0) {
+          new Notice("今日没有待复习或可学习的新题");
+          return;
+        }
+        this.memoryEarlyAsked = true;
+        const modal = new ChoiceModal(this.app, {
+          title: "提前复习今日预计到期题",
+          message: `今日已无到期题与新题，但有 ${early.length} 题预计今日内到期（目前尚未到期）。是否提前开始复习？提前作答将按实际作答时间重新计算记忆间隔。`,
+          options: [
+            { label: `提前开始（${early.length} 题）`, value: "start", cta: true },
+            { label: "取消", value: "cancel" },
+          ],
+        });
+        modal.open();
+        const res = await modal.promise;
+        // L2: 弹窗期间视图被关闭 → 中止（finally 会复位 memoryEnabling）
+        if (this.isClosed) return;
+        if (res !== "start") return;
+        // F3: 弹窗 await 期间用户可能已进入随机考试，确认后退出它，由记忆练习接管
+        if (this.practiceActive) this.exitRandomPractice();
+        this.startMemorySession(
+          [],
+          [],
+          early,
+          `记忆练习：提前复习 ${early.length} 题`
+        );
         return;
       }
 
-      this.practiceFocusId = this.filteredQuestions[this.currentIndex]?.id ?? null;
-      this.memoryIds = [...due.map((q) => q.id), ...fresh.map((q) => q.id)];
-      this.filteredQuestions = [...due, ...fresh];
-      this.currentIndex = 0;
-      this.memoryActive = true;
-      // 练习内已答集合：本次会话从零开始
-      this.practiceAnswered = new Set();
-      this.practiceCorrect = 0;
-      this.practiceWrong = 0;
-      // 练习集来源标记：到期题=复习，新题=新
-      this.practiceSource = {};
-      for (const q of due) this.practiceSource[q.id] = "review";
-      for (const q of fresh) this.practiceSource[q.id] = "new";
-      this.currentShuffledQId = null;
-      this.cancelAutoNext();
-      this.renderQuestion();
-      this.saveState();
-      new Notice(`记忆练习：到期 ${due.length} 题 + 新题 ${fresh.length} 题`);
+      this.startMemorySession(
+        due,
+        fresh,
+        [],
+        `记忆练习：到期 ${due.length} 题 + 新题 ${fresh.length} 题`
+      );
     } finally {
       // M2: 无论任何分支返回，都复位防双开标志
       this.memoryEnabling = false;
     }
+  }
+
+  /**
+   * 构建并进入记忆练习会话（常规入口与提前复习入口共用）：按 到期题 → 新题 →
+   * 提前复习题 的顺序组成练习集，重置会话统计并定位到第 1 题。
+   */
+  private startMemorySession(
+    review: Question[],
+    fresh: Question[],
+    early: Question[],
+    notice: string
+  ): void {
+    this.practiceFocusId = this.filteredQuestions[this.currentIndex]?.id ?? null;
+    this.memoryIds = [
+      ...review.map((q) => q.id),
+      ...fresh.map((q) => q.id),
+      ...early.map((q) => q.id),
+    ];
+    this.filteredQuestions = [...review, ...fresh, ...early];
+    this.currentIndex = 0;
+    this.memoryActive = true;
+    // 练习内已答集合：本次会话从零开始
+    this.practiceAnswered = new Set();
+    this.practiceCorrect = 0;
+    this.practiceWrong = 0;
+    // 练习集来源标记：到期题=复习，新题=新，提前复习题=提前
+    this.practiceSource = {};
+    for (const q of review) this.practiceSource[q.id] = "review";
+    for (const q of fresh) this.practiceSource[q.id] = "new";
+    for (const q of early) this.practiceSource[q.id] = "early";
+    this.currentShuffledQId = null;
+    this.cancelAutoNext();
+    this.renderQuestion();
+    this.saveState();
+    new Notice(notice);
+  }
+
+  /**
+   * 筛选池中「预计今日内到期但目前未到期」的题（与练习面板"预计今日内到期"
+   * 统计及 collectDueLaterTodayIds 同口径），按 due 升序（最紧迫在前）。
+   */
+  private earlyDueQuestions(pool: Question[], now: Date): Question[] {
+    const byId = new Map(pool.map((q) => [q.id, q]));
+    const ids = collectDueLaterTodayIds(
+      this.memoryCards,
+      now,
+      new Set(pool.map((q) => q.id))
+    );
+    return ids
+      .map((id) => byId.get(id))
+      .filter((q): q is Question => q !== undefined);
+  }
+
+  /**
+   * 记忆练习本轮答完（剩余为 0）后：若当前筛选内还有预计今日内到期的题且本轮
+   * 尚未询问过，弹窗询问是否提前开始复习；确认则把这些题全部追加进当前练习集
+   * （已在集内的题不重复添加）并跳到第一题。每轮记忆练习最多询问一次。
+   */
+  private async askEarlyReviewOnComplete(): Promise<void> {
+    if (this.isClosed || !this.memoryActive || this.memoryEarlyAsked) return;
+    // 剩余为 0 才询问（调用处完成时已满足，await 重入时再校验）
+    if (!this.filteredQuestions.every((q) => this.practiceAnswered.has(q.id))) {
+      return;
+    }
+    const inSession = new Set(this.memoryIds);
+    const early = this.earlyDueQuestions(
+      this.applyFiltersTo(this.orderedQuestions),
+      new Date()
+    ).filter((q) => !inSession.has(q.id));
+    if (early.length === 0) return;
+    this.memoryEarlyAsked = true;
+    const modal = new ChoiceModal(this.app, {
+      title: "提前复习今日预计到期题",
+      message: `本轮记忆练习已答完，但今日还有 ${early.length} 题预计到期（目前尚未到期）。是否现在提前复习？提前作答将按实际作答时间重新计算记忆间隔。`,
+      options: [
+        { label: `提前开始（${early.length} 题）`, value: "start", cta: true },
+        { label: "取消", value: "cancel" },
+      ],
+    });
+    modal.open();
+    const res = await modal.promise;
+    if (this.isClosed || res !== "start") return;
+    // 弹窗 await 期间可能已退出记忆练习或关闭面板 → 放弃追加
+    if (!this.memoryActive) return;
+    // 再校验去重：await 期间练习集可能已变化
+    const current = new Set(this.memoryIds);
+    const add = early.filter((q) => !current.has(q.id));
+    if (add.length === 0) return;
+    this.filteredQuestions.push(...add);
+    this.memoryIds.push(...add.map((q) => q.id));
+    for (const q of add) this.practiceSource[q.id] = "early";
+    const idx = this.filteredQuestions.findIndex((q) => q.id === add[0].id);
+    if (idx < 0) return;
+    this.currentIndex = idx;
+    this.currentShuffledQId = null;
+    this.cancelAutoNext();
+    this.renderQuestion();
+    this.saveState();
+    new Notice(`已加入 ${add.length} 题提前复习`);
+  }
+
+  /** 练习模式本轮全部答完：提示完成；记忆练习触发提前复习询问（剩余为 0 且今日还有预计到期题）。 */
+  private onPracticeRoundComplete(): void {
+    new Notice(`练习完成！共 ${this.filteredQuestions.length} 题`);
+    if (this.memoryActive) void this.askEarlyReviewOnComplete();
   }
 
   /** 退出记忆练习模式：恢复常规筛选结果并定位到进入前的位置。不渲染、不保存，由调用方决定。 */
@@ -1883,16 +2010,19 @@ export class QuizView extends ItemView {
       });
     }
 
-    // 记忆练习：显著标明题目来源（复习/新题），与 (多选) 标记并排
+    // 记忆练习：显著标明题目来源（复习/新题/提前复习），与 (多选) 标记并排
     if (this.memoryActive && this.practiceSource[question.id]) {
-      const srcNew = this.practiceSource[question.id] === "new";
+      const src = this.practiceSource[question.id];
       this.questionArea.createEl("span", {
-        text: srcNew ? "🆕 新题" : "🔁 复习",
+        text:
+          src === "new" ? "🆕 新题" : src === "early" ? "⚡ 提前复习" : "🔁 复习",
         cls:
           "csv-quiz-source-badge" +
-          (srcNew
+          (src === "new"
             ? " csv-quiz-source-badge-new"
-            : " csv-quiz-source-badge-review"),
+            : src === "early"
+              ? " csv-quiz-source-badge-early"
+              : " csv-quiz-source-badge-review"),
       });
     }
 
@@ -2840,7 +2970,7 @@ export class QuizView extends ItemView {
             (this.practiceActive || this.memoryActive) &&
             this.filteredQuestions.every((q) => this.practiceAnswered.has(q.id))
           ) {
-            new Notice(`练习完成！共 ${this.filteredQuestions.length} 题`);
+            this.onPracticeRoundComplete();
           }
           return;
         }
@@ -3005,7 +3135,7 @@ export class QuizView extends ItemView {
         (this.practiceActive || this.memoryActive) &&
         this.filteredQuestions.every((q) => this.practiceAnswered.has(q.id))
       ) {
-        new Notice(`练习完成！共 ${this.filteredQuestions.length} 题`);
+        this.onPracticeRoundComplete();
       } else {
         new Notice("没有更多未答题");
       }

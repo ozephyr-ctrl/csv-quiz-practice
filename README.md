@@ -92,8 +92,10 @@ Each question bank has a same-name state file next to it (`题库.csv.sidecar.js
     Practice set = due reviews (sorted by urgency) + daily new questions (configurable quota, per-day, per-bank)
   - 答对按 FSRS 拉长复习间隔，答错进入再学习并在当天重现
     Correct answers extend intervals via FSRS; mistakes trigger relearning and reappear the same day
-  - 练习集中显著标明题目来源：🆕 新题 / 🔁 复习
-    Question source is clearly labeled: 🆕 new / 🔁 review
+  - 练习集中显著标明题目来源：🆕 新题 / 🔁 复习 / ⚡ 提前复习
+    Question source is clearly labeled: 🆕 new / 🔁 review / ⚡ early review
+  - **提前复习**：入口无可刷题或本轮答完（剩余为 0）而今日还有**预计到期**（尚未到期）的题时，弹窗询问是否提前开始；确认后把全部预计今日内到期的题纳入练习集（每轮最多询问一次）
+    **Early review**: when nothing is left to brush (or a round is finished) while questions are forecast to come due later today, a dialog asks whether to start early; confirming adds all of them to the session (asked at most once per round)
   - **掌握参与评分**（可关闭）：掌握题答对按 Easy（少复习）、其余一律 Good；收藏不参与评分（避免难度虚高与间隔压缩）；答错一律 Again
     **Mastery-aware rating** (optional): mastered questions answered correctly count as Easy, others as Good; favorites do not affect rating (prevents artificial difficulty inflation and interval compression); wrong answers always count as Again
   - 练习模式下统计显示**本次会话**答题结果，不污染全局正确率
