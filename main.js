@@ -710,7 +710,7 @@ var PromptModal = class extends import_obsidian.Modal {
       attr: { placeholder: (_a = this.opts.placeholder) != null ? _a : "" }
     });
     this.inputEl.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") this.choose();
+      if (e.key === "Enter" && !e.isComposing) this.choose();
     });
     const actions = this.contentEl.createDiv("csv-quiz-modal-options");
     const confirmBtn = actions.createEl("button", {
@@ -1543,6 +1543,15 @@ function mergeSidecarData(base, baseTsMs, others) {
 }
 
 // src/settings.ts
+var KEY_BINDING_SETTING_KEYS = /* @__PURE__ */ new Set([
+  "keyOptionA",
+  "keyOptionB",
+  "keyOptionC",
+  "keyOptionD",
+  "keyFavorite",
+  "keyMastered",
+  "keyRepeat"
+]);
 var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
@@ -1839,6 +1848,12 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
       this.plugin.settings[key] = value;
       await this.plugin.saveSettings();
       this.plugin.syncRandomExamCount();
+      return;
+    }
+    if (typeof value === "string" && KEY_BINDING_SETTING_KEYS.has(key)) {
+      const binding = value.trim().slice(0, 1);
+      this.plugin.settings[key] = binding;
+      await this.plugin.saveSettings();
       return;
     }
     this.plugin.settings[key] = value;
@@ -6589,11 +6604,12 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     }
   }
   renderFeedback(question, displayOptions) {
+    var _a;
     this.feedbackArea.empty();
     if (!this.showingAnswer) return;
     const multi = this.isMultiChoice(question);
     const answerKeys = multi ? question.answer.split("") : [question.answer];
-    const isCorrect = multi ? this.normalizeAnswer(this.selectedOptions.join("")) === this.normalizeAnswer(question.answer) : this.selectedOption === question.answer;
+    const isCorrect = multi ? this.normalizeAnswer(this.selectedOptions.join("")) === this.normalizeAnswer(question.answer) : this.normalizeAnswer((_a = this.selectedOption) != null ? _a : "") === this.normalizeAnswer(question.answer);
     const feedbackDiv = this.feedbackArea.createDiv(
       `csv-quiz-feedback-text ${isCorrect ? "csv-quiz-correct" : "csv-quiz-incorrect"}`
     );
@@ -8719,6 +8735,7 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
             state.correctCount = 0;
             state.wrongCount = 0;
             state.answeredQuestions = {};
+            state.dailyAnswers = {};
           } else {
             state.memoryCards = {};
             state.memoryNewDate = "";

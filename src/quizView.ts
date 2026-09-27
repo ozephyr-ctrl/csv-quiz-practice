@@ -2209,10 +2209,13 @@ export class QuizView extends ItemView {
 
     const multi = this.isMultiChoice(question);
     const answerKeys = multi ? question.answer.split("") : [question.answer];
+    // 单选与多选/计数口径一致（normalizeAnswer：大小写不敏感、滤非 A-D 字符）：
+    // .cqv 产物 answer 原样透传不归一化，小写/带空格答案在严格相等下会显示✗而计数记✅
     const isCorrect = multi
       ? this.normalizeAnswer(this.selectedOptions.join("")) ===
         this.normalizeAnswer(question.answer)
-      : this.selectedOption === question.answer;
+      : this.normalizeAnswer(this.selectedOption ?? "") ===
+        this.normalizeAnswer(question.answer);
 
     const feedbackDiv = this.feedbackArea.createDiv(
       `csv-quiz-feedback-text ${

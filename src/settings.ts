@@ -28,6 +28,17 @@ interface PluginHandle {
   exportQuizMetaToCsv(): Promise<void>;
 }
 
+/** 声明式设置框架下的键位绑定键集合：写入前需归一化（见 setControlValue）。 */
+const KEY_BINDING_SETTING_KEYS = new Set([
+  "keyOptionA",
+  "keyOptionB",
+  "keyOptionC",
+  "keyOptionD",
+  "keyFavorite",
+  "keyMastered",
+  "keyRepeat",
+]);
+
 export class CSVQuizSettingTab extends PluginSettingTab {
   private plugin: PluginHandle;
 
@@ -337,6 +348,15 @@ export class CSVQuizSettingTab extends PluginSettingTab {
       await this.plugin.saveSettings();
       // 随机考试题数变更：即时刷新已打开面板的按钮文案
       this.plugin.syncRandomExamCount();
+      return;
+    }
+    if (typeof value === "string" && KEY_BINDING_SETTING_KEYS.has(key)) {
+      // 键位绑定归一化（与命令式 addKeyBindingSetting 同口径：trim 后首字符，空串=不绑定）。
+      // 声明式框架把输入原样传入，多字符/带空格绑定在 resolveKeyBinding 的全串比较下静默失效
+      const binding = value.trim().slice(0, 1);
+      (this.plugin.settings as unknown as Record<string, unknown>)[key] =
+        binding;
+      await this.plugin.saveSettings();
       return;
     }
     (this.plugin.settings as unknown as Record<string, unknown>)[key] = value;

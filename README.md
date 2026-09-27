@@ -135,6 +135,8 @@ Each question bank has a same-name state file next to it (`题库.csv.sidecar.js
   Consumers set the `.cqv` as the bank path: read-only, faster to load, safe from accidental edits; state stays aligned by question ID when the artifact is updated
 - `.cqv` 与同名 CSV 的状态文件相互独立（同题库换格式 = 换状态）
   The `.cqv` and its CSV counterpart keep separate state files (switching format = separate state)
+- **安全提示**：题干按 Markdown 渲染（可含内嵌 HTML），请只打开来自**可信来源**的题库（CSV 或 `.cqv`）
+  **Security note**: stems are rendered as Markdown (embedded HTML included) — only open banks (CSV or `.cqv`) from **trusted sources**
 
 ### 进度持久化 / Persistence
 

@@ -320,6 +320,9 @@ export default class CSVQuizPlugin extends Plugin {
             state.correctCount = 0;
             state.wrongCount = 0;
             state.answeredQuestions = {};
+            // 与 quizView.applyResetChoice 的 records 路径同口径：每日答题量一并清理，
+            // 否则面板关闭时清理后练习图表的每日统计仍残留
+            state.dailyAnswers = {};
           } else {
             state.memoryCards = {};
             state.memoryNewDate = "";

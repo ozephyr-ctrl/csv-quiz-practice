@@ -304,9 +304,9 @@ export class PromptModal extends Modal {
       cls: "csv-quiz-modal-input",
       attr: { placeholder: this.opts.placeholder ?? "" },
     });
-    // Enter 确认
+    // Enter 确认（isComposing 过滤 IME 组合输入：中文输入法回车确认候选词不应提交弹窗）
     this.inputEl.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") this.choose();
+      if (e.key === "Enter" && !e.isComposing) this.choose();
     });
 
     const actions = this.contentEl.createDiv("csv-quiz-modal-options");
