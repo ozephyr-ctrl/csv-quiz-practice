@@ -47,6 +47,31 @@ export function addDaysMs(dayMs: number, n: number): number {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n).getTime();
 }
 
+/**
+ * 随机考试评分：每题固定 1 分。total/correct 会取整并夹取到合法范围；
+ * 正确率按 total 计算（total=0 时为 0）。
+ */
+export interface ExamScore {
+  total: number;
+  correct: number;
+  wrong: number;
+  /** 0-100 */
+  accuracy: number;
+}
+
+export function computeExamScore(total: number, correct: number): ExamScore {
+  const t = Number.isFinite(total) ? Math.max(0, Math.round(total)) : 0;
+  const c = Number.isFinite(correct)
+    ? Math.min(t, Math.max(0, Math.round(correct)))
+    : 0;
+  return {
+    total: t,
+    correct: c,
+    wrong: t - c,
+    accuracy: t > 0 ? (c / t) * 100 : 0,
+  };
+}
+
 /** 练习面板三项分类统计。 */
 export interface PracticeStats {
   /** 今日已练习：今日答题事件数（含常规/随机考试/记忆练习，全库口径）。 */

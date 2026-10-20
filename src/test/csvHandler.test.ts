@@ -129,6 +129,28 @@ describe("filterQuestions", () => {
       .toEqual(["1", "2"]);
   });
 
+  it("忽略未答筛选时已答题仍在候选中（记忆到期/面板统计口径）", () => {
+    const answered = { "1": "", "2": "B" };
+    // 与 applyFiltersTo(..., true) 等价：filterUnanswered 传空串，其余筛选不变
+    expect(
+      filterQuestions(
+        questions,
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        answered
+      ).map((q) => q.id)
+    ).toEqual(["1", "2", "3", "4"]);
+  });
+
   it("自由文本筛选匹配题干与选项（不区分大小写）", () => {
     expect(filterQuestions(questions, "", "", "", "", "", "", "", "", "", "3 题干").map((q) => q.id))
       .toEqual(["3"]);

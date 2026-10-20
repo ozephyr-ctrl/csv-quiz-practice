@@ -5,6 +5,7 @@ import {
   startOfDayMs,
   addDaysMs,
   computePracticeStats,
+  computeExamScore,
   collectDueLaterTodayIds,
   buildDailySeries,
   normalizeDailyAnswers,
@@ -334,5 +335,51 @@ describe("pruneDailyAnswers", () => {
     const rec = { "2026-09-20": 1 };
     expect(pruneDailyAnswers(rec, NOW, 180)).toBe(false);
     expect(rec).toEqual({ "2026-09-20": 1 });
+  });
+});
+
+describe("computeExamScore（随机考试每题 1 分）", () => {
+  it("按答对题数计分并计算正确率", () => {
+    expect(computeExamScore(100, 73)).toEqual({
+      total: 100,
+      correct: 73,
+      wrong: 27,
+      accuracy: 73,
+    });
+  });
+
+  it("全部答对/全部答错", () => {
+    expect(computeExamScore(4, 4)).toEqual({
+      total: 4,
+      correct: 4,
+      wrong: 0,
+      accuracy: 100,
+    });
+    expect(computeExamScore(4, 0)).toEqual({
+      total: 4,
+      correct: 0,
+      wrong: 4,
+      accuracy: 0,
+    });
+  });
+
+  it("空考试与非法数值安全回落", () => {
+    expect(computeExamScore(0, 0)).toEqual({
+      total: 0,
+      correct: 0,
+      wrong: 0,
+      accuracy: 0,
+    });
+    const r = computeExamScore(Number.NaN, Number.POSITIVE_INFINITY);
+    expect(r).toEqual({ total: 0, correct: 0, wrong: 0, accuracy: 0 });
+  });
+
+  it("correct 超出 total 时夹取到 total", () => {
+    expect(computeExamScore(3, 9)).toEqual({
+      total: 3,
+      correct: 3,
+      wrong: 0,
+      accuracy: 100,
+    });
   });
 });

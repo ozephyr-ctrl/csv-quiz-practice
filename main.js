@@ -748,6 +748,63 @@ function askPrompt(app, opts) {
   modal.open();
   return modal.promise;
 }
+var ExamResultModal = class extends import_obsidian.Modal {
+  constructor(app, opts) {
+    super(app);
+    this.opts = opts;
+  }
+  onOpen() {
+    this.titleEl.setText("\u968F\u673A\u8003\u8BD5\u7ED3\u679C");
+    this.contentEl.empty();
+    const total = Math.max(0, Math.round(this.opts.total));
+    const correct = Math.min(total, Math.max(0, Math.round(this.opts.correct)));
+    const wrong = Math.max(0, total - correct);
+    const rawAccuracy = Number.isFinite(this.opts.accuracy) ? this.opts.accuracy : 0;
+    const accuracy = Math.min(100, Math.max(0, rawAccuracy));
+    const accuracyText = Number.isInteger(accuracy) ? String(accuracy) : accuracy.toFixed(1);
+    const wrap = this.contentEl.createDiv("csv-quiz-exam-result");
+    const score = wrap.createDiv("csv-quiz-exam-result-score");
+    score.createSpan({
+      text: String(correct),
+      cls: "csv-quiz-exam-result-correct"
+    });
+    score.createSpan({ text: "/", cls: "csv-quiz-exam-result-slash" });
+    score.createSpan({
+      text: String(total),
+      cls: "csv-quiz-exam-result-total"
+    });
+    const accuracyLine = wrap.createDiv("csv-quiz-exam-result-accuracy");
+    accuracyLine.createSpan({ text: "\u6B63\u786E\u7387" });
+    accuracyLine.createSpan({
+      text: `${accuracyText}%`,
+      cls: "csv-quiz-exam-result-accuracy-value"
+    });
+    const meta = wrap.createEl("p", {
+      cls: "csv-quiz-exam-result-meta csv-quiz-modal-message"
+    });
+    meta.createSpan({ text: "\u6BCF\u9898 1 \u5206 \xB7 \u7B54\u5BF9 " });
+    meta.createSpan({
+      text: String(correct),
+      cls: "csv-quiz-exam-result-right"
+    });
+    meta.createSpan({ text: " \u9898 \xB7 \u7B54\u9519 " });
+    meta.createSpan({
+      text: String(wrong),
+      cls: "csv-quiz-exam-result-wrong"
+    });
+    meta.createSpan({ text: " \u9898" });
+    const actions = wrap.createDiv("csv-quiz-exam-result-actions");
+    const confirmBtn = actions.createEl("button", {
+      text: "\u67E5\u770B\u7ED3\u679C",
+      cls: "csv-quiz-btn csv-quiz-btn-primary csv-quiz-modal-btn"
+    });
+    confirmBtn.addEventListener("click", () => this.close());
+    window.setTimeout(() => confirmBtn.focus(), 0);
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
 
 // src/sidecar.ts
 var import_obsidian2 = require("obsidian");
@@ -951,6 +1008,16 @@ function startOfDayMs(d) {
 function addDaysMs(dayMs, n) {
   const d = new Date(dayMs);
   return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n).getTime();
+}
+function computeExamScore(total, correct) {
+  const t = Number.isFinite(total) ? Math.max(0, Math.round(total)) : 0;
+  const c = Number.isFinite(correct) ? Math.min(t, Math.max(0, Math.round(correct))) : 0;
+  return {
+    total: t,
+    correct: c,
+    wrong: t - c,
+    accuracy: t > 0 ? c / t * 100 : 0
+  };
 }
 function computePracticeStats(cards, dailyAnswers, now, scopeIds) {
   const nowMs = now.getTime();
@@ -2562,6 +2629,7 @@ var _ProgressModal = class _ProgressModal extends import_obsidian5.Modal {
   onOpen() {
     this.contentEl.empty();
     const { questions, answeredQuestions, memoryCards, currentId } = this.opts;
+    const maskCorrectness = this.opts.maskCorrectness === true;
     const now = (/* @__PURE__ */ new Date()).getTime();
     const summary = this.contentEl.createDiv("csv-quiz-progress-summary");
     const list = this.contentEl.createDiv("csv-quiz-progress-list");
@@ -2578,6 +2646,7 @@ var _ProgressModal = class _ProgressModal extends import_obsidian5.Modal {
       const a = answeredQuestions[q.id];
       if (a !== void 0) {
         answered++;
+        if (maskCorrectness) continue;
         const normA = normalizeAnswerValue(a);
         const normAns = normalizeAnswerValue(q.answer);
         normCache.set(`u:${q.id}`, normA);
@@ -2588,7 +2657,7 @@ var _ProgressModal = class _ProgressModal extends import_obsidian5.Modal {
       }
     }
     summary.setText(
-      `\u5171 ${questions.length} \u9898 \xB7 \u5DF2\u7B54 ${answered} \xB7 \u672A\u7B54 ${questions.length - answered} \xB7 \u7B54\u5BF9 ${correct} \xB7 \u7B54\u9519 ${answered - correct}` + (answered > 0 ? ` \xB7 \u6B63\u786E\u7387 ${(correct / answered * 100).toFixed(1)}%` : "")
+      maskCorrectness ? `\u5171 ${questions.length} \u9898 \xB7 \u5DF2\u7B54 ${answered} \xB7 \u672A\u7B54 ${questions.length - answered}` : `\u5171 ${questions.length} \u9898 \xB7 \u5DF2\u7B54 ${answered} \xB7 \u672A\u7B54 ${questions.length - answered} \xB7 \u7B54\u5BF9 ${correct} \xB7 \u7B54\u9519 ${answered - correct}` + (answered > 0 ? ` \xB7 \u6B63\u786E\u7387 ${(correct / answered * 100).toFixed(1)}%` : "")
     );
     if (questions.length === 0) {
       list.createEl("p", { text: "\u5F53\u524D\u5217\u8868\u6CA1\u6709\u9898\u76EE", cls: "csv-quiz-empty" });
@@ -2611,6 +2680,11 @@ var _ProgressModal = class _ProgressModal extends import_obsidian5.Modal {
           text: "\u672A\u7B54",
           cls: "csv-quiz-progress-status csv-quiz-progress-unanswered"
         });
+      } else if (maskCorrectness) {
+        row.createEl("span", {
+          text: "\u5DF2\u7B54",
+          cls: "csv-quiz-progress-status csv-quiz-progress-masked"
+        });
       } else if (normCache.get(`u:${q.id}`) === normCache.get(`c:${q.id}`)) {
         row.createEl("span", {
           text: a ? `\u2713 \u5DF2\u7B54${a}` : "\u2713 \u5DF2\u7B54",
@@ -2623,7 +2697,9 @@ var _ProgressModal = class _ProgressModal extends import_obsidian5.Modal {
         });
       }
       const card = memoryCards[q.id];
-      if (card) {
+      if (maskCorrectness) {
+        row.createEl("span", { text: "\u2014", cls: "csv-quiz-progress-memory" });
+      } else if (card) {
         const dueT = new Date(card.due).getTime();
         const dueText = Number.isNaN(dueT) ? "\u2014" : dueT <= now ? "\u5DF2\u5230\u671F" : `${Math.max(1, Math.ceil((dueT - now) / 864e5))} \u5929\u540E`;
         const memCls = "csv-quiz-progress-memory" + (dueT <= now ? " csv-quiz-progress-memory-due" : "");
@@ -2637,7 +2713,7 @@ var _ProgressModal = class _ProgressModal extends import_obsidian5.Modal {
       const flags = [];
       if (q.favorite === "1") flags.push("\u2605");
       if (q.mastered === "1") flags.push("\u2713");
-      if (q.wrong === "1") flags.push("\u2717");
+      if (!maskCorrectness && q.wrong === "1") flags.push("\u2717");
       if (flags.length > 0) {
         row.createEl("span", {
           text: flags.join(" "),
@@ -5028,6 +5104,12 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     /** 随机考试模式：考试集为临时会话，不持久化，重开面板回到常规模式。 */
     this.practiceActive = false;
     this.practiceIds = [];
+    /** 随机考试交卷后是否已揭示对错（结束后允许返回列表复盘错题）。 */
+    this.examRevealed = false;
+    /** 按当前筛选练习模式：临时会话，题目为当前筛选全集（进入时随机打乱）。 */
+    this.filterPracticeActive = false;
+    /** 本轮练习完成提示/评分是否已触发（防止答题完成与切题完成重复弹窗）。 */
+    this.practiceRoundNotified = false;
     /** 进入练习前的常规模式定位题号，退出时据此恢复位置。 */
     this.practiceFocusId = null;
     /** 记忆练习模式：练习集为临时会话，不持久化，重开面板回到常规模式。 */
@@ -5037,6 +5119,9 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     this.memoryCards = {};
     /** 防双开：首次重置确认框 await 期间禁止重复进入（M2）。 */
     this.memoryEnabling = false;
+    /** 防双击竞态：进入随机考试/按筛选练习的保存编辑 await 期间禁止重复进入。 */
+    this.practiceEnabling = false;
+    this.filterEnabling = false;
     /** 每日新题配额：最近一次启用记忆练习的自然日（本地日期 "YYYY-MM-DD"）。 */
     this.memoryNewDate = "";
     /** 每日新题配额：当日已取的新题数量。 */
@@ -5114,6 +5199,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     this.backupTimer.stop();
     this.stateManager.cancelScheduledSave();
     this.exitRandomPractice();
+    this.exitFilterPractice();
     this.exitMemoryPractice();
     if (this.textFilterTimer !== null) {
       window.clearTimeout(this.textFilterTimer);
@@ -5811,6 +5897,16 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     this.practiceCountEl = practiceRow.createSpan({
       cls: "csv-quiz-practice-count"
     });
+    this.filterPracticeBtn = practiceRow.createEl("button", {
+      text: "\u{1F4DA} \u6309\u5F53\u524D\u7B5B\u9009\u7EC3\u4E60",
+      cls: "csv-quiz-btn csv-quiz-btn-sm csv-quiz-practice-btn"
+    });
+    this.filterPracticeBtn.addEventListener("click", () => {
+      this.toggleFilterPractice();
+    });
+    this.filterPracticeCountEl = practiceRow.createSpan({
+      cls: "csv-quiz-practice-count"
+    });
     if (settings.memoryEnabled) {
       this.memoryBtn = practiceRow.createEl("button", {
         text: "\u{1F9E0} \u8BB0\u5FC6\u7EC3\u4E60",
@@ -5862,7 +5958,10 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
    * 的常规筛选结果（与进入记忆练习的取池口径一致）。
    */
   currentFilterScopeIds() {
-    const source = this.practiceActive || this.memoryActive ? this.applyFiltersTo(this.orderedQuestions) : this.filteredQuestions;
+    if (!this.isPracticeSessionActive() && this.filterUnanswered === "") {
+      return new Set(this.filteredQuestions.map((q) => q.id));
+    }
+    const source = this.applyFiltersTo(this.orderedQuestions, true);
     return new Set(source.map((q) => q.id));
   }
   /**
@@ -5960,13 +6059,29 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     this.syncBoolChips();
     this.applyFiltersAndReset();
   }
+  /** 任一练习模式（随机考试 / 按筛选练习 / 记忆练习）是否处于活动会话。 */
+  isPracticeSessionActive() {
+    return this.practiceActive || this.filterPracticeActive || this.memoryActive;
+  }
+  /** 随机考试进行中且尚未交卷：隐藏对错与正确答案，避免过程泄题。 */
+  isExamAnswersHidden() {
+    return this.practiceActive && !this.examRevealed;
+  }
   /** 随机考试：按当前筛选条件从全部题目（不限未答）随机取设置题数作为考试集（不足自适应）。 */
   async enableRandomPractice() {
     var _a, _b;
-    if (this.practiceActive || this.memoryEnabling) return;
-    await this.saveCurrentEdit();
+    if (this.practiceActive || this.memoryEnabling || this.practiceEnabling || this.filterEnabling) {
+      return;
+    }
+    this.practiceEnabling = true;
+    try {
+      await this.saveCurrentEdit();
+    } finally {
+      this.practiceEnabling = false;
+    }
     if (this.isClosed) return;
     if (this.memoryActive) this.exitMemoryPractice();
+    if (this.filterPracticeActive) this.exitFilterPractice();
     const pool = this.applyFiltersTo(this.orderedQuestions);
     if (pool.length === 0) {
       new import_obsidian6.Notice("\u5F53\u524D\u7B5B\u9009\u6761\u4EF6\u4E0B\u6CA1\u6709\u9898\u76EE\uFF0C\u65E0\u6CD5\u5F00\u59CB\u968F\u673A\u8003\u8BD5");
@@ -5976,6 +6091,8 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     this.practiceFocusId = (_b = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id) != null ? _b : null;
     this.practiceIds = picked.map((q) => q.id);
     this.practiceActive = true;
+    this.examRevealed = false;
+    this.practiceRoundNotified = false;
     this.practiceAnswered = /* @__PURE__ */ new Set();
     this.practiceCorrect = 0;
     this.practiceWrong = 0;
@@ -5993,6 +6110,8 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     this.practiceActive = false;
     this.practiceIds = [];
     this.practiceAnswered.clear();
+    this.examRevealed = false;
+    this.practiceRoundNotified = false;
     this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
     if (this.practiceFocusId) {
       const idx = this.filteredQuestions.findIndex(
@@ -6023,6 +6142,81 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     }
   }
   /**
+   * 按当前筛选练习：把当前筛选结果的全部题目随机打乱后作为一个临时练习集，
+   * 行为与普通刷题一致（即时反馈），不限制随机考试题数。
+   */
+  async enableFilterPractice() {
+    var _a, _b;
+    if (this.filterPracticeActive || this.memoryEnabling || this.practiceEnabling || this.filterEnabling) {
+      return;
+    }
+    this.filterEnabling = true;
+    try {
+      await this.saveCurrentEdit();
+    } finally {
+      this.filterEnabling = false;
+    }
+    if (this.isClosed) return;
+    if (this.practiceActive) this.exitRandomPractice();
+    if (this.memoryActive) this.exitMemoryPractice();
+    const pool = this.applyFiltersTo(this.orderedQuestions);
+    if (pool.length === 0) {
+      new import_obsidian6.Notice("\u5F53\u524D\u7B5B\u9009\u6761\u4EF6\u4E0B\u6CA1\u6709\u9898\u76EE\uFF0C\u65E0\u6CD5\u5F00\u59CB\u7EC3\u4E60");
+      return;
+    }
+    const picked = shuffle(pool);
+    this.practiceFocusId = (_b = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id) != null ? _b : null;
+    this.practiceIds = picked.map((q) => q.id);
+    this.filterPracticeActive = true;
+    this.practiceRoundNotified = false;
+    this.practiceAnswered = /* @__PURE__ */ new Set();
+    this.practiceCorrect = 0;
+    this.practiceWrong = 0;
+    this.filteredQuestions = picked;
+    this.currentIndex = 0;
+    this.currentShuffledQId = null;
+    this.cancelAutoNext();
+    this.renderQuestion();
+    this.saveState();
+    new import_obsidian6.Notice(`\u6309\u5F53\u524D\u7B5B\u9009\u7EC3\u4E60\u5F00\u59CB\uFF1A${picked.length} \u9898`);
+  }
+  /** 退出按当前筛选练习：恢复常规筛选结果并定位到进入前的位置。不渲染、不保存。 */
+  exitFilterPractice() {
+    if (!this.filterPracticeActive) return;
+    this.filterPracticeActive = false;
+    this.practiceIds = [];
+    this.practiceAnswered.clear();
+    this.practiceRoundNotified = false;
+    this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
+    if (this.practiceFocusId) {
+      const idx = this.filteredQuestions.findIndex(
+        (q) => q.id === this.practiceFocusId
+      );
+      if (idx >= 0) {
+        this.currentIndex = idx;
+      } else if (this.filteredQuestions.length > 0) {
+        this.currentIndex = 0;
+      } else {
+        this.currentIndex = -1;
+      }
+    } else {
+      this.currentIndex = this.filteredQuestions.length > 0 ? 0 : -1;
+    }
+    this.practiceFocusId = null;
+    this.currentShuffledQId = null;
+    this.cancelAutoNext();
+  }
+  toggleFilterPractice() {
+    if (this.filterPracticeActive) {
+      this.exitFilterPractice();
+      this.renderQuestion();
+      this.saveState();
+      new import_obsidian6.Notice("\u5DF2\u9000\u51FA\u6309\u5F53\u524D\u7B5B\u9009\u7EC3\u4E60");
+    } else {
+      void this.enableFilterPractice();
+    }
+  }
+  /**
    * 记忆练习：到期题（FSRS due 已到）按紧迫度优先 + 每日新题（随机取），
    * 均受当前筛选条件影响。练习集为临时会话，不持久化。
    * 到期与新题均为空但今日还有预计到期的题时，询问是否提前复习（startMemorySession）。
@@ -6032,13 +6226,16 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       new import_obsidian6.Notice("\u8BB0\u5FC6\u7EC3\u4E60\u5DF2\u5173\u95ED\uFF0C\u8BF7\u5728\u8BBE\u7F6E\u4E2D\u5F00\u542F");
       return;
     }
-    if (this.memoryActive || this.memoryEnabling) return;
+    if (this.memoryActive || this.memoryEnabling || this.practiceEnabling || this.filterEnabling) {
+      return;
+    }
     this.memoryEnabling = true;
     this.memoryEarlyAsked = false;
     try {
       await this.saveCurrentEdit();
       if (this.isClosed) return;
       if (this.practiceActive) this.exitRandomPractice();
+      if (this.filterPracticeActive) this.exitFilterPractice();
       if (!this.memoryInitialized && Object.keys(this.memoryCards).length === 0 && Object.keys(this.answeredQuestions).length > 0) {
         const modal = new ChoiceModal(this.app, {
           title: "\u542F\u7528\u8BB0\u5FC6\u7EC3\u4E60\u9700\u8981\u91CD\u7F6E\u8FDB\u5EA6",
@@ -6053,6 +6250,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         if (this.isClosed) return;
         if (res !== "reset") return;
         if (this.practiceActive) this.exitRandomPractice();
+        if (this.filterPracticeActive) this.exitFilterPractice();
         this.correctCount = 0;
         this.wrongCount = 0;
         this.answeredQuestions = {};
@@ -6069,7 +6267,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         this.selectedOptions = [];
         this.cancelAutoNext();
       }
-      const pool = this.applyFiltersTo(this.orderedQuestions);
+      const pool = this.applyFiltersTo(this.orderedQuestions, true);
       const now = /* @__PURE__ */ new Date();
       const due = pool.filter((q) => {
         const card = this.memoryCards[q.id];
@@ -6123,6 +6321,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         if (this.isClosed) return;
         if (res !== "start") return;
         if (this.practiceActive) this.exitRandomPractice();
+        if (this.filterPracticeActive) this.exitFilterPractice();
         this.startMemorySession(
           [],
           [],
@@ -6159,6 +6358,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     this.practiceAnswered = /* @__PURE__ */ new Set();
     this.practiceCorrect = 0;
     this.practiceWrong = 0;
+    this.practiceRoundNotified = false;
     this.practiceSource = {};
     for (const q of review) this.practiceSource[q.id] = "review";
     for (const q of fresh) this.practiceSource[q.id] = "new";
@@ -6194,7 +6394,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     }
     const inSession = new Set(this.memoryIds);
     const early = this.earlyDueQuestions(
-      this.applyFiltersTo(this.orderedQuestions),
+      this.applyFiltersTo(this.orderedQuestions, true),
       /* @__PURE__ */ new Date()
     ).filter((q) => !inSession.has(q.id));
     if (early.length === 0) return;
@@ -6217,6 +6417,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     this.filteredQuestions.push(...add);
     this.memoryIds.push(...add.map((q) => q.id));
     for (const q of add) this.practiceSource[q.id] = "early";
+    this.practiceRoundNotified = false;
     const idx = this.filteredQuestions.findIndex((q) => q.id === add[0].id);
     if (idx < 0) return;
     this.currentIndex = idx;
@@ -6226,10 +6427,32 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     this.saveState();
     new import_obsidian6.Notice(`\u5DF2\u52A0\u5165 ${add.length} \u9898\u63D0\u524D\u590D\u4E60`);
   }
-  /** 练习模式本轮全部答完：提示完成；记忆练习触发提前复习询问（剩余为 0 且今日还有预计到期题）。 */
+  /** 练习模式本轮全部答完：提示完成；随机考试揭示对错并弹评分；记忆练习触发提前复习询问。 */
   onPracticeRoundComplete() {
+    if (this.practiceRoundNotified) return;
+    this.practiceRoundNotified = true;
+    if (this.practiceActive) {
+      this.examRevealed = true;
+      this.renderQuestion();
+      this.updateProgress();
+      const score = computeExamScore(
+        this.practiceIds.length,
+        this.practiceCorrect
+      );
+      new ExamResultModal(this.app, score).open();
+      return;
+    }
     new import_obsidian6.Notice(`\u7EC3\u4E60\u5B8C\u6210\uFF01\u5171 ${this.filteredQuestions.length} \u9898`);
     if (this.memoryActive) void this.askEarlyReviewOnComplete();
+  }
+  /** 答题后检查本轮练习是否已全部完成（不依赖用户再点“下一题”）。 */
+  maybeCompletePracticeSession() {
+    if (!this.practiceActive && !this.filterPracticeActive) return;
+    if (this.filteredQuestions.length === 0) return;
+    if (!this.filteredQuestions.every((q) => this.practiceAnswered.has(q.id))) {
+      return;
+    }
+    this.onPracticeRoundComplete();
   }
   /** 退出记忆练习模式：恢复常规筛选结果并定位到进入前的位置。不渲染、不保存，由调用方决定。 */
   exitMemoryPractice() {
@@ -6267,7 +6490,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       void this.enableMemoryPractice();
     }
   }
-  /** 同步练习按钮（随机/记忆）的文案/高亮与完成计数。 */
+  /** 同步练习按钮（随机考试/按筛选练习/记忆练习）的文案/高亮与完成计数。 */
   updatePracticeButton() {
     if (!this.practiceBtn) return;
     if (this.practiceActive) {
@@ -6283,6 +6506,22 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       );
       this.practiceBtn.removeClass("csv-quiz-practice-btn-active");
       this.practiceCountEl.setText("");
+    }
+    if (this.filterPracticeBtn) {
+      if (this.filterPracticeActive) {
+        this.filterPracticeBtn.setText("\u9000\u51FA\u6309\u7B5B\u9009\u7EC3\u4E60");
+        this.filterPracticeBtn.addClass("csv-quiz-practice-btn-active");
+        const answered = this.practiceIds.filter(
+          (id) => this.practiceAnswered.has(id)
+        ).length;
+        this.filterPracticeCountEl.setText(
+          ` \u5DF2\u5B8C\u6210 ${answered}/${this.practiceIds.length}`
+        );
+      } else {
+        this.filterPracticeBtn.setText("\u{1F4DA} \u6309\u5F53\u524D\u7B5B\u9009\u7EC3\u4E60");
+        this.filterPracticeBtn.removeClass("csv-quiz-practice-btn-active");
+        this.filterPracticeCountEl.setText("");
+      }
     }
     if (!this.memoryBtn) return;
     if (this.memoryActive) {
@@ -6366,8 +6605,12 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       select.value = "";
     }
   }
-  /** 按当前全部筛选条件（含自由文本）过滤题目。 */
-  applyFiltersTo(questions) {
+  /**
+   * 按当前全部筛选条件（含自由文本）过滤题目。
+   * ignoreUnanswered=true 时忽略「未答/已答」筛选：记忆练习的到期题/新题
+   * 与练习面板到期统计只应关心卡片调度，不能因为题答过就从复习池消失。
+   */
+  applyFiltersTo(questions, ignoreUnanswered = false) {
     return filterQuestions(
       questions,
       this.filterTags,
@@ -6380,13 +6623,13 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       this.filterRepeat,
       this.filterWrong,
       this.filterText,
-      this.filterUnanswered,
+      ignoreUnanswered ? "" : this.filterUnanswered,
       this.answeredQuestions
     );
   }
   reFilterForNavigation() {
     var _a;
-    if (this.practiceActive || this.memoryActive) return;
+    if (this.isPracticeSessionActive()) return;
     const prevId = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id;
     this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
     if (prevId) {
@@ -6401,6 +6644,9 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
   applyFiltersAndReset() {
     if (this.practiceActive) {
       this.exitRandomPractice();
+    }
+    if (this.filterPracticeActive) {
+      this.exitFilterPractice();
     }
     if (this.memoryActive) {
       this.exitMemoryPractice();
@@ -6445,7 +6691,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     }
     const question = this.filteredQuestions[this.currentIndex];
     const multi = this.isMultiChoice(question);
-    const inPractice = this.practiceActive || this.memoryActive;
+    const inPractice = this.isPracticeSessionActive();
     const prevAnswer = inPractice ? this.practiceAnswered.has(question.id) ? this.answeredQuestions[question.id] : void 0 : this.answeredQuestions[question.id];
     if (prevAnswer !== void 0) {
       if (multi) {
@@ -6505,7 +6751,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       const isSelected = multi ? this.selectedOptions.includes(opt.key) : this.selectedOption === opt.key;
       const isAnswerKey = answerKeys.includes(opt.key);
       const optDiv = optionsDiv.createDiv(
-        "csv-quiz-option" + (isSelected ? " csv-quiz-option-selected" : "") + (this.showingAnswer && isAnswerKey ? " csv-quiz-option-correct" : "") + (this.showingAnswer && isSelected && !isAnswerKey ? " csv-quiz-option-wrong" : "")
+        "csv-quiz-option" + (isSelected ? " csv-quiz-option-selected" : "") + (this.showingAnswer && !this.isExamAnswersHidden() && isAnswerKey ? " csv-quiz-option-correct" : "") + (this.showingAnswer && !this.isExamAnswersHidden() && isSelected && !isAnswerKey ? " csv-quiz-option-wrong" : "")
       );
       const input = optDiv.createEl("input", {
         type: multi ? "checkbox" : "radio",
@@ -6569,6 +6815,13 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       this.cardPanelOpen = !this.cardPanelOpen;
       body.classList.toggle("csv-quiz-card-body-hidden", !this.cardPanelOpen);
     });
+    if (this.isExamAnswersHidden()) {
+      body.createEl("span", {
+        text: "\u8003\u8BD5\u7ED3\u675F\u540E\u663E\u793A\u8BB0\u5FC6\u5361\u7247",
+        cls: "csv-quiz-card-empty"
+      });
+      return;
+    }
     const card = this.memoryCards[question.id];
     if (!card) {
       body.createEl("span", {
@@ -6607,6 +6860,13 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     var _a;
     this.feedbackArea.empty();
     if (!this.showingAnswer) return;
+    if (this.isExamAnswersHidden()) {
+      this.feedbackArea.createDiv({
+        text: "\u5DF2\u4F5C\u7B54",
+        cls: "csv-quiz-feedback-text"
+      });
+      return;
+    }
     const multi = this.isMultiChoice(question);
     const answerKeys = multi ? question.answer.split("") : [question.answer];
     const isCorrect = multi ? this.normalizeAnswer(this.selectedOptions.join("")) === this.normalizeAnswer(question.answer) : this.normalizeAnswer((_a = this.selectedOption) != null ? _a : "") === this.normalizeAnswer(question.answer);
@@ -6682,8 +6942,9 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     }
     this.renderQuestion();
     this.updateProgress();
+    this.maybeCompletePracticeSession();
     const settings = this.getSettings();
-    if (isCorrect) {
+    if (isCorrect && !this.practiceActive) {
       if (settings.autoNextDelay > 0) {
         this.autoNextQuestionId = question.id;
         this.autoNextTimer = window.setTimeout(() => {
@@ -6711,11 +6972,11 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     this.dailyAnswers[key] = (prev != null ? prev : 0) + 1;
     if (prev === void 0) pruneDailyAnswers(this.dailyAnswers, /* @__PURE__ */ new Date());
     this.practiceStatsDirty = true;
-    if (this.practiceActive || this.memoryActive) {
+    if (this.isPracticeSessionActive()) {
       this.practiceAnswered.add(question.id);
     }
     if (isCorrect) {
-      if (this.practiceActive || this.memoryActive) {
+      if (this.isPracticeSessionActive()) {
         this.practiceCorrect++;
       } else {
         this.correctCount++;
@@ -6725,7 +6986,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         this.saveQuestionMeta(question, ["wrong"]);
       }
     } else {
-      if (this.practiceActive || this.memoryActive) {
+      if (this.isPracticeSessionActive()) {
         this.practiceWrong++;
       } else {
         this.wrongCount++;
@@ -6858,6 +7119,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       return;
     }
     if (this.practiceActive) this.exitRandomPractice();
+    if (this.filterPracticeActive) this.exitFilterPractice();
     if (this.memoryActive) this.exitMemoryPractice();
     const currentId = (_b = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id) != null ? _b : null;
     this.rebuildOrderAndLocate(this.getSettings().randomOrder, currentId);
@@ -6906,6 +7168,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     await this.saveCurrentEdit();
     if (choice === "order") {
       if (this.practiceActive) this.exitRandomPractice();
+      if (this.filterPracticeActive) this.exitFilterPractice();
       if (this.memoryActive) this.exitMemoryPractice();
       let autoOff = false;
       if (this.getSettings().randomOrder) {
@@ -6925,6 +7188,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       return;
     }
     if (this.practiceActive) this.exitRandomPractice();
+    if (this.filterPracticeActive) this.exitFilterPractice();
     if (this.memoryActive) this.exitMemoryPractice();
     if (choice === "all") {
       await this.refresh();
@@ -6997,11 +7261,13 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
   renderCheckboxArea(question) {
     this.checkboxArea.empty();
     this.markCheckboxes = {};
+    const examHidden = this.isExamAnswersHidden();
     const fields = [
       { key: "favorite", label: "\u6536\u85CF", value: question.favorite },
       { key: "mastered", label: "\u638C\u63E1", value: question.mastered },
       { key: "repeat", label: "\u91CD\u590D", value: question.repeat },
-      { key: "wrong", label: "\u9519\u9898", value: question.wrong }
+      // 随机考试进行中隐藏错题标记：答错会自动置位，显示会泄露本题对错
+      { key: "wrong", label: "\u9519\u9898", value: examHidden ? "" : question.wrong }
     ];
     for (const f of fields) {
       const labelEl = this.checkboxArea.createEl("label");
@@ -7010,6 +7276,10 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         attr: { "data-field": f.key }
       });
       cb.checked = f.value === "1";
+      if (examHidden && f.key === "wrong") {
+        cb.disabled = true;
+        labelEl.setAttribute("title", "\u968F\u673A\u8003\u8BD5\u7ED3\u675F\u540E\u663E\u793A\u9519\u9898\u6807\u8BB0");
+      }
       if (f.key === "favorite" || f.key === "mastered" || f.key === "repeat") {
         this.markCheckboxes[f.key] = cb;
       }
@@ -7146,8 +7416,9 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     }
     this.renderQuestion();
     this.updateProgress();
+    this.maybeCompletePracticeSession();
     const settings = this.getSettings();
-    if (isCorrect) {
+    if (isCorrect && !this.practiceActive) {
       if (settings.autoNextDelay > 0) {
         this.autoNextQuestionId = question.id;
         this.autoNextTimer = window.setTimeout(() => {
@@ -7190,7 +7461,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
           this.currentIndex = newIdx + 1;
         } else {
           this.currentIndex = newIdx;
-          if ((this.practiceActive || this.memoryActive) && this.filteredQuestions.every((q) => this.practiceAnswered.has(q.id))) {
+          if (this.isPracticeSessionActive() && this.filteredQuestions.every((q) => this.practiceAnswered.has(q.id))) {
             this.onPracticeRoundComplete();
           }
           return;
@@ -7323,7 +7594,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       if (this.filteredQuestions.length === 0) return;
       for (let i = this.currentIndex + 1; i < this.filteredQuestions.length; i++) {
         const id = this.filteredQuestions[i].id;
-        const unanswered = this.practiceActive || this.memoryActive ? !this.practiceAnswered.has(id) : this.answeredQuestions[id] === void 0;
+        const unanswered = this.isPracticeSessionActive() ? !this.practiceAnswered.has(id) : this.answeredQuestions[id] === void 0;
         if (unanswered) {
           this.currentIndex = i;
           this.currentShuffledQId = null;
@@ -7333,7 +7604,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
           return;
         }
       }
-      if ((this.practiceActive || this.memoryActive) && this.filteredQuestions.every((q) => this.practiceAnswered.has(q.id))) {
+      if (this.isPracticeSessionActive() && this.filteredQuestions.every((q) => this.practiceAnswered.has(q.id))) {
         this.onPracticeRoundComplete();
       } else {
         new import_obsidian6.Notice("\u6CA1\u6709\u66F4\u591A\u672A\u7B54\u9898");
@@ -7422,10 +7693,20 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     var _a, _b;
     if (this.progressModalOpen) return;
     this.progressModalOpen = true;
+    const answeredForModal = this.practiceActive ? Object.fromEntries(
+      [...this.practiceAnswered].map((id) => {
+        var _a2;
+        return [
+          id,
+          (_a2 = this.answeredQuestions[id]) != null ? _a2 : ""
+        ];
+      })
+    ) : this.answeredQuestions;
     const modal = new ProgressModal(this.app, {
       questions: this.filteredQuestions,
-      answeredQuestions: this.answeredQuestions,
+      answeredQuestions: answeredForModal,
       memoryCards: this.memoryCards,
+      maskCorrectness: this.isExamAnswersHidden(),
       currentId: (_b = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id) != null ? _b : null,
       onJump: (id) => {
         void (async () => {
@@ -7452,7 +7733,14 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     const total = this.filteredQuestions.length;
     const current = total > 0 && this.currentIndex >= 0 ? this.currentIndex + 1 : 0;
     this.progressEl.textContent = `\u8FDB\u5EA6: ${current}/${total}`;
-    if (this.practiceActive || this.memoryActive) {
+    if (this.isExamAnswersHidden()) {
+      const answered = this.practiceIds.filter(
+        (id) => this.practiceAnswered.has(id)
+      ).length;
+      this.statsEl.textContent = `\u5DF2\u7B54 ${answered}/${this.practiceIds.length}`;
+      return;
+    }
+    if (this.isPracticeSessionActive()) {
       this.statsEl.textContent = `\u2705 ${this.practiceCorrect}  \u274C ${this.practiceWrong}`;
       const answered = this.practiceCorrect + this.practiceWrong;
       if (answered > 0) {
@@ -7470,7 +7758,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
   }
   /** 重新计算筛选结果并定位指定题目的新位置（题目被筛掉时回退到第一题/空状态）。 */
   reFilterAndLocate(questionId) {
-    if (this.practiceActive || this.memoryActive) {
+    if (this.isPracticeSessionActive()) {
       const idx2 = this.filteredQuestions.findIndex((q) => q.id === questionId);
       this.currentIndex = idx2 >= 0 ? idx2 : 0;
       return;
@@ -7765,6 +8053,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       this.pruneMetaEntries();
       this.applyMetaToQuestions();
       this.exitRandomPractice();
+      this.exitFilterPractice();
       this.exitMemoryPractice();
       if (wasSwitching) {
         this.applyRestore(settings, loadResult.state);
@@ -7796,7 +8085,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
   }
   buildCurrentState() {
     let savedIndex = this.currentIndex;
-    if (this.practiceActive || this.memoryActive) {
+    if (this.isPracticeSessionActive()) {
       if (this.practiceFocusId) {
         const idx = this.applyFiltersTo(this.orderedQuestions).findIndex(
           (q) => q.id === this.practiceFocusId

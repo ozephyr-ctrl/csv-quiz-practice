@@ -38,6 +38,7 @@ import {
 import {
   ChoiceModal,
   TagPickerModal,
+  ExamResultModal,
   askResetChoice,
   askPrompt,
   askConflictMergeChoice,
@@ -47,6 +48,7 @@ import { fsrs, createEmptyCard, Rating, type Card } from "ts-fsrs";
 import Papa from "papaparse";
 import {
   computePracticeStats,
+  computeExamScore,
   buildDailySeries,
   collectDueLaterTodayIds,
   dateKey,
@@ -199,6 +201,7 @@ export class QuizView extends ItemView {
     this.stateManager.cancelScheduledSave();
     // 练习模式为临时会话：关闭前恢复常规位置，避免保存练习内的索引
     this.exitRandomPractice();
+    this.exitFilterPractice();
     this.exitMemoryPractice();
     if (this.textFilterTimer !== null) {
       window.clearTimeout(this.textFilterTimer);
@@ -1112,6 +1115,18 @@ export class QuizView extends ItemView {
       cls: "csv-quiz-practice-count",
     });
 
+    // 按当前筛选练习：当前筛选结果全集随机打乱，行为同普通刷题（即时反馈）
+    this.filterPracticeBtn = practiceRow.createEl("button", {
+      text: "📚 按当前筛选练习",
+      cls: "csv-quiz-btn csv-quiz-btn-sm csv-quiz-practice-btn",
+    });
+    this.filterPracticeBtn.addEventListener("click", () => {
+      this.toggleFilterPractice();
+    });
+    this.filterPracticeCountEl = practiceRow.createSpan({
+      cls: "csv-quiz-practice-count",
+    });
+
     // 记忆练习：FSRS 间隔重复，到期题优先 + 每日新题（受当前筛选影响）。
     // M3: memoryEnabled 关闭时不创建按钮（memoryBtn 保持 undefined，updatePracticeButton 已有保护）
     if (settings.memoryEnabled) {
@@ -1177,10 +1192,13 @@ export class QuizView extends ItemView {
    * 的常规筛选结果（与进入记忆练习的取池口径一致）。
    */
   private currentFilterScopeIds(): Set<string> {
-    const source =
-      this.practiceActive || this.memoryActive
-        ? this.applyFiltersTo(this.orderedQuestions)
-        : this.filteredQuestions;
+    // 到期是卡片属性而非答题记录属性：忽略「未答/已答」筛选，
+    // 否则已答过的到期卡片会被永久挡在复习池与统计之外（records 重置后突然“复活”）。
+    // 常规模式且未启用未答筛选时，filteredQuestions 就是完整筛选结果，直接复用避免重复全量过滤。
+    if (!this.isPracticeSessionActive() && this.filterUnanswered === "") {
+      return new Set(this.filteredQuestions.map((q) => q.id));
+    }
+    const source = this.applyFiltersTo(this.orderedQuestions, true);
     return new Set(source.map((q) => q.id));
   }
 
@@ -1229,6 +1247,8 @@ export class QuizView extends ItemView {
   private textFilterTimer: number | null = null;
   private practiceBtn!: HTMLButtonElement;
   private practiceCountEl!: HTMLElement;
+  private filterPracticeBtn!: HTMLButtonElement;
+  private filterPracticeCountEl!: HTMLElement;
   private memoryBtn!: HTMLButtonElement;
   private memoryCountEl!: HTMLElement;
   /** 练习面板（底部可展开控件，与筛选条件/标签分类同级）的容器与部件引用。 */
@@ -1247,6 +1267,12 @@ export class QuizView extends ItemView {
   /** 随机考试模式：考试集为临时会话，不持久化，重开面板回到常规模式。 */
   private practiceActive: boolean = false;
   private practiceIds: string[] = [];
+  /** 随机考试交卷后是否已揭示对错（结束后允许返回列表复盘错题）。 */
+  private examRevealed: boolean = false;
+  /** 按当前筛选练习模式：临时会话，题目为当前筛选全集（进入时随机打乱）。 */
+  private filterPracticeActive: boolean = false;
+  /** 本轮练习完成提示/评分是否已触发（防止答题完成与切题完成重复弹窗）。 */
+  private practiceRoundNotified: boolean = false;
   /** 进入练习前的常规模式定位题号，退出时据此恢复位置。 */
   private practiceFocusId: string | null = null;
   /** 记忆练习模式：练习集为临时会话，不持久化，重开面板回到常规模式。 */
@@ -1256,6 +1282,9 @@ export class QuizView extends ItemView {
   private memoryCards: Record<string, MemoryCard> = {};
   /** 防双开：首次重置确认框 await 期间禁止重复进入（M2）。 */
   private memoryEnabling: boolean = false;
+  /** 防双击竞态：进入随机考试/按筛选练习的保存编辑 await 期间禁止重复进入。 */
+  private practiceEnabling: boolean = false;
+  private filterEnabling: boolean = false;
   /** 每日新题配额：最近一次启用记忆练习的自然日（本地日期 "YYYY-MM-DD"）。 */
   private memoryNewDate: string = "";
   /** 每日新题配额：当日已取的新题数量。 */
@@ -1367,16 +1396,39 @@ export class QuizView extends ItemView {
     this.applyFiltersAndReset();
   }
 
+  /** 任一练习模式（随机考试 / 按筛选练习 / 记忆练习）是否处于活动会话。 */
+  private isPracticeSessionActive(): boolean {
+    return this.practiceActive || this.filterPracticeActive || this.memoryActive;
+  }
+
+  /** 随机考试进行中且尚未交卷：隐藏对错与正确答案，避免过程泄题。 */
+  private isExamAnswersHidden(): boolean {
+    return this.practiceActive && !this.examRevealed;
+  }
+
   /** 随机考试：按当前筛选条件从全部题目（不限未答）随机取设置题数作为考试集（不足自适应）。 */
   private async enableRandomPractice(): Promise<void> {
     // F3: 记忆练习确认弹窗 await 期间禁止进入随机考试，避免双模式并存
-    if (this.practiceActive || this.memoryEnabling) return;
+    if (
+      this.practiceActive ||
+      this.memoryEnabling ||
+      this.practiceEnabling ||
+      this.filterEnabling
+    ) {
+      return;
+    }
+    this.practiceEnabling = true;
     // 先保存编辑区未提交的修改（此时 filteredQuestions/currentIndex/编辑区 DOM 仍一致），
     // 再互斥退出另一练习模式——退出会重置列表与定位，之后保存会把编辑错位应用到别的题
-    await this.saveCurrentEdit();
+    try {
+      await this.saveCurrentEdit();
+    } finally {
+      this.practiceEnabling = false;
+    }
     if (this.isClosed) return;
     // 进入任一练习模式前互斥退出另一个
     if (this.memoryActive) this.exitMemoryPractice();
+    if (this.filterPracticeActive) this.exitFilterPractice();
 
     const pool = this.applyFiltersTo(this.orderedQuestions);
     if (pool.length === 0) {
@@ -1388,6 +1440,9 @@ export class QuizView extends ItemView {
     this.practiceFocusId = this.filteredQuestions[this.currentIndex]?.id ?? null;
     this.practiceIds = picked.map((q) => q.id);
     this.practiceActive = true;
+    // 新一场考试：对错在交卷前隐藏，交卷后揭示
+    this.examRevealed = false;
+    this.practiceRoundNotified = false;
     // 练习内已答集合：本次会话从零开始
     this.practiceAnswered = new Set();
     this.practiceCorrect = 0;
@@ -1408,6 +1463,8 @@ export class QuizView extends ItemView {
     this.practiceActive = false;
     this.practiceIds = [];
     this.practiceAnswered.clear();
+    this.examRevealed = false;
+    this.practiceRoundNotified = false;
 
     this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
     if (this.practiceFocusId) {
@@ -1441,6 +1498,92 @@ export class QuizView extends ItemView {
   }
 
   /**
+   * 按当前筛选练习：把当前筛选结果的全部题目随机打乱后作为一个临时练习集，
+   * 行为与普通刷题一致（即时反馈），不限制随机考试题数。
+   */
+  private async enableFilterPractice(): Promise<void> {
+    if (
+      this.filterPracticeActive ||
+      this.memoryEnabling ||
+      this.practiceEnabling ||
+      this.filterEnabling
+    ) {
+      return;
+    }
+    this.filterEnabling = true;
+    // 与随机考试一致：先保存编辑区，再退出其它练习模式，避免保存错位
+    try {
+      await this.saveCurrentEdit();
+    } finally {
+      this.filterEnabling = false;
+    }
+    if (this.isClosed) return;
+    if (this.practiceActive) this.exitRandomPractice();
+    if (this.memoryActive) this.exitMemoryPractice();
+
+    const pool = this.applyFiltersTo(this.orderedQuestions);
+    if (pool.length === 0) {
+      new Notice("当前筛选条件下没有题目，无法开始练习");
+      return;
+    }
+
+    const picked = shuffle(pool);
+    this.practiceFocusId = this.filteredQuestions[this.currentIndex]?.id ?? null;
+    this.practiceIds = picked.map((q) => q.id);
+    this.filterPracticeActive = true;
+    this.practiceRoundNotified = false;
+    this.practiceAnswered = new Set();
+    this.practiceCorrect = 0;
+    this.practiceWrong = 0;
+    this.filteredQuestions = picked;
+    this.currentIndex = 0;
+    this.currentShuffledQId = null;
+    this.cancelAutoNext();
+    this.renderQuestion();
+    this.saveState();
+    new Notice(`按当前筛选练习开始：${picked.length} 题`);
+  }
+
+  /** 退出按当前筛选练习：恢复常规筛选结果并定位到进入前的位置。不渲染、不保存。 */
+  private exitFilterPractice(): void {
+    if (!this.filterPracticeActive) return;
+    this.filterPracticeActive = false;
+    this.practiceIds = [];
+    this.practiceAnswered.clear();
+    this.practiceRoundNotified = false;
+
+    this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
+    if (this.practiceFocusId) {
+      const idx = this.filteredQuestions.findIndex(
+        (q) => q.id === this.practiceFocusId
+      );
+      if (idx >= 0) {
+        this.currentIndex = idx;
+      } else if (this.filteredQuestions.length > 0) {
+        this.currentIndex = 0;
+      } else {
+        this.currentIndex = -1;
+      }
+    } else {
+      this.currentIndex = this.filteredQuestions.length > 0 ? 0 : -1;
+    }
+    this.practiceFocusId = null;
+    this.currentShuffledQId = null;
+    this.cancelAutoNext();
+  }
+
+  private toggleFilterPractice(): void {
+    if (this.filterPracticeActive) {
+      this.exitFilterPractice();
+      this.renderQuestion();
+      this.saveState();
+      new Notice("已退出按当前筛选练习");
+    } else {
+      void this.enableFilterPractice();
+    }
+  }
+
+  /**
    * 记忆练习：到期题（FSRS due 已到）按紧迫度优先 + 每日新题（随机取），
    * 均受当前筛选条件影响。练习集为临时会话，不持久化。
    * 到期与新题均为空但今日还有预计到期的题时，询问是否提前复习（startMemorySession）。
@@ -1452,7 +1595,14 @@ export class QuizView extends ItemView {
       return;
     }
     // M2: 防双开——确认框 await 期间禁止重复进入
-    if (this.memoryActive || this.memoryEnabling) return;
+    if (
+      this.memoryActive ||
+      this.memoryEnabling ||
+      this.practiceEnabling ||
+      this.filterEnabling
+    ) {
+      return;
+    }
     this.memoryEnabling = true;
     // 本轮（本次进入记忆练习）重置「提前复习」询问标记
     this.memoryEarlyAsked = false;
@@ -1463,6 +1613,7 @@ export class QuizView extends ItemView {
       if (this.isClosed) return;
       // 进入任一练习模式前互斥退出另一个
       if (this.practiceActive) this.exitRandomPractice();
+      if (this.filterPracticeActive) this.exitFilterPractice();
 
       // 首次启用检测：已有答题进度但无记忆数据 → 需重置进度才能开始。
       // C-1: memoryInitialized 已置位（用户显式删过卡片或已判分过）则不再弹提示
@@ -1488,6 +1639,7 @@ export class QuizView extends ItemView {
         // F3: 弹窗 await 期间用户可能已进入随机考试（当时 practiceActive 仍为 false），
         // 确认后退出它，由记忆练习接管（与"进入任一练习模式前互斥退出另一个"语义一致）
         if (this.practiceActive) this.exitRandomPractice();
+        if (this.filterPracticeActive) this.exitFilterPractice();
         // 清空进度（与 resetProgress 的清空逻辑等价；不弹提示、不退出面板）
         // L5: 此重置仅清内存进度字段；sidecar 中历史 wrong 覆盖保留（这些题确实答错过，
         // 错题筛选仍应命中），如需全清请用设置页「全部重置」
@@ -1508,7 +1660,8 @@ export class QuizView extends ItemView {
         this.cancelAutoNext();
       }
 
-      const pool = this.applyFiltersTo(this.orderedQuestions);
+      // 记忆练习范围忽略「未答/已答」筛选：到期题与新题都按记忆卡片调度选取
+      const pool = this.applyFiltersTo(this.orderedQuestions, true);
       const now = new Date();
       // 到期题：有卡片且 due <= 当前时间（非法 due 视为未到期），按 due 升序（最紧迫在前）
       const due = pool
@@ -1572,6 +1725,7 @@ export class QuizView extends ItemView {
         if (res !== "start") return;
         // F3: 弹窗 await 期间用户可能已进入随机考试，确认后退出它，由记忆练习接管
         if (this.practiceActive) this.exitRandomPractice();
+        if (this.filterPracticeActive) this.exitFilterPractice();
         this.startMemorySession(
           [],
           [],
@@ -1616,6 +1770,7 @@ export class QuizView extends ItemView {
     this.practiceAnswered = new Set();
     this.practiceCorrect = 0;
     this.practiceWrong = 0;
+    this.practiceRoundNotified = false;
     // 练习集来源标记：到期题=复习，新题=新，提前复习题=提前
     this.practiceSource = {};
     for (const q of review) this.practiceSource[q.id] = "review";
@@ -1657,7 +1812,7 @@ export class QuizView extends ItemView {
     }
     const inSession = new Set(this.memoryIds);
     const early = this.earlyDueQuestions(
-      this.applyFiltersTo(this.orderedQuestions),
+      this.applyFiltersTo(this.orderedQuestions, true),
       new Date()
     ).filter((q) => !inSession.has(q.id));
     if (early.length === 0) return;
@@ -1682,6 +1837,8 @@ export class QuizView extends ItemView {
     this.filteredQuestions.push(...add);
     this.memoryIds.push(...add.map((q) => q.id));
     for (const q of add) this.practiceSource[q.id] = "early";
+    // 追加了新一轮题目：允许答完后再提示一次完成（提前复习询问由 memoryEarlyAsked 防重）
+    this.practiceRoundNotified = false;
     const idx = this.filteredQuestions.findIndex((q) => q.id === add[0].id);
     if (idx < 0) return;
     this.currentIndex = idx;
@@ -1692,10 +1849,35 @@ export class QuizView extends ItemView {
     new Notice(`已加入 ${add.length} 题提前复习`);
   }
 
-  /** 练习模式本轮全部答完：提示完成；记忆练习触发提前复习询问（剩余为 0 且今日还有预计到期题）。 */
+  /** 练习模式本轮全部答完：提示完成；随机考试揭示对错并弹评分；记忆练习触发提前复习询问。 */
   private onPracticeRoundComplete(): void {
+    // 答题完成与切题完成可能先后触发，只处理一次
+    if (this.practiceRoundNotified) return;
+    this.practiceRoundNotified = true;
+    if (this.practiceActive) {
+      // 交卷：先揭示对错（允许关闭弹窗后返回列表复盘），再弹评分
+      this.examRevealed = true;
+      this.renderQuestion();
+      this.updateProgress();
+      const score = computeExamScore(
+        this.practiceIds.length,
+        this.practiceCorrect
+      );
+      new ExamResultModal(this.app, score).open();
+      return;
+    }
     new Notice(`练习完成！共 ${this.filteredQuestions.length} 题`);
     if (this.memoryActive) void this.askEarlyReviewOnComplete();
+  }
+
+  /** 答题后检查本轮练习是否已全部完成（不依赖用户再点“下一题”）。 */
+  private maybeCompletePracticeSession(): void {
+    if (!this.practiceActive && !this.filterPracticeActive) return;
+    if (this.filteredQuestions.length === 0) return;
+    if (!this.filteredQuestions.every((q) => this.practiceAnswered.has(q.id))) {
+      return;
+    }
+    this.onPracticeRoundComplete();
   }
 
   /** 退出记忆练习模式：恢复常规筛选结果并定位到进入前的位置。不渲染、不保存，由调用方决定。 */
@@ -1737,7 +1919,7 @@ export class QuizView extends ItemView {
     }
   }
 
-  /** 同步练习按钮（随机/记忆）的文案/高亮与完成计数。 */
+  /** 同步练习按钮（随机考试/按筛选练习/记忆练习）的文案/高亮与完成计数。 */
   private updatePracticeButton(): void {
     if (!this.practiceBtn) return;
     if (this.practiceActive) {
@@ -1753,6 +1935,24 @@ export class QuizView extends ItemView {
       );
       this.practiceBtn.removeClass("csv-quiz-practice-btn-active");
       this.practiceCountEl.setText("");
+    }
+
+    // 按当前筛选练习：活动时显示完成计数与退出入口
+    if (this.filterPracticeBtn) {
+      if (this.filterPracticeActive) {
+        this.filterPracticeBtn.setText("退出按筛选练习");
+        this.filterPracticeBtn.addClass("csv-quiz-practice-btn-active");
+        const answered = this.practiceIds.filter((id) =>
+          this.practiceAnswered.has(id)
+        ).length;
+        this.filterPracticeCountEl.setText(
+          ` 已完成 ${answered}/${this.practiceIds.length}`
+        );
+      } else {
+        this.filterPracticeBtn.setText("📚 按当前筛选练习");
+        this.filterPracticeBtn.removeClass("csv-quiz-practice-btn-active");
+        this.filterPracticeCountEl.setText("");
+      }
     }
 
     // 记忆练习按钮：活动时显示完成计数，非活动时显示今日待复习题数
@@ -1877,8 +2077,15 @@ export class QuizView extends ItemView {
     }
   }
 
-  /** 按当前全部筛选条件（含自由文本）过滤题目。 */
-  private applyFiltersTo(questions: Question[]): Question[] {
+  /**
+   * 按当前全部筛选条件（含自由文本）过滤题目。
+   * ignoreUnanswered=true 时忽略「未答/已答」筛选：记忆练习的到期题/新题
+   * 与练习面板到期统计只应关心卡片调度，不能因为题答过就从复习池消失。
+   */
+  private applyFiltersTo(
+    questions: Question[],
+    ignoreUnanswered: boolean = false
+  ): Question[] {
     return filterQuestions(
       questions,
       this.filterTags,
@@ -1891,14 +2098,14 @@ export class QuizView extends ItemView {
       this.filterRepeat,
       this.filterWrong,
       this.filterText,
-      this.filterUnanswered,
+      ignoreUnanswered ? "" : this.filterUnanswered,
       this.answeredQuestions
     );
   }
 
   private reFilterForNavigation(): void {
     // 练习模式：练习集为固定随机快照（≤设置题数），导航时不得重建为完整筛选结果
-    if (this.practiceActive || this.memoryActive) return;
+    if (this.isPracticeSessionActive()) return;
     const prevId = this.filteredQuestions[this.currentIndex]?.id;
     this.filteredQuestions = this.applyFiltersTo(this.orderedQuestions);
     if (prevId) {
@@ -1915,6 +2122,9 @@ export class QuizView extends ItemView {
     // 练习模式下修改筛选条件 → 自动退出练习，再按新筛选正常应用
     if (this.practiceActive) {
       this.exitRandomPractice();
+    }
+    if (this.filterPracticeActive) {
+      this.exitFilterPractice();
     }
     if (this.memoryActive) {
       this.exitMemoryPractice();
@@ -1981,7 +2191,7 @@ export class QuizView extends ItemView {
     // 必须用 !== undefined 判断，否则空字符串会被当作"未答"导致判错状态丢失。
     // 练习模式：旧题（本次会话未答）按未答状态渲染，允许继续练习；
     // 本次会话已答的题才恢复判定展示。常规模式维持原行为。
-    const inPractice = this.practiceActive || this.memoryActive;
+    const inPractice = this.isPracticeSessionActive();
     const prevAnswer = inPractice
       ? this.practiceAnswered.has(question.id)
         ? this.answeredQuestions[question.id]
@@ -2074,10 +2284,13 @@ export class QuizView extends ItemView {
       const optDiv = optionsDiv.createDiv(
         "csv-quiz-option" +
           (isSelected ? " csv-quiz-option-selected" : "") +
-          (this.showingAnswer && isAnswerKey
+          (this.showingAnswer && !this.isExamAnswersHidden() && isAnswerKey
             ? " csv-quiz-option-correct"
             : "") +
-          (this.showingAnswer && isSelected && !isAnswerKey
+          (this.showingAnswer &&
+          !this.isExamAnswersHidden() &&
+          isSelected &&
+          !isAnswerKey
             ? " csv-quiz-option-wrong"
             : "")
       );
@@ -2164,6 +2377,14 @@ export class QuizView extends ItemView {
       this.cardPanelOpen = !this.cardPanelOpen;
       body.classList.toggle("csv-quiz-card-body-hidden", !this.cardPanelOpen);
     });
+    // 随机考试进行中：作答会改变卡片状态（如再学习/到期），展示会泄露本题对错
+    if (this.isExamAnswersHidden()) {
+      body.createEl("span", {
+        text: "考试结束后显示记忆卡片",
+        cls: "csv-quiz-card-empty",
+      });
+      return;
+    }
     const card = this.memoryCards[question.id];
     if (!card) {
       body.createEl("span", {
@@ -2206,6 +2427,15 @@ export class QuizView extends ItemView {
     this.feedbackArea.empty();
 
     if (!this.showingAnswer) return;
+
+    // 随机考试进行中：不显示对错与正确答案，仅提示答案已记录
+    if (this.isExamAnswersHidden()) {
+      this.feedbackArea.createDiv({
+        text: "已作答",
+        cls: "csv-quiz-feedback-text",
+      });
+      return;
+    }
 
     const multi = this.isMultiChoice(question);
     const answerKeys = multi ? question.answer.split("") : [question.answer];
@@ -2307,9 +2537,10 @@ export class QuizView extends ItemView {
 
     this.renderQuestion();
     this.updateProgress();
+    this.maybeCompletePracticeSession();
 
     const settings = this.getSettings();
-    if (isCorrect) {
+    if (isCorrect && !this.practiceActive) {
       if (settings.autoNextDelay > 0) {
         // M1: 记录本次作答题 id，计时器回调校验题目未变化才跳转，防止
         // saveCurrentEdit 的 await 窗口内用户滑动切题后出现"幽灵自动跳题"
@@ -2348,13 +2579,13 @@ export class QuizView extends ItemView {
     if (prev === undefined) pruneDailyAnswers(this.dailyAnswers, new Date());
     this.practiceStatsDirty = true;
     // 练习模式：记录本次会话已答（渲染/计数/完成检测均基于 practiceAnswered）
-    if (this.practiceActive || this.memoryActive) {
+    if (this.isPracticeSessionActive()) {
       this.practiceAnswered.add(question.id);
     }
 
     if (isCorrect) {
       // 练习模式只累计本次会话统计，不污染全局统计
-      if (this.practiceActive || this.memoryActive) {
+      if (this.isPracticeSessionActive()) {
         this.practiceCorrect++;
       } else {
         this.correctCount++;
@@ -2364,7 +2595,7 @@ export class QuizView extends ItemView {
         this.saveQuestionMeta(question, ["wrong"]);
       }
     } else {
-      if (this.practiceActive || this.memoryActive) {
+      if (this.isPracticeSessionActive()) {
         this.practiceWrong++;
       } else {
         this.wrongCount++;
@@ -2528,6 +2759,7 @@ export class QuizView extends ItemView {
       return;
     }
     if (this.practiceActive) this.exitRandomPractice();
+    if (this.filterPracticeActive) this.exitFilterPractice();
     if (this.memoryActive) this.exitMemoryPractice();
     const currentId = this.filteredQuestions[this.currentIndex]?.id ?? null;
     this.rebuildOrderAndLocate(this.getSettings().randomOrder, currentId);
@@ -2594,6 +2826,7 @@ export class QuizView extends ItemView {
     if (choice === "order") {
       // 退出练习模式（与 records/cards/all 分支一致），避免练习标志残留
       if (this.practiceActive) this.exitRandomPractice();
+      if (this.filterPracticeActive) this.exitFilterPractice();
       if (this.memoryActive) this.exitMemoryPractice();
       // 随机题目顺序开启时重置为 CSV 顺序会与之冲突：自动关闭该设置并保存
       let autoOff = false;
@@ -2620,8 +2853,9 @@ export class QuizView extends ItemView {
       );
       return;
     }
-    // 重置进度时退出练习模式（记忆/随机均为临时会话），避免残留练习集状态
+    // 重置进度时退出练习模式（记忆/随机/按筛选均为临时会话），避免残留练习集状态
     if (this.practiceActive) this.exitRandomPractice();
+    if (this.filterPracticeActive) this.exitFilterPractice();
     if (this.memoryActive) this.exitMemoryPractice();
     // M2: 全部重置对齐设置页语义（main.ts clearState + refreshQuiz）：清 sidecar 的
     // state 与 meta（保留文件）并重读内容源，meta 覆盖失效、筛选回默认值。
@@ -2636,6 +2870,8 @@ export class QuizView extends ItemView {
       this.wrongCount = 0;
       this.answeredQuestions = {};
       this.dailyAnswers = {};
+      // records 不清 memoryCards（“仅清理刷题记录”语义）；到期统计与记忆练习取池
+      // 已忽略「未答/已答」筛选，避免清空答题记录后已答过的到期卡片突然全部涌入。
     }
     if (choice !== "records") {
       this.memoryCards = {};
@@ -2711,11 +2947,13 @@ export class QuizView extends ItemView {
     // 键盘快捷键引用重建（仅收藏/掌握/重复三项有快捷键，错题无）
     this.markCheckboxes = {};
 
+    const examHidden = this.isExamAnswersHidden();
     const fields = [
       { key: "favorite", label: "收藏", value: question.favorite },
       { key: "mastered", label: "掌握", value: question.mastered },
       { key: "repeat", label: "重复", value: question.repeat },
-      { key: "wrong", label: "错题", value: question.wrong },
+      // 随机考试进行中隐藏错题标记：答错会自动置位，显示会泄露本题对错
+      { key: "wrong", label: "错题", value: examHidden ? "" : question.wrong },
     ];
 
     for (const f of fields) {
@@ -2725,6 +2963,10 @@ export class QuizView extends ItemView {
         attr: { "data-field": f.key },
       });
       cb.checked = f.value === "1";
+      if (examHidden && f.key === "wrong") {
+        cb.disabled = true;
+        labelEl.setAttribute("title", "随机考试结束后显示错题标记");
+      }
       if (f.key === "favorite" || f.key === "mastered" || f.key === "repeat") {
         this.markCheckboxes[f.key] = cb;
       }
@@ -2913,9 +3155,10 @@ export class QuizView extends ItemView {
 
     this.renderQuestion();
     this.updateProgress();
+    this.maybeCompletePracticeSession();
 
     const settings = this.getSettings();
-    if (isCorrect) {
+    if (isCorrect && !this.practiceActive) {
       if (settings.autoNextDelay > 0) {
         // M1: 记录本次作答题 id，计时器回调校验题目未变化才跳转。
         // 注意：此调度位于 saveCurrentEdit 的 await 之后，若用户在等待窗口内
@@ -2970,7 +3213,7 @@ export class QuizView extends ItemView {
           this.currentIndex = newIdx;
           // 练习模式：练习集全部答完时提示完成（按本次会话已答集合判断）
           if (
-            (this.practiceActive || this.memoryActive) &&
+            this.isPracticeSessionActive() &&
             this.filteredQuestions.every((q) => this.practiceAnswered.has(q.id))
           ) {
             this.onPracticeRoundComplete();
@@ -3122,7 +3365,7 @@ export class QuizView extends ItemView {
         const id = this.filteredQuestions[i].id;
         // 练习模式：本次会话未答的题才算未答（旧题允许继续练习）；常规模式按答题记录判断
         const unanswered =
-          this.practiceActive || this.memoryActive
+          this.isPracticeSessionActive()
             ? !this.practiceAnswered.has(id)
             : this.answeredQuestions[id] === undefined;
         if (unanswered) {
@@ -3135,7 +3378,7 @@ export class QuizView extends ItemView {
         }
       }
       if (
-        (this.practiceActive || this.memoryActive) &&
+        this.isPracticeSessionActive() &&
         this.filteredQuestions.every((q) => this.practiceAnswered.has(q.id))
       ) {
         this.onPracticeRoundComplete();
@@ -3245,10 +3488,21 @@ export class QuizView extends ItemView {
     // L4: 防重入——弹窗已打开时忽略再次点击
     if (this.progressModalOpen) return;
     this.progressModalOpen = true;
+    // 随机考试整场（含交卷后的复盘期）都只展示本场已答：
+    // 全局答题记录可能包含考前旧答案，会与结果弹窗的会话口径分数矛盾。
+    const answeredForModal = this.practiceActive
+      ? Object.fromEntries(
+          [...this.practiceAnswered].map((id) => [
+            id,
+            this.answeredQuestions[id] ?? "",
+          ])
+        )
+      : this.answeredQuestions;
     const modal = new ProgressModal(this.app, {
       questions: this.filteredQuestions,
-      answeredQuestions: this.answeredQuestions,
+      answeredQuestions: answeredForModal,
       memoryCards: this.memoryCards,
+      maskCorrectness: this.isExamAnswersHidden(),
       currentId: this.filteredQuestions[this.currentIndex]?.id ?? null,
       onJump: (id: string) => {
         // 与其他切题入口一致：先保存编辑区未提交的修改再跳转，避免重渲染后静默丢失
@@ -3283,8 +3537,17 @@ export class QuizView extends ItemView {
         : 0;
     this.progressEl.textContent = `进度: ${current}/${total}`;
 
+    // 随机考试进行中：只显示已答数量，隐藏对错与正确率（交卷后揭示）
+    if (this.isExamAnswersHidden()) {
+      const answered = this.practiceIds.filter((id) =>
+        this.practiceAnswered.has(id)
+      ).length;
+      this.statsEl.textContent = `已答 ${answered}/${this.practiceIds.length}`;
+      return;
+    }
+
     // 练习模式：显示本次会话统计（不展示全局统计）
-    if (this.practiceActive || this.memoryActive) {
+    if (this.isPracticeSessionActive()) {
       this.statsEl.textContent = `✅ ${this.practiceCorrect}  ❌ ${this.practiceWrong}`;
       const answered = this.practiceCorrect + this.practiceWrong;
       if (answered > 0) {
@@ -3305,7 +3568,7 @@ export class QuizView extends ItemView {
   /** 重新计算筛选结果并定位指定题目的新位置（题目被筛掉时回退到第一题/空状态）。 */
   private reFilterAndLocate(questionId: string): void {
     // 练习模式：练习集为固定随机快照，只在练习集内定位，不重建列表
-    if (this.practiceActive || this.memoryActive) {
+    if (this.isPracticeSessionActive()) {
       const idx = this.filteredQuestions.findIndex((q) => q.id === questionId);
       this.currentIndex = idx >= 0 ? idx : 0;
       return;
@@ -3707,6 +3970,7 @@ export class QuizView extends ItemView {
       // H1: 刷新会重建题库与进度，必须复位练习模式标志，避免常规模式答题误写记忆卡片
       // （exit* 内部有 active 检查，未激活时无副作用；此处 orderedQuestions 已重建，applyFiltersTo 结果会被下方重置覆盖）
       this.exitRandomPractice();
+      this.exitFilterPractice();
       this.exitMemoryPractice();
 
       if (wasSwitching) {
@@ -3754,7 +4018,7 @@ export class QuizView extends ItemView {
     // 练习模式为临时会话：保存时把 currentIndex 换算回常规模式的位置，
     // 重开面板后恢复到练习前的位置
     let savedIndex = this.currentIndex;
-    if (this.practiceActive || this.memoryActive) {
+    if (this.isPracticeSessionActive()) {
       if (this.practiceFocusId) {
         const idx = this.applyFiltersTo(this.orderedQuestions).findIndex(
           (q) => q.id === this.practiceFocusId

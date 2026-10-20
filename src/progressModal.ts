@@ -8,6 +8,8 @@ export interface ProgressModalOptions {
   memoryCards: Record<string, MemoryCard>;
   currentId: string | null; // 当前题 id(高亮用)
   onJump: (id: string) => void; // 点击跳转回调
+  /** 随机考试进行中（尚未交卷）：隐藏对错、正确率、错题标记与记忆状态，避免泄露答案。 */
+  maskCorrectness?: boolean;
 }
 
 /** 刷题进度弹窗：展示当前列表每道题的答题/记忆状态，点击行跳转。
@@ -31,6 +33,7 @@ export class ProgressModal extends Modal {
   onOpen(): void {
     this.contentEl.empty();
     const { questions, answeredQuestions, memoryCards, currentId } = this.opts;
+    const maskCorrectness = this.opts.maskCorrectness === true;
     const now = new Date().getTime();
 
     // 汇总统计容器先创建（文本在统计循环累计完成后设置）；列表在 summary 之后
@@ -52,6 +55,8 @@ export class ProgressModal extends Modal {
       const a = answeredQuestions[q.id];
       if (a !== undefined) {
         answered++;
+        // 随机考试进行中不计算/展示对错，避免通过汇总泄露成绩
+        if (maskCorrectness) continue;
         const normA = normalizeAnswerValue(a);
         const normAns = normalizeAnswerValue(q.answer);
         normCache.set(`u:${q.id}`, normA);
@@ -64,10 +69,12 @@ export class ProgressModal extends Modal {
 
     // 最后设置汇总统计文本（基于当前列表全部题目；空列表分支同样适用）
     summary.setText(
-      `共 ${questions.length} 题 · 已答 ${answered} · 未答 ${questions.length - answered} · 答对 ${correct} · 答错 ${answered - correct}` +
-        (answered > 0
-          ? ` · 正确率 ${((correct / answered) * 100).toFixed(1)}%`
-          : "")
+      maskCorrectness
+        ? `共 ${questions.length} 题 · 已答 ${answered} · 未答 ${questions.length - answered}`
+        : `共 ${questions.length} 题 · 已答 ${answered} · 未答 ${questions.length - answered} · 答对 ${correct} · 答错 ${answered - correct}` +
+            (answered > 0
+              ? ` · 正确率 ${((correct / answered) * 100).toFixed(1)}%`
+              : "")
     );
 
     if (questions.length === 0) {
@@ -95,6 +102,12 @@ export class ProgressModal extends Modal {
           text: "未答",
           cls: "csv-quiz-progress-status csv-quiz-progress-unanswered",
         });
+      } else if (maskCorrectness) {
+        // 随机考试进行中：只显示已答，不泄露对错
+        row.createEl("span", {
+          text: "已答",
+          cls: "csv-quiz-progress-status csv-quiz-progress-masked",
+        });
       } else if (
         normCache.get(`u:${q.id}`) === normCache.get(`c:${q.id}`)
       ) {
@@ -110,7 +123,10 @@ export class ProgressModal extends Modal {
       }
       // 记忆状态
       const card = memoryCards[q.id];
-      if (card) {
+      if (maskCorrectness) {
+        // 随机考试进行中：卡片会因本次作答进入再学习/到期，展示状态会间接泄露对错
+        row.createEl("span", { text: "—", cls: "csv-quiz-progress-memory" });
+      } else if (card) {
         const dueT = new Date(card.due).getTime();
         const dueText = Number.isNaN(dueT)
           ? "—"
@@ -127,11 +143,11 @@ export class ProgressModal extends Modal {
       } else {
         row.createEl("span", { text: "—", cls: "csv-quiz-progress-memory" });
       }
-      // 标记
+      // 标记（考试进行中隐藏错题标记，答错会自动置位会泄露对错）
       const flags: string[] = [];
       if (q.favorite === "1") flags.push("★");
       if (q.mastered === "1") flags.push("✓");
-      if (q.wrong === "1") flags.push("✗");
+      if (!maskCorrectness && q.wrong === "1") flags.push("✗");
       if (flags.length > 0) {
         row.createEl("span", {
           text: flags.join(" "),

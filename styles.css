@@ -900,6 +900,9 @@
 .csv-quiz-progress-unanswered {
   color: var(--text-muted);
 }
+.csv-quiz-progress-masked {
+  color: var(--text-muted);
+}
 .csv-quiz-progress-memory {
   flex-shrink: 0;
   font-size: 12px;
@@ -1082,5 +1085,115 @@
 
   .csv-quiz-chart-canvas {
     height: 170px;
+  }
+}
+
+/* 随机考试结果弹窗 */
+.csv-quiz-exam-result {
+  text-align: center;
+  padding: 4px 0 2px;
+}
+
+.csv-quiz-exam-result-score {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 6px;
+  margin: 4px 0 8px;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.csv-quiz-exam-result-correct {
+  font-size: 3rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text-normal);
+}
+
+.csv-quiz-exam-result-slash {
+  font-size: 1.5rem;
+  font-weight: 400;
+  color: var(--text-faint);
+}
+
+.csv-quiz-exam-result-total {
+  font-size: 1.5rem;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.csv-quiz-exam-result-accuracy {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  margin-bottom: 14px;
+  padding: 3px 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 999px;
+  background: var(--background-secondary);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.csv-quiz-exam-result-accuracy-value {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  /* --text-accent 随主题明暗自动调整，比硬编码颜色更稳 */
+  color: var(--text-accent);
+}
+
+/* 同时带 .csv-quiz-modal-message：这里覆盖段落外边距与对齐 */
+.csv-quiz-exam-result-meta {
+  margin: 0 0 18px;
+  padding: 0;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.csv-quiz-exam-result-right {
+  font-weight: 600;
+  color: var(--color-green, #4caf50);
+}
+
+.csv-quiz-exam-result-wrong {
+  font-weight: 600;
+  color: var(--color-red, #f44336);
+}
+
+.csv-quiz-exam-result-actions {
+  display: flex;
+  justify-content: center;
+}
+
+.csv-quiz-exam-result-actions .csv-quiz-btn {
+  width: 100%;
+  justify-content: center;
+  min-height: 42px;
+}
+
+@media (max-width: 600px) {
+  .csv-quiz-exam-result {
+    padding-top: 0;
+  }
+
+  .csv-quiz-exam-result-correct {
+    font-size: 2.5rem;
+  }
+
+  .csv-quiz-exam-result-slash,
+  .csv-quiz-exam-result-total {
+    font-size: 1.3rem;
+  }
+
+  .csv-quiz-exam-result-accuracy {
+    margin-bottom: 12px;
+  }
+
+  .csv-quiz-exam-result-meta {
+    margin-bottom: 16px;
   }
 }

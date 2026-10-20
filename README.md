@@ -84,12 +84,14 @@ Each question bank has a same-name state file next to it (`题库.csv.sidecar.js
 
 ### 练习模式 / Practice Modes
 
-- **随机考试**：按当前筛选条件从**全部题目**（不限未答）随机抽取作为考试集，题数可在设置中修改（默认 100，不足自适应）
-  **Random exam**: pick a configurable number of questions (default 100, respecting current filters, answered or not) as an exam set
+- **随机考试**：按当前筛选条件从**全部题目**（不限未答）随机抽取作为考试集，题数可在设置中修改（默认 100，不足自适应）；答题过程中**不显示对错与正确答案**，全部答完后弹出评分（每题 1 分），关闭评分后可继续在题目列表/题目间复盘错题，退出考试模式前不会自动离开
+  **Random exam**: pick a configurable number of questions (default 100, respecting current filters, answered or not) as an exam set. Correctness and answers stay hidden during the exam; after all questions are answered a score dialog appears (1 point per question). Closing it keeps the exam session open for review until you exit
+- **按当前筛选练习**：把当前筛选结果中的**全部题目**随机打乱后作为一个练习集，不限制题数，答题过程与普通刷题一致（即时反馈对错）
+  **Practice current filter**: shuffle all questions matching the current filters into one session (no question-count cap), with instant answer feedback like normal practice
 - **记忆练习（FSRS 间隔重复）**：基于记忆曲线的智能复习
   **Memory practice (FSRS spaced repetition)**: smart review based on memory curve
-  - 选题 = 到期复习题（按紧迫度排序）+ 每日新题（数量可配置，按自然日累计，每题库独立配额）
-    Practice set = due reviews (sorted by urgency) + daily new questions (configurable quota, per-day, per-bank)
+  - 选题 = 到期复习题（按紧迫度排序）+ 每日新题（数量可配置，按自然日累计，每题库独立配额）；到期/新题池忽略「未答/已答」筛选（其它筛选仍生效），避免答过的到期卡片被永久排除
+    Practice set = due reviews (sorted by urgency) + daily new questions (configurable quota, per-day, per-bank). The due/new pool ignores the answered/unanswered filter (other filters still apply), so reviewed cards cannot be silently excluded forever
   - 答对按 FSRS 拉长复习间隔，答错进入再学习并在当天重现
     Correct answers extend intervals via FSRS; mistakes trigger relearning and reappear the same day
   - 练习集中显著标明题目来源：🆕 新题 / 🔁 复习 / ⚡ 提前复习
@@ -146,8 +148,8 @@ Each question bank has a same-name state file next to it (`题库.csv.sidecar.js
   Resumes from where you left off after reopening Obsidian
 - **多题库切换**：切换题库路径时保留各自进度，切换前自动落盘；有进度的题库切换时弹轻量确认
   **Multi-bank switching**: each bank keeps its own progress, flushed before switching; a light confirmation appears when switching away from a bank with progress
-- **分项重置进度**：重置时可选「仅清理刷题记录 / 仅删除记忆卡片 / 重置题目顺序 / 全部重置」，筛选条件保留；全部重置会清空状态标记并重读题库
-  **Selective reset**: choose to clear answer records only, memory cards only, reset question order, or everything (filters preserved); a full reset also clears state flags and reloads the bank
+- **分项重置进度**：重置时可选「仅清理刷题记录 / 仅删除记忆卡片 / 重置题目顺序 / 全部重置」，筛选条件保留；全部重置会清空状态标记并重读题库。「仅清理刷题记录」保留记忆卡片，到期统计与记忆练习不受「未答/已答」筛选影响
+  **Selective reset**: choose to clear answer records only, memory cards only, reset question order, or everything (filters preserved); a full reset also clears state flags and reloads the bank. "Clear records only" keeps memory cards; due stats and memory practice ignore the answered/unanswered filter
 
 ---
 
@@ -158,6 +160,7 @@ Each question bank has a same-name state file next to it (`题库.csv.sidecar.js
 | CSV 文件路径 / Bank Path | 题库路径（.csv 或编译产物 .cqv），下方展示对应状态文件路径 / Path to the bank (.csv or .cqv); the corresponding state file path is shown below |
 | 随机题目顺序 / Random Order | 每次加载时随机排列题目 |
 | 随机选项顺序 / Random Options | 每题选项顺序随机 |
+| 随机考试题数 / Random Exam Count | 随机考试从当前筛选范围抽取的题数（默认 100，不足时取全部） |
 | 答对自动跳转延迟 / Auto-Advance Delay | 答对后等待秒数，0 = 不自动（秒 / seconds） |
 | 默认展开筛选栏 / Filter Panel Open | 打开面板时筛选栏默认展开 |
 | 默认展开编辑栏 / Edit Panel Open | 打开面板时编辑栏默认展开 |

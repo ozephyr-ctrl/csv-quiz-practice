@@ -354,3 +354,89 @@ export function askPrompt(
   modal.open();
   return modal.promise;
 }
+
+export interface ExamResultModalOptions {
+  /** 本轮题目总数（每题 1 分）。 */
+  total: number;
+  /** 答对题数。 */
+  correct: number;
+  /** 正确率，0-100。 */
+  accuracy: number;
+}
+
+/**
+ * 随机考试结束后的结果弹窗。纯展示：点击「查看结果」或按 Esc / 点遮罩关闭，
+ * 关闭后由调用方回到考试复盘状态，因此不需要 Promise。
+ */
+export class ExamResultModal extends Modal {
+  private readonly opts: ExamResultModalOptions;
+
+  constructor(app: App, opts: ExamResultModalOptions) {
+    super(app);
+    this.opts = opts;
+  }
+
+  onOpen(): void {
+    this.titleEl.setText("随机考试结果");
+    this.contentEl.empty();
+
+    const total = Math.max(0, Math.round(this.opts.total));
+    const correct = Math.min(total, Math.max(0, Math.round(this.opts.correct)));
+    const wrong = Math.max(0, total - correct);
+    const rawAccuracy = Number.isFinite(this.opts.accuracy)
+      ? this.opts.accuracy
+      : 0;
+    const accuracy = Math.min(100, Math.max(0, rawAccuracy));
+    const accuracyText = Number.isInteger(accuracy)
+      ? String(accuracy)
+      : accuracy.toFixed(1);
+
+    const wrap = this.contentEl.createDiv("csv-quiz-exam-result");
+
+    const score = wrap.createDiv("csv-quiz-exam-result-score");
+    score.createSpan({
+      text: String(correct),
+      cls: "csv-quiz-exam-result-correct",
+    });
+    score.createSpan({ text: "/", cls: "csv-quiz-exam-result-slash" });
+    score.createSpan({
+      text: String(total),
+      cls: "csv-quiz-exam-result-total",
+    });
+
+    const accuracyLine = wrap.createDiv("csv-quiz-exam-result-accuracy");
+    accuracyLine.createSpan({ text: "正确率" });
+    accuracyLine.createSpan({
+      text: `${accuracyText}%`,
+      cls: "csv-quiz-exam-result-accuracy-value",
+    });
+
+    const meta = wrap.createEl("p", {
+      cls: "csv-quiz-exam-result-meta csv-quiz-modal-message",
+    });
+    meta.createSpan({ text: "每题 1 分 · 答对 " });
+    meta.createSpan({
+      text: String(correct),
+      cls: "csv-quiz-exam-result-right",
+    });
+    meta.createSpan({ text: " 题 · 答错 " });
+    meta.createSpan({
+      text: String(wrong),
+      cls: "csv-quiz-exam-result-wrong",
+    });
+    meta.createSpan({ text: " 题" });
+
+    const actions = wrap.createDiv("csv-quiz-exam-result-actions");
+    const confirmBtn = actions.createEl("button", {
+      text: "查看结果",
+      cls: "csv-quiz-btn csv-quiz-btn-primary csv-quiz-modal-btn",
+    });
+    confirmBtn.addEventListener("click", () => this.close());
+    // 让主按钮拿到焦点：回车即可关闭，Esc 仍由 Modal 处理
+    window.setTimeout(() => confirmBtn.focus(), 0);
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+}
