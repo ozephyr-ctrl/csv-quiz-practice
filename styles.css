@@ -1197,3 +1197,246 @@
     margin-bottom: 16px;
   }
 }
+
+/* ===================== 图片题 ===================== */
+.csv-quiz-image-question {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+/* 编号小标签：克制的胶囊，不与答案区抢注意力 */
+.csv-quiz-image-badge {
+  align-self: flex-start;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.7;
+}
+
+/* 画框：居中、浅边框、主题背景，透明 PNG 在明暗主题下都看得清 */
+.csv-quiz-image-frame {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+  min-height: 140px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+  background: var(--background-secondary);
+  overflow: hidden;
+}
+
+.csv-quiz-image {
+  display: block;
+  max-width: 100%;
+  max-height: 58vh;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 8px;
+  background: var(--background-primary);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
+}
+
+/* 加载失败：图片隐藏，只剩中性占位文本 */
+.csv-quiz-image-broken {
+  display: none;
+}
+
+.csv-quiz-image-fallback {
+  padding: 28px 12px;
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.csv-quiz-image-fallback-hidden {
+  display: none;
+}
+
+/* 主行动按钮：突出但仍属于插件既有按钮体系 */
+.csv-quiz-image-reveal-btn {
+  align-self: center;
+  min-width: 180px;
+  min-height: 44px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+.csv-quiz-image-reveal-btn:active {
+  transform: translateY(1px);
+}
+
+/* 答案区：强调左侧色条，长文件名可换行不溢出 */
+.csv-quiz-image-answer {
+  padding: 12px 14px;
+  border: 1px solid var(--background-modifier-border);
+  border-left: 3px solid var(--interactive-accent);
+  border-radius: 8px;
+  background: var(--background-secondary);
+}
+
+.csv-quiz-image-answer-label {
+  margin-bottom: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  line-height: 1.4;
+}
+
+.csv-quiz-image-answer-text {
+  color: var(--text-normal);
+  font-size: 1.15em;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* 四级评分：4 列，窄屏 2×2 */
+.csv-quiz-image-rate {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.csv-quiz-image-rate-btn {
+  width: 100%;
+  min-height: 44px;
+  font-weight: 600;
+  /* 不支持 color-mix 的旧版本回退到主题按钮底色 */
+  background: var(--background-secondary);
+  border-color: var(--background-modifier-border);
+  color: var(--text-normal);
+  background: color-mix(
+    in srgb,
+    var(--csv-image-rate-color) 12%,
+    var(--background-primary)
+  );
+  border-color: color-mix(
+    in srgb,
+    var(--csv-image-rate-color) 45%,
+    var(--background-modifier-border)
+  );
+  color: var(--csv-image-rate-color);
+  transition:
+    background 0.15s,
+    border-color 0.15s,
+    transform 0.1s;
+}
+
+.csv-quiz-image-rate-btn:hover {
+  background: color-mix(
+    in srgb,
+    var(--csv-image-rate-color) 22%,
+    var(--background-primary)
+  );
+  border-color: var(--csv-image-rate-color);
+}
+
+.csv-quiz-image-rate-btn:active {
+  transform: translateY(1px);
+  background: color-mix(
+    in srgb,
+    var(--csv-image-rate-color) 32%,
+    var(--background-primary)
+  );
+}
+
+.csv-quiz-image-rate-btn:focus-visible {
+  outline: 2px solid var(--csv-image-rate-color);
+  outline-offset: 2px;
+}
+
+.csv-quiz-image-rate-again {
+  --csv-image-rate-color: var(--color-red, #e5534b);
+}
+
+.csv-quiz-image-rate-hard {
+  --csv-image-rate-color: var(--color-orange, #e08b2f);
+}
+
+.csv-quiz-image-rate-good {
+  --csv-image-rate-color: var(--color-green, #3f9e58);
+}
+
+.csv-quiz-image-rate-easy {
+  --csv-image-rate-color: var(--color-blue, #4a8ff0);
+}
+
+/* 已评分 / 记忆关闭：安静的说明文本 */
+.csv-quiz-image-rated {
+  align-self: flex-start;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-modifier-hover);
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.csv-quiz-image-memory-off {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* 进度弹窗里的图片题标记：单行省略，不改变虚拟滚动行高 */
+.csv-quiz-progress-image-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
+.csv-quiz-progress-image-answer {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-normal);
+}
+
+@media (max-width: 600px) {
+  .csv-quiz-image-frame {
+    padding: 6px;
+    min-height: 110px;
+    border-radius: 10px;
+  }
+
+  .csv-quiz-image {
+    max-height: 45vh;
+  }
+
+  .csv-quiz-image-reveal-btn {
+    align-self: stretch;
+    min-width: 0;
+  }
+
+  .csv-quiz-image-rate {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .csv-quiz-image-rate-btn {
+    min-height: 46px;
+    font-size: 15px;
+  }
+}

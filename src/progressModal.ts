@@ -1,6 +1,11 @@
 import { App, Modal } from "obsidian";
 import { Question, MemoryCard } from "./types";
 import { normalizeAnswerValue } from "./utils";
+import {
+  imageRatingLabel,
+  isImageQuestion,
+  isImageRatingKey,
+} from "./imageBank";
 
 export interface ProgressModalOptions {
   questions: Question[]; // 视图当前列表(filteredQuestions,顺序/筛选与视图一致)
@@ -50,11 +55,25 @@ export class ProgressModal extends Modal {
     // 同时把每题的用户答案与标准答案的归一化结果存入 Map（统计时填充、行渲染时读取，避免重复 normalizeAnswerValue）
     const normCache = new Map<string, string>();
     let answered = 0;
+    // 文字题已答数（对错/正确率的分母）；图片题不参与对错统计
+    let textAnswered = 0;
     let correct = 0;
+    // 图片题：总数与“已评分”（answered 值为 rating key）数量，revealed/未答不计入已评
+    let imageTotal = 0;
+    let imageRated = 0;
     for (const q of questions) {
       const a = answeredQuestions[q.id];
+      if (isImageQuestion(q)) {
+        imageTotal++;
+        if (a !== undefined) {
+          answered++;
+          if (isImageRatingKey(a)) imageRated++;
+        }
+        continue;
+      }
       if (a !== undefined) {
         answered++;
+        textAnswered++;
         // 随机考试进行中不计算/展示对错，避免通过汇总泄露成绩
         if (maskCorrectness) continue;
         const normA = normalizeAnswerValue(a);
@@ -67,14 +86,20 @@ export class ProgressModal extends Modal {
       }
     }
 
+    // 图片题进展只在存在图片题时追加（已评数是中性信息，不受 maskCorrectness 影响）
+    const imagePart =
+      imageTotal > 0 ? ` · 图片题已评 ${imageRated}/${imageTotal}` : "";
+
     // 最后设置汇总统计文本（基于当前列表全部题目；空列表分支同样适用）
     summary.setText(
       maskCorrectness
-        ? `共 ${questions.length} 题 · 已答 ${answered} · 未答 ${questions.length - answered}`
-        : `共 ${questions.length} 题 · 已答 ${answered} · 未答 ${questions.length - answered} · 答对 ${correct} · 答错 ${answered - correct}` +
-            (answered > 0
-              ? ` · 正确率 ${((correct / answered) * 100).toFixed(1)}%`
-              : "")
+        ? `共 ${questions.length} 题 · 已答 ${answered} · 未答 ${questions.length - answered}` +
+            imagePart
+        : `共 ${questions.length} 题 · 已答 ${answered} · 未答 ${questions.length - answered} · 答对 ${correct} · 答错 ${textAnswered - correct}` +
+            (textAnswered > 0
+              ? ` · 正确率 ${((correct / textAnswered) * 100).toFixed(1)}%`
+              : "") +
+            imagePart
     );
 
     if (questions.length === 0) {
@@ -85,41 +110,87 @@ export class ProgressModal extends Modal {
     // 单行渲染（结构与旧版一致；点击改为 viewport 级委托，行上只挂 data-id）
     const renderRow = (q: Question): HTMLElement => {
       const a = answeredQuestions[q.id];
+      const isImage = isImageQuestion(q);
+      const ratingLabel = a !== undefined ? imageRatingLabel(a) : null;
 
       const row = createEl("div", { cls: "csv-quiz-progress-row" });
       row.dataset.id = q.id;
       if (q.id === currentId) row.addClass("csv-quiz-progress-row-current");
-      row.createEl("span", { text: q.id, cls: "csv-quiz-progress-id" });
-      // 题干(去 Markdown 符号截断 30 字)
-      const stem = q.stem.replace(/[#*`_~[\]()>!-]/g, "").trim();
-      row.createEl("span", {
-        text: stem.length > 30 ? stem.slice(0, 30) + "…" : stem,
-        cls: "csv-quiz-progress-stem",
-      });
-      // 答题状态
-      if (a === undefined) {
+      if (isImage) {
+        // 图片题：stem 就是答案（文件名），不能走下面的“去 Markdown 题干”路径；
+        // 左侧用中性徽标（未评分）或文件名（已评分），保持单行等高
+        const num =
+          typeof q.imageNumber === "number" && Number.isFinite(q.imageNumber)
+            ? Math.max(1, Math.trunc(q.imageNumber))
+            : 1;
         row.createEl("span", {
-          text: "未答",
-          cls: "csv-quiz-progress-status csv-quiz-progress-unanswered",
+          text: `图片题 #${num}`,
+          cls: "csv-quiz-progress-image-label",
         });
-      } else if (maskCorrectness) {
-        // 随机考试进行中：只显示已答，不泄露对错
+        // 随机考试进行中：文件名即答案，不能展示
+        const showName = ratingLabel !== null && !maskCorrectness;
         row.createEl("span", {
-          text: "已答",
-          cls: "csv-quiz-progress-status csv-quiz-progress-masked",
+          text: showName ? q.answer : "（图片题）",
+          cls: showName
+            ? "csv-quiz-progress-image-answer"
+            : "csv-quiz-progress-stem",
         });
-      } else if (
-        normCache.get(`u:${q.id}`) === normCache.get(`c:${q.id}`)
-      ) {
-        row.createEl("span", {
-          text: a ? `✓ 已答${a}` : "✓ 已答",
-          cls: "csv-quiz-progress-status csv-quiz-progress-correct",
-        });
+        // 状态：图片题无对错，统一用中性样式（避免红绿）
+        if (a === undefined) {
+          row.createEl("span", {
+            text: "未答",
+            cls: "csv-quiz-progress-status csv-quiz-progress-unanswered",
+          });
+        } else if (maskCorrectness) {
+          row.createEl("span", {
+            text: "已答",
+            cls: "csv-quiz-progress-status csv-quiz-progress-masked",
+          });
+        } else if (ratingLabel !== null) {
+          row.createEl("span", {
+            text: `已评 · ${ratingLabel}`,
+            cls: "csv-quiz-progress-status",
+          });
+        } else {
+          // revealed：已看答案但未评分
+          row.createEl("span", {
+            text: "已看答案",
+            cls: "csv-quiz-progress-status csv-quiz-progress-unanswered",
+          });
+        }
       } else {
+        row.createEl("span", { text: q.id, cls: "csv-quiz-progress-id" });
+        // 题干(去 Markdown 符号截断 30 字)
+        const stem = q.stem.replace(/[#*`_~[\]()>!-]/g, "").trim();
         row.createEl("span", {
-          text: a ? `✗ 答错${a}` : "✗ 答错",
-          cls: "csv-quiz-progress-status csv-quiz-progress-wrong",
+          text: stem.length > 30 ? stem.slice(0, 30) + "…" : stem,
+          cls: "csv-quiz-progress-stem",
         });
+        // 答题状态
+        if (a === undefined) {
+          row.createEl("span", {
+            text: "未答",
+            cls: "csv-quiz-progress-status csv-quiz-progress-unanswered",
+          });
+        } else if (maskCorrectness) {
+          // 随机考试进行中：只显示已答，不泄露对错
+          row.createEl("span", {
+            text: "已答",
+            cls: "csv-quiz-progress-status csv-quiz-progress-masked",
+          });
+        } else if (
+          normCache.get(`u:${q.id}`) === normCache.get(`c:${q.id}`)
+        ) {
+          row.createEl("span", {
+            text: a ? `✓ 已答${a}` : "✓ 已答",
+            cls: "csv-quiz-progress-status csv-quiz-progress-correct",
+          });
+        } else {
+          row.createEl("span", {
+            text: a ? `✗ 答错${a}` : "✗ 答错",
+            cls: "csv-quiz-progress-status csv-quiz-progress-wrong",
+          });
+        }
       }
       // 记忆状态
       const card = memoryCards[q.id];

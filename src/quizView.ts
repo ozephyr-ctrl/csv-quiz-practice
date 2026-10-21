@@ -44,7 +44,7 @@ import {
   askConflictMergeChoice,
 } from "./modals";
 import { ProgressModal } from "./progressModal";
-import { fsrs, createEmptyCard, Rating, type Card } from "ts-fsrs";
+import { fsrs, createEmptyCard, Rating, type Card, type Grade } from "ts-fsrs";
 import Papa from "papaparse";
 import {
   computePracticeStats,
@@ -55,6 +55,15 @@ import {
   pruneDailyAnswers,
 } from "./practiceStats";
 import { PracticeChart } from "./practiceChart";
+import {
+  buildImageQuestions,
+  imageRatingLabel,
+  isImageRatingKey,
+  isImageQuestion,
+  type ImageRatingKey,
+} from "./imageBank";
+import { renderImageQuestionUi } from "./imageQuestionUi";
+import { resolveContentPath } from "./contentSource";
 
 /** FSRS 调度器单例：纯函数调度、不持有状态，可跨会话复用（模块级）。 */
 const memoryScheduler = fsrs();
@@ -95,6 +104,13 @@ export class QuizView extends ItemView {
   private filterUnanswered: string = "";
 
   private csvPath: string = "";
+  /** 图片题文件夹（vault 相对路径；空串=不启用）。 */
+  private imageFolder: string = "";
+  /** 未展示答案时的脱敏图片地址（blob URL，不含文件名）；仅缓存当前题。 */
+  private imageBlobUrl: string | null = null;
+  private imageBlobPath: string | null = null;
+  private imageBlobLoadingPath: string | null = null;
+  private imageLoadToken: number = 0;
 
   private answeredQuestions: Record<string, string> = {};
   private currentShuffledQId: string | null = null;
@@ -203,6 +219,7 @@ export class QuizView extends ItemView {
     this.exitRandomPractice();
     this.exitFilterPractice();
     this.exitMemoryPractice();
+    this.revokeImageBlob();
     if (this.textFilterTimer !== null) {
       window.clearTimeout(this.textFilterTimer);
       this.textFilterTimer = null;
@@ -372,6 +389,8 @@ export class QuizView extends ItemView {
     // 不再调用 loadPluginData（外部修改检测留到阶段 3 处理）。
     const settings = this.getSettings();
     this.csvPath = settings.csvPath;
+    this.imageFolder = settings.imageFolder;
+    const contentPath = this.getContentPath();
 
     // 3A: 捕获加载前的内存进度（用于 sidecar 外部修改检测；loadSidecar 会覆盖 currentState）
     const inMemoryState = this.stateManager.getState();
@@ -401,7 +420,7 @@ export class QuizView extends ItemView {
     }
 
     // 载入当前题库的 sidecar 状态（缺失时初始化空状态，含 defaultFilter* 默认筛选）
-    const loadResult = await this.stateManager.loadSidecar(this.csvPath, {
+    const loadResult = await this.stateManager.loadSidecar(contentPath, {
       favorite: settings.defaultFilterFavorite,
       mastered: settings.defaultFilterMastered,
       repeat: settings.defaultFilterRepeat,
@@ -424,8 +443,8 @@ export class QuizView extends ItemView {
     let effectiveState: QuizSessionState = loadResult.state;
     if (
       inMemoryState &&
-      this.stateManager.getContentPath() === this.csvPath &&
-      inMemoryState.csvPath === this.csvPath
+      this.stateManager.getContentPath() === contentPath &&
+      inMemoryState.csvPath === contentPath
     ) {
       const loaded = this.stateManager.getState();
       const metaDiffers =
@@ -483,7 +502,7 @@ export class QuizView extends ItemView {
     this.applyMetaToQuestions();
 
     // 恢复进度或首次使用（sidecar 无 csvPath，stateFromSidecar 已补为 contentPath，恒匹配）
-    if (effectiveState.csvPath === this.csvPath) {
+    if (effectiveState.csvPath === contentPath) {
       this.applyRestore(settings, effectiveState);
     } else {
       this.applyFreshStart(settings, effectiveState);
@@ -520,62 +539,106 @@ export class QuizView extends ItemView {
             `重复题号: ${duplicateIds.slice(0, 5).join(", ")}${duplicateIds.length > 5 ? "…" : ""}`
           );
         }
-        this.showError(`题库存在${parts.join("、")}，请修改 CSV 后重试`);
+        this.showError(`题库存在${parts.join("、")}，请修改题库后重试`);
         return "error";
       }
       if (this.allQuestions.length === 0) {
         this.canPersistState = false;
-        this.showError("题库文件中没有找到题目数据");
+        this.showError("未找到题目：请设置 CSV/CQV 或包含图片的图片题文件夹");
         return "empty";
       }
       this.canPersistState = true;
-      // 3B: 内容源 mtime 变更检测——首次加载只记录；再次加载（refresh/重开）对比，
-      // 变化则提示。id 对齐由 applyMetaToQuestions 天然处理（新题库不存在的 meta 无效果）。
-      const stat = await this.vault.adapter.stat(this.csvPath);
-      const newMtime = stat?.mtime ?? null;
-      if (
-        this.contentMtimeMs !== null &&
-        newMtime !== null &&
-        newMtime !== this.contentMtimeMs
-      ) {
-        new Notice("题库文件已更新，状态已按题目对齐");
+      // 3B: 内容源 mtime 变更检测——仅 CSV/CQV 文件有意义的 mtime；
+      // 图片文件夹的增删改在下次刷新/重开时重新扫描即可，不做目录 mtime 提示。
+      if (this.csvPath) {
+        const stat = await this.vault.adapter.stat(this.csvPath);
+        const newMtime = stat?.mtime ?? null;
+        if (
+          this.contentMtimeMs !== null &&
+          newMtime !== null &&
+          newMtime !== this.contentMtimeMs
+        ) {
+          new Notice("题库文件已更新，状态已按题目对齐");
+        }
+        this.contentMtimeMs = newMtime;
+      } else {
+        this.contentMtimeMs = null;
       }
-      this.contentMtimeMs = newMtime;
       return "ok";
     } catch (e: unknown) {
       this.canPersistState = false;
       console.error("CSV Quiz: Failed to load questions", e);
-      this.showError(`无法加载题库文件: ${e instanceof Error ? e.message : String(e)}`);
+      this.showError(`无法加载题库: ${e instanceof Error ? e.message : String(e)}`);
       return "error";
     }
   }
 
   /**
-   * 按内容源类型读取题目：.cqv 走二进制解码（decodeCqv 含四重解析防御），
-   * 其余按 CSV（readCSVFile + parseCSV）。失败返回 null（已 showError 提示）。
+   * 读取全部题目：CSV/CQV（若有）+ 图片文件夹（若有），CSV 在前、图片按文件名排序。
+   * 任一来源失败但另一来源可用时，提示后降级加载；两者都失败返回 null。
    */
   private async readQuestionsFromSource(): Promise<Question[] | null> {
-    if (this.csvPath.toLowerCase().endsWith(".cqv")) {
-      try {
-        const buf = await this.vault.adapter.readBinary(this.csvPath);
-        const result = decodeCqv(buf);
-        return result.questions;
-      } catch (e: unknown) {
-        console.error("CSV Quiz: Failed to load .cqv", e);
-        this.showError(
-          `无法加载题库产物: ${e instanceof Error ? e.message : String(e)}`
-        );
-        return null;
-      }
-    }
-    try {
-      const csvContent = await readCSVFile(this.vault, this.csvPath);
-      return parseCSV(csvContent);
-    } catch (e: unknown) {
-      console.error("CSV Quiz: Failed to load CSV", e);
-      this.showError(`无法加载 CSV 文件: ${e instanceof Error ? e.message : String(e)}`);
+    const csvPath = this.csvPath.trim();
+    const imageFolder = this.imageFolder.trim();
+    if (!csvPath && !imageFolder) {
+      new Notice("请设置题库文件或图片题文件夹");
+      this.showError("请设置题库文件或图片题文件夹");
       return null;
     }
+
+    let csvQuestions: Question[] | null = [];
+    if (csvPath) {
+      try {
+        if (csvPath.toLowerCase().endsWith(".cqv")) {
+          const buf = await this.vault.adapter.readBinary(csvPath);
+          csvQuestions = decodeCqv(buf).questions;
+        } else {
+          const csvContent = await readCSVFile(this.vault, csvPath);
+          csvQuestions = parseCSV(csvContent);
+        }
+      } catch (e: unknown) {
+        console.error("CSV Quiz: Failed to load CSV/CQV", e);
+        new Notice(
+          `题库文件加载失败，已尝试仅加载图片题: ${e instanceof Error ? e.message : String(e)}`
+        );
+        csvQuestions = null;
+      }
+    }
+
+    let imageQuestions: Question[] = [];
+    if (imageFolder) {
+      try {
+        imageQuestions = await this.readImageQuestions(imageFolder);
+      } catch (e: unknown) {
+        console.error("CSV Quiz: Failed to load image folder", e);
+        new Notice(
+          `图片题文件夹加载失败: ${e instanceof Error ? e.message : String(e)}`
+        );
+      }
+    }
+
+    if (csvQuestions === null && imageQuestions.length === 0) return null;
+    return [...(csvQuestions ?? []), ...imageQuestions];
+  }
+
+  /** 递归列出图片文件夹内的文件并构建图片题（隐藏文件/目录由 buildImageQuestions 过滤）。 */
+  private async readImageQuestions(folder: string): Promise<Question[]> {
+    const root = folder.replace(/\\/g, "/").replace(/\/+$/, "");
+    if (!root) return [];
+    const files: string[] = [];
+    const walk = async (dir: string): Promise<void> => {
+      const listed = await this.vault.adapter.list(dir);
+      for (const file of listed.files) {
+        files.push(file.startsWith(`${root}/`) ? file : `${dir}/${file}`);
+      }
+      for (const sub of listed.folders) {
+        const name = sub.slice(sub.lastIndexOf("/") + 1);
+        if (name.startsWith(".")) continue;
+        await walk(sub.startsWith(`${root}/`) ? sub : `${dir}/${sub}`);
+      }
+    };
+    await walk(root);
+    return buildImageQuestions(root, files);
   }
 
   /**
@@ -661,7 +724,7 @@ export class QuizView extends ItemView {
     const byId = new Map(this.allQuestions.map((q) => [q.id, q]));
     for (const id of ids) {
       const q = byId.get(id);
-      if (!q) continue;
+      if (!q || isImageQuestion(q)) continue; // 图片题不参与文字题对错统计
       const answerNorm = normalizeAnswerValue(q.answer);
       if (answerNorm === "") continue; // 脏答案题从不判分（空选不判分口径）
       const isCorrect =
@@ -684,10 +747,13 @@ export class QuizView extends ItemView {
       if (m.mastered !== undefined) q.mastered = m.mastered;
       if (m.wrong !== undefined) q.wrong = m.wrong;
       if (m.repeat !== undefined) q.repeat = m.repeat;
-      if (m.tags !== undefined) q.tags = m.tags;
-      if (m.category1 !== undefined) q.category1 = m.category1;
-      if (m.category2 !== undefined) q.category2 = m.category2;
-      if (m.category3 !== undefined) q.category3 = m.category3;
+      // 图片题标签/分类固定，不允许 sidecar 覆盖（标记仍可覆盖）
+      if (!isImageQuestion(q)) {
+        if (m.tags !== undefined) q.tags = m.tags;
+        if (m.category1 !== undefined) q.category1 = m.category1;
+        if (m.category2 !== undefined) q.category2 = m.category2;
+        if (m.category3 !== undefined) q.category3 = m.category3;
+      }
     }
   }
 
@@ -1273,6 +1339,8 @@ export class QuizView extends ItemView {
   private filterPracticeActive: boolean = false;
   /** 本轮练习完成提示/评分是否已触发（防止答题完成与切题完成重复弹窗）。 */
   private practiceRoundNotified: boolean = false;
+  /** 图片题评分防重入。 */
+  private imageRatingInProgress: boolean = false;
   /** 进入练习前的常规模式定位题号，退出时据此恢复位置。 */
   private practiceFocusId: string | null = null;
   /** 记忆练习模式：练习集为临时会话，不持久化，重开面板回到常规模式。 */
@@ -1430,9 +1498,11 @@ export class QuizView extends ItemView {
     if (this.memoryActive) this.exitMemoryPractice();
     if (this.filterPracticeActive) this.exitFilterPractice();
 
-    const pool = this.applyFiltersTo(this.orderedQuestions);
+    const pool = this.applyFiltersTo(this.orderedQuestions).filter(
+      (q) => !isImageQuestion(q)
+    );
     if (pool.length === 0) {
-      new Notice("当前筛选条件下没有题目，无法开始随机考试");
+      new Notice("当前筛选条件下没有文字题，无法开始随机考试");
       return;
     }
 
@@ -2149,7 +2219,8 @@ export class QuizView extends ItemView {
 
   /** 正确答案列包含多个字母（如 ABCD）时视为多选题。 */
   private isMultiChoice(question: Question): boolean {
-    return question.answer.length > 1;
+    // 图片题没有选项/A-D 答案，不能按 answer.length 误判为多选
+    return !isImageQuestion(question) && question.answer.length > 1;
   }
 
   /** 忽略字母顺序与重复，归一化答案字符串用于比较。 */
@@ -2175,6 +2246,7 @@ export class QuizView extends ItemView {
       this.currentIndex < 0 ||
       this.currentIndex >= this.filteredQuestions.length
     ) {
+      this.revokeImageBlob();
       this.questionArea.createEl("p", {
         text: "没有匹配的题目",
         cls: "csv-quiz-empty",
@@ -2185,6 +2257,7 @@ export class QuizView extends ItemView {
 
     const question = this.filteredQuestions[this.currentIndex];
     const multi = this.isMultiChoice(question);
+    if (!isImageQuestion(question)) this.revokeImageBlob();
 
     // Restore answer state if this question was previously answered
     // 注意：判错时 answeredQuestions[id] 可能为空字符串（空选判错），
@@ -2212,6 +2285,42 @@ export class QuizView extends ItemView {
       this.answering = false;
     }
 
+    // 图片题：图片即题干；未展示答案时不渲染答案文本/文件名
+    if (isImageQuestion(question)) {
+      this.selectedOption = null;
+      this.selectedOptions = [];
+      this.currentDisplayOptions = [];
+      this.renderPracticeSourceBadge(question);
+      const imageHost = this.questionArea.createDiv("csv-quiz-image-host");
+      const imageDisplay = this.resolveImageDisplay(
+        question.imagePath ?? "",
+        prevAnswer !== undefined,
+        question.id
+      );
+      renderImageQuestionUi({
+        container: imageHost,
+        imageUrl: imageDisplay.url,
+        imageLoading: imageDisplay.loading,
+        imageNumber: question.imageNumber ?? 1,
+        answer: question.answer,
+        answerShown: prevAnswer !== undefined,
+        rating:
+          prevAnswer !== undefined && isImageRatingKey(prevAnswer)
+            ? prevAnswer
+            : null,
+        memoryEnabled: this.getSettings().memoryEnabled,
+        onReveal: () => {
+          void this.revealImageAnswer(question);
+        },
+        onRate: (rating) => {
+          void this.handleImageRating(question, rating);
+        },
+      });
+      this.renderCardPanel(question);
+      this.renderQuestionMetaAndNavigation(question);
+      return;
+    }
+
     // 多选题在题干前标注 (多选)
     if (multi) {
       this.questionArea.createEl("span", {
@@ -2220,21 +2329,7 @@ export class QuizView extends ItemView {
       });
     }
 
-    // 记忆练习：显著标明题目来源（复习/新题/提前复习），与 (多选) 标记并排
-    if (this.memoryActive && this.practiceSource[question.id]) {
-      const src = this.practiceSource[question.id];
-      this.questionArea.createEl("span", {
-        text:
-          src === "new" ? "🆕 新题" : src === "early" ? "⚡ 提前复习" : "🔁 复习",
-        cls:
-          "csv-quiz-source-badge" +
-          (src === "new"
-            ? " csv-quiz-source-badge-new"
-            : src === "early"
-              ? " csv-quiz-source-badge-early"
-              : " csv-quiz-source-badge-review"),
-      });
-    }
+    this.renderPracticeSourceBadge(question);
 
     // Stem with Markdown rendering
     const stemDiv = this.questionArea.createDiv("csv-quiz-stem");
@@ -2329,29 +2424,64 @@ export class QuizView extends ItemView {
     // Feedback
     this.renderFeedback(question, displayOptions);
 
+    this.renderQuestionMetaAndNavigation(question);
+  }
+
+  /** 记忆练习来源徽标（图片题与文字题共用）。 */
+  private renderPracticeSourceBadge(question: Question): void {
+    if (!this.memoryActive || !this.practiceSource[question.id]) return;
+    const src = this.practiceSource[question.id];
+    this.questionArea.createEl("span", {
+      text:
+        src === "new" ? "🆕 新题" : src === "early" ? "⚡ 提前复习" : "🔁 复习",
+      cls:
+        "csv-quiz-source-badge" +
+        (src === "new"
+          ? " csv-quiz-source-badge-new"
+          : src === "early"
+            ? " csv-quiz-source-badge-early"
+            : " csv-quiz-source-badge-review"),
+    });
+  }
+
+  /** 图片题/文字题共用的题目标记、只读信息、编辑区、导航与练习按钮。 */
+  private renderQuestionMetaAndNavigation(question: Question): void {
     // Checkbox area
     this.renderCheckboxArea(question);
 
     // Read-only tags/categories
     this.readOnlyArea.empty();
-    const tagsChips = this.readOnlyArea.createSpan({ cls: "csv-quiz-readonly-tags" });
+    const tagsChips = this.readOnlyArea.createSpan({
+      cls: "csv-quiz-readonly-tags",
+    });
     tagsChips.createEl("strong", { text: "标签:  " });
     const tagText = question.tags || "（无）";
     if (tagText !== "（无）") {
       for (const tag of tagText.split(/\s+/).filter(Boolean)) {
-        tagsChips.createEl("span", { text: tag, cls: "csv-quiz-tag-chip csv-quiz-tag-chip-selected" });
+        tagsChips.createEl("span", {
+          text: tag,
+          cls: "csv-quiz-tag-chip csv-quiz-tag-chip-selected",
+        });
       }
     } else {
-      tagsChips.createEl("span", { text: "（无）", cls: "csv-quiz-tag-chip csv-quiz-tag-chip-empty" });
+      tagsChips.createEl("span", {
+        text: "（无）",
+        cls: "csv-quiz-tag-chip csv-quiz-tag-chip-empty",
+      });
     }
 
-    // Click handler to open tag picker modal
-    tagsChips.addEventListener("click", () => {
-      void this.openTagPicker(question);
-    });
+    // 图片题标签/分类固定，不提供标签选择器
+    if (!isImageQuestion(question)) {
+      tagsChips.addEventListener("click", () => {
+        void this.openTagPicker(question);
+      });
+    }
 
     const catText = `  |  一级: ${question.category1 || "（无）"}  |  二级: ${question.category2 || "（无）"}  |  三级: ${question.category3 || "（无）"}`;
-    this.readOnlyArea.createSpan({ text: catText, cls: "csv-quiz-readonly-cats" });
+    this.readOnlyArea.createSpan({
+      text: catText,
+      cls: "csv-quiz-readonly-cats",
+    });
 
     // Edit area for tags/categories (moved below filter)
     this.renderEditArea(question);
@@ -2607,6 +2737,72 @@ export class QuizView extends ItemView {
     }
   }
 
+  /** 图片题：展示答案并记为已答（不参与文字题对错统计）。 */
+  private async revealImageAnswer(question: Question): Promise<void> {
+    if (!isImageQuestion(question) || this.showingAnswer) return;
+    const id = question.id;
+    this.showingAnswer = true;
+    this.answering = true;
+    // 点击展示答案即视为已答；记忆关闭时也允许完成练习/筛选
+    this.answeredQuestions[id] = "revealed";
+    const key = dateKey(new Date());
+    const prev = this.dailyAnswers[key];
+    this.dailyAnswers[key] = (prev ?? 0) + 1;
+    if (prev === undefined) pruneDailyAnswers(this.dailyAnswers, new Date());
+    this.practiceStatsDirty = true;
+    if (this.isPracticeSessionActive()) {
+      this.practiceAnswered.add(id);
+    }
+    this.renderQuestion();
+    this.updateProgress();
+    this.maybeCompletePracticeSession();
+    this.saveState();
+  }
+
+  /** 图片题四级评分 → FSRS Rating。 */
+  private fsrsRatingFor(key: ImageRatingKey): Grade {
+    switch (key) {
+      case "again":
+        return Rating.Again;
+      case "hard":
+        return Rating.Hard;
+      case "good":
+        return Rating.Good;
+      case "easy":
+        return Rating.Easy;
+    }
+  }
+
+  /** 图片题：记录用户选择的 FSRS 四级评分，并自动下一题。 */
+  private async handleImageRating(
+    question: Question,
+    ratingKey: ImageRatingKey
+  ): Promise<void> {
+    if (!isImageQuestion(question) || !this.getSettings().memoryEnabled) return;
+    if (!this.showingAnswer || this.imageRatingInProgress) return;
+    const current = this.answeredQuestions[question.id] ?? "";
+    // 已评分不重复写入 FSRS；revealed 状态允许首次评分
+    if (isImageRatingKey(current)) return;
+    this.imageRatingInProgress = true;
+    try {
+      this.answeredQuestions[question.id] = ratingKey;
+      if (this.isPracticeSessionActive()) {
+        this.practiceAnswered.add(question.id);
+      }
+      this.applyMemoryReview(question.id, ratingKey !== "again", {
+        rating: this.fsrsRatingFor(ratingKey),
+        // 图片题无客观对错，不自动改“错题”标记（用户可手动编辑）
+        skipWrongFlag: true,
+      });
+      this.renderQuestion();
+      this.updateProgress();
+      this.saveState();
+      await this.nextQuestion();
+    } finally {
+      this.imageRatingInProgress = false;
+    }
+  }
+
   /** 解析卡片的 due 时间戳；非法字符串返回 null（视为未到期，不计入复习/计数）。 */
   private parseDueTime(card: MemoryCard): number | null {
     const t = new Date(card.due).getTime();
@@ -2614,7 +2810,11 @@ export class QuizView extends ItemView {
   }
 
   /** 记忆练习判分：用 FSRS 更新卡片；答错时把 wrong 标记置 "1" 并写回 CSV（写失败回滚并提示）。 */
-  private applyMemoryReview(id: string, correct: boolean): void {
+  private applyMemoryReview(
+    id: string,
+    correct: boolean,
+    opts?: { rating?: Grade; skipWrongFlag?: boolean }
+  ): void {
     // C-1: 一次记忆练习判分即视为已初始化（放方法最前，任何分支都置位）
     this.memoryInitialized = true;
     const now = new Date();
@@ -2656,11 +2856,14 @@ export class QuizView extends ItemView {
       } else {
         card = createEmptyCard();
       }
-      // 评分映射：答错一律 Again；答对按掌握标记选档（设置可关）。
+      // 评分映射：图片题使用用户选择的四级评分；文字题答错一律 Again，
+      // 答对按掌握标记选档（设置可关）。
       // 收藏不参与评分——用 Hard 表达"想多复习"会持续推高难度并压缩间隔（难度虚高、
       // 复习越来越频繁），故收藏只用于筛选/练习集，不干预 FSRS 调度。
       let rating: Rating;
-      if (!correct) {
+      if (opts?.rating !== undefined) {
+        rating = opts.rating;
+      } else if (!correct) {
         rating = Rating.Again;
       } else if (
         this.getSettings().memoryMarkRating &&
@@ -2687,7 +2890,7 @@ export class QuizView extends ItemView {
       };
       // 卡片变化影响练习面板统计与到期预测序列
       this.practiceStatsDirty = true;
-      if (!correct) {
+      if (!correct && !opts?.skipWrongFlag) {
         // 答错计入 wrong 标记并写入 sidecar meta（内存操作 + 调度保存，无失败路径）
         if (q && q.wrong !== "1") {
           q.wrong = "1";
@@ -3032,6 +3235,9 @@ export class QuizView extends ItemView {
   private renderEditArea(question: Question): void {
     this.editArea.empty();
 
+    // 图片题标签/分类固定，只读区域已展示，不提供编辑输入框
+    if (isImageQuestion(question)) return;
+
     const settings = this.getSettings();
 
     // Toggle header
@@ -3347,11 +3553,112 @@ export class QuizView extends ItemView {
     });
     resetBtn.addEventListener("click", () => { void this.resetProgress(); });
 
-    const qId = this.filteredQuestions[this.currentIndex]?.id;
+    const currentQuestion = this.filteredQuestions[this.currentIndex];
+    const qId = currentQuestion?.id;
     bottomRow.createEl("span", {
-      text: qId ? `题号: ${qId}` : "",
+      text: currentQuestion
+        ? isImageQuestion(currentQuestion)
+          ? this.imageQuestionLabel(currentQuestion)
+          : `题号: ${qId}`
+        : "",
       cls: "csv-quiz-q-id-bottom",
     });
+  }
+
+  /** 图片题底部标签：未评分只显示编号；评分后显示文件名答案。 */
+  private imageQuestionLabel(question: Question): string {
+    const answered =
+      this.isPracticeSessionActive() && !this.practiceAnswered.has(question.id)
+        ? ""
+        : (this.answeredQuestions[question.id] ?? "");
+    return isImageRatingKey(answered)
+      ? `答案: ${question.answer}`
+      : `图片题 #${question.imageNumber ?? 1}`;
+  }
+
+  /** 图片扩展名 → MIME。 */
+  private imageMime(path: string): string {
+    const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
+    switch (ext) {
+      case "jpg":
+      case "jpeg":
+        return "image/jpeg";
+      case "png":
+        return "image/png";
+      case "webp":
+        return "image/webp";
+      case "gif":
+        return "image/gif";
+      case "bmp":
+        return "image/bmp";
+      default:
+        return "application/octet-stream";
+    }
+  }
+
+  /** 释放当前脱敏图片 blob URL（切题/交卷/关闭时调用）。 */
+  private revokeImageBlob(): void {
+    this.imageLoadToken++;
+    if (this.imageBlobUrl) URL.revokeObjectURL(this.imageBlobUrl);
+    this.imageBlobUrl = null;
+    this.imageBlobPath = null;
+    this.imageBlobLoadingPath = null;
+  }
+
+  /**
+   * 未展示答案时用 readBinary + blob URL 显示图片：资源路径本身含文件名（答案），
+   * 直接作为 img.src 会在 DOM 中泄露。展示答案后可直接用 resource path（答案已可见）。
+   */
+  private resolveImageDisplay(
+    path: string,
+    answerShown: boolean,
+    questionId: string
+  ): { url: string | null; loading: boolean } {
+    if (!path) return { url: null, loading: false };
+    if (answerShown) {
+      this.revokeImageBlob();
+      return { url: this.vault.adapter.getResourcePath(path), loading: false };
+    }
+    if (this.imageBlobPath === path) {
+      if (this.imageBlobUrl) return { url: this.imageBlobUrl, loading: false };
+      if (this.imageBlobLoadingPath === path) {
+        return { url: null, loading: true };
+      }
+      return { url: null, loading: false };
+    }
+
+    this.revokeImageBlob();
+    this.imageBlobPath = path;
+    this.imageBlobLoadingPath = path;
+    const token = this.imageLoadToken;
+    void (async () => {
+      try {
+        const buf = await this.vault.adapter.readBinary(path);
+        if (
+          this.isClosed ||
+          token !== this.imageLoadToken ||
+          this.imageBlobPath !== path
+        ) {
+          return;
+        }
+        const url = URL.createObjectURL(
+          new Blob([buf], { type: this.imageMime(path) })
+        );
+        this.imageBlobUrl = url;
+        this.imageBlobLoadingPath = null;
+        if (this.filteredQuestions[this.currentIndex]?.id === questionId) {
+          this.renderQuestion();
+        }
+      } catch (e: unknown) {
+        if (token !== this.imageLoadToken || this.imageBlobPath !== path) return;
+        this.imageBlobLoadingPath = null;
+        console.error("CSV Quiz: Failed to load image for display", e);
+        if (this.filteredQuestions[this.currentIndex]?.id === questionId) {
+          this.renderQuestion();
+        }
+      }
+    })();
+    return { url: null, loading: true };
   }
 
   private async goToNextUnanswered(): Promise<void> {
@@ -3649,6 +3956,10 @@ export class QuizView extends ItemView {
    */
   async exportMetaToCsv(): Promise<boolean> {
     // 1. 仅 CSV 模式
+    if (!this.csvPath) {
+      new Notice("仅图片题模式不支持导出到 CSV");
+      return false;
+    }
     if (this.csvPath.toLowerCase().endsWith(".cqv")) {
       new Notice("编译产物模式不支持导出合并");
       return false;
@@ -3667,7 +3978,7 @@ export class QuizView extends ItemView {
         entry.category3 !== undefined;
       if (!hasB) continue;
       const q = this.allQuestions.find((x) => x.id === id);
-      if (!q) continue; // 当前题库不存在的题跳过
+      if (!q || isImageQuestion(q)) continue; // 当前题库不存在的题/图片题跳过
       exported.push({ id, question: q });
     }
     if (exported.length === 0) {
@@ -3756,6 +4067,10 @@ export class QuizView extends ItemView {
    */
   async compileToCqv(): Promise<boolean> {
     // 1. 仅 CSV 模式
+    if (!this.csvPath) {
+      new Notice("仅图片题模式不支持编译 .cqv");
+      return false;
+    }
     if (this.csvPath.toLowerCase().endsWith(".cqv")) {
       new Notice("仅 CSV 题库可编译为产物");
       return false;
@@ -3852,13 +4167,15 @@ export class QuizView extends ItemView {
 
     const settings = this.getSettings();
     this.csvPath = settings.csvPath;
+    this.imageFolder = settings.imageFolder;
+    const contentPath = this.getContentPath();
 
     // S1: 判定本次刷新语义——切换题库（内容源变了，含 changeQuizPath 已 unloadSidecar
     // 使 contentPath 为 null 的情况）或同一题库的重置刷新。
     // 注意：不能用 task 提示的 `!== null && !== csvPath` 公式——changeQuizPath 先调用
     // unloadSidecar 把 contentPath 置 null，按旧公式会漏判主切换流导致目标题库进度被清空。
     const wasSwitching =
-      this.stateManager.getContentPath() !== this.csvPath;
+      this.stateManager.getContentPath() !== contentPath;
     // T4: 切换题库时 contentMtimeMs 是旧题库的 mtime，先清空避免跨文件误报
     // 「题库文件已更新」；切换后首次加载只记录新题库 mtime（不对比）。
     if (wasSwitching) {
@@ -3905,23 +4222,27 @@ export class QuizView extends ItemView {
       }
       this.canPersistState = true;
 
-      // 3B: 内容源 mtime 变更检测（refresh 同样记录/对比，变化则提示）
-      const stat = await this.vault.adapter.stat(this.csvPath);
-      const newMtime = stat?.mtime ?? null;
-      if (
-        this.contentMtimeMs !== null &&
-        newMtime !== null &&
-        newMtime !== this.contentMtimeMs
-      ) {
-        new Notice("题库文件已更新，状态已按题目对齐");
+      // 3B: 内容源 mtime 变更检测（仅有 CSV/CQV 文件时；图片文件夹不做目录 mtime 提示）
+      if (this.csvPath) {
+        const stat = await this.vault.adapter.stat(this.csvPath);
+        const newMtime = stat?.mtime ?? null;
+        if (
+          this.contentMtimeMs !== null &&
+          newMtime !== null &&
+          newMtime !== this.contentMtimeMs
+        ) {
+          new Notice("题库文件已更新，状态已按题目对齐");
+        }
+        this.contentMtimeMs = newMtime;
+      } else {
+        this.contentMtimeMs = null;
       }
-      this.contentMtimeMs = newMtime;
       // M2: stat 期间已切换 → 本流程过期
       if (epoch !== this.loadEpoch) return;
 
       // 载入目标题库的 sidecar 状态（切换语义：恢复其已有进度；重置语义：重新载入空状态）。
       // 切换时旧题库状态已在 changeQuizPath 的 unloadSidecar 落盘，无需 clearState。
-      if (!wasSwitching && this.stateManager.getContentPath() === this.csvPath) {
+      if (!wasSwitching && this.stateManager.getContentPath() === contentPath) {
         // 同一题库的重置刷新（全部重置语义）：写空 sidecar 保留文件 + 清 meta/state
         await this.stateManager.clearState();
         // F1: clearState 期间视图被关闭 → 中止（onClose 已保存进度）
@@ -3933,7 +4254,7 @@ export class QuizView extends ItemView {
         if (epoch !== this.loadEpoch) return;
       }
 
-      const loadResult = await this.stateManager.loadSidecar(this.csvPath, {
+      const loadResult = await this.stateManager.loadSidecar(contentPath, {
         favorite: settings.defaultFilterFavorite,
         mastered: settings.defaultFilterMastered,
         repeat: settings.defaultFilterRepeat,
@@ -4014,6 +4335,11 @@ export class QuizView extends ItemView {
     return (this.plugin as { settings: PluginSettings }).settings;
   }
 
+  /** 当前内容源锚点：CSV/CQV 优先，否则图片文件夹；sidecar 命名与状态匹配共用。 */
+  private getContentPath(): string {
+    return resolveContentPath(this.csvPath, this.imageFolder);
+  }
+
   private buildCurrentState(): QuizSessionState {
     // 练习模式为临时会话：保存时把 currentIndex 换算回常规模式的位置，
     // 重开面板后恢复到练习前的位置
@@ -4029,7 +4355,7 @@ export class QuizView extends ItemView {
       }
     }
     return {
-      csvPath: this.csvPath,
+      csvPath: this.getContentPath(),
       currentIndex: savedIndex,
       correctCount: this.correctCount,
       wrongCount: this.wrongCount,

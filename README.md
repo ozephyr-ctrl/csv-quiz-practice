@@ -2,9 +2,9 @@
 
 **Obsidian 刷题插件 / CSV-based Quiz Plugin for Obsidian**
 
-基于 CSV 文件的 Obsidian 刷题插件。将你的题库写入 CSV，然后在 Obsidian 中刷题、标记、筛选、统计正确率；支持将题库编译为 `.cqv` 产物分发给使用者。
+基于 CSV 文件 / 图片文件夹的 Obsidian 刷题插件。将题库写入 CSV，或把图片放进 vault 文件夹（文件名即答案），然后在 Obsidian 中刷题、标记、筛选、统计正确率；支持将 CSV 题库编译为 `.cqv` 产物分发给使用者。
 
-A CSV-based quiz practice plugin for Obsidian. Write your question bank in a CSV file, then practice with filtering, tagging, and progress tracking; compile your bank into a `.cqv` artifact for distribution.
+A CSV/image-folder-based quiz practice plugin for Obsidian. Write your question bank in a CSV, or put images in a vault folder (filename = answer), then practice with filtering, tagging, and progress tracking; compile CSV banks into `.cqv` artifacts for distribution.
 
 ---
 
@@ -13,10 +13,13 @@ A CSV-based quiz practice plugin for Obsidian. Write your question bank in a CSV
 1. 在 vault 根目录创建 `题库.csv`（也可在设置中指定其他路径）
    Create `题库.csv` in your vault root (or set a custom path in settings)
 
-2. 点击左侧 ribbon 的图书图标，或执行命令 `打开刷题面板`
+2. （可选）在设置中选择一个 vault 内的图片题文件夹；也可以清空 CSV 路径，只使用图片题
+   (Optional) Choose an image-question folder in settings; you can also clear the CSV path to use images only
+
+3. 点击左侧 ribbon 的图书图标，或执行命令 `打开刷题面板`
    Click the book icon in the left ribbon, or run the command `打开刷题面板`
 
-3. 开始刷题
+4. 开始刷题
    Start practicing
 
 ---
@@ -52,9 +55,9 @@ The CSV file must be **BOM-prefixed UTF-8** with 15 columns:
 
 ## 状态文件（sidecar）/ State File
 
-每个题库在同目录下有一个同名的状态文件（`题库.csv.sidecar.json`），保存该题库的全部使用状态：答题记录、统计、记忆卡片（FSRS）、筛选、收藏/掌握/错题、标签与分类的修改等。**切换题库时各题库状态相互独立、自动恢复，不会互相覆盖。**
+每个题库在同目录下有一个同名的状态文件（`题库.csv.sidecar.json`），保存该题库的全部使用状态：答题记录、统计、记忆卡片（FSRS）、筛选、收藏/掌握/错题、标签与分类的修改等。**切换题库时各题库状态相互独立、自动恢复，不会互相覆盖。** 仅图片题模式使用图片文件夹同级的 `<文件夹名>.sidecar.json`；同时有 CSV/CQV 时，两类题目的状态统一保存在 CSV/CQV 的 sidecar 中。
 
-Each question bank has a same-name state file next to it (`题库.csv.sidecar.json`), holding all per-bank state: answer records, statistics, FSRS cards, filters, favorite/mastered/wrong flags, and edits to tags/categories. **Switching banks restores each bank's own progress automatically — no overwriting.**
+Each question bank has a same-name state file next to it (`题库.csv.sidecar.json`), holding all per-bank state: answer records, statistics, FSRS cards, filters, favorite/mastered/wrong flags, and edits to tags/categories. **Switching banks restores each bank's own progress automatically — no overwriting.** Image-only mode stores state in `<image-folder>.sidecar.json` next to the folder; when a CSV/CQV is also selected, all state (text + images) lives in the CSV/CQV sidecar.
 
 - 状态写入为原子操作（临时文件 + 重命名），并每 30 分钟保留一份备份（`.bak`）；状态文件损坏或缺失时自动从备份恢复
   State writes are atomic (temp file + rename) with a 30-minute backup (`.bak`); corrupted or missing state files are auto-recovered from backup
@@ -82,16 +85,29 @@ Each question bank has a same-name state file next to it (`题库.csv.sidecar.js
 - **滑动切题**（移动端）：面板内左右滑动切换题目，可设置关闭
   **Swipe navigation** (mobile): swipe left/right to switch questions, configurable
 
+### 图片题 / Image Questions
+
+- 设置页可选择 vault 内的**图片题文件夹**（递归扫描子文件夹，支持 png/jpg/jpeg/webp/gif/bmp）；也可以清空 CSV/CQV 路径，仅使用图片题
+  Choose an **image-question folder** in settings (recursive, png/jpg/jpeg/webp/gif/bmp); clear the CSV/CQV path to use images only
+- **文件名（去扩展名）= 答案，图片本身 = 题干**；分类固定为 `识图/一级子文件夹/二级子文件夹`（不足或更深为 `其它`），标签固定为 `#图片题`
+  **Filename without extension = answer; the image is the stem**. Categories are `识图/first-level subfolder/second-level subfolder` (missing/deeper = `其它`), tag is `#图片题`
+- 未点击「展示答案」时只显示图片；点击后显示答案并记为已答。开启记忆练习时同时显示「重来/困难/良好/简单」四级评分，评分写入 FSRS 并自动下一题；关闭记忆练习时不显示评分
+  Before clicking "Show answer" only the image is shown. Clicking reveals the answer and marks the question answered. With memory practice enabled, four rating buttons (Again/Hard/Good/Easy) update FSRS and auto-advance; with memory disabled the ratings are hidden
+- 图片题不计入文字题对错统计；随机考试不包含图片题；普通随机顺序时与文字题混排，非随机时文字题在前、图片题按文件名排序
+  Image questions are excluded from text-question accuracy; random exams exclude them. With random order they mix with text questions; without random order text questions come first, images sorted by filename
+- 标签/分类只读；收藏/掌握/重复/错题仍可编辑；进度弹窗未评分显示「图片题 #序号」，评分后显示文件名
+  Tags/categories are read-only; favorite/mastered/repeat/wrong remain editable. The progress dialog shows "Image #N" before rating and the filename after rating
+
 ### 练习模式 / Practice Modes
 
-- **随机考试**：按当前筛选条件从**全部题目**（不限未答）随机抽取作为考试集，题数可在设置中修改（默认 100，不足自适应）；答题过程中**不显示对错与正确答案**，全部答完后弹出评分（每题 1 分），关闭评分后可继续在题目列表/题目间复盘错题，退出考试模式前不会自动离开
-  **Random exam**: pick a configurable number of questions (default 100, respecting current filters, answered or not) as an exam set. Correctness and answers stay hidden during the exam; after all questions are answered a score dialog appears (1 point per question). Closing it keeps the exam session open for review until you exit
-- **按当前筛选练习**：把当前筛选结果中的**全部题目**随机打乱后作为一个练习集，不限制题数，答题过程与普通刷题一致（即时反馈对错）
-  **Practice current filter**: shuffle all questions matching the current filters into one session (no question-count cap), with instant answer feedback like normal practice
+- **随机考试**：按当前筛选条件从**全部文字题**（不限未答，**不含图片题**）随机抽取作为考试集，题数可在设置中修改（默认 100，不足自适应）；答题过程中**不显示对错与正确答案**，全部答完后弹出评分（每题 1 分），关闭评分后可继续在题目列表/题目间复盘错题，退出考试模式前不会自动离开
+  **Random exam**: pick a configurable number of **text** questions (default 100, respecting current filters, answered or not; image questions excluded) as an exam set. Correctness and answers stay hidden during the exam; after all questions are answered a score dialog appears (1 point per question). Closing it keeps the exam session open for review until you exit
+- **按当前筛选练习**：把当前筛选结果中的**全部题目**（含图片题）随机打乱后作为一个练习集，不限制题数，答题过程与普通刷题一致（即时反馈对错；图片题展示答案后可评分）
+  **Practice current filter**: shuffle all questions matching the current filters (including image questions) into one session (no question-count cap), with instant answer feedback like normal practice; image questions can be rated after revealing the answer
 - **记忆练习（FSRS 间隔重复）**：基于记忆曲线的智能复习
   **Memory practice (FSRS spaced repetition)**: smart review based on memory curve
-  - 选题 = 到期复习题（按紧迫度排序）+ 每日新题（数量可配置，按自然日累计，每题库独立配额）；到期/新题池忽略「未答/已答」筛选（其它筛选仍生效），避免答过的到期卡片被永久排除
-    Practice set = due reviews (sorted by urgency) + daily new questions (configurable quota, per-day, per-bank). The due/new pool ignores the answered/unanswered filter (other filters still apply), so reviewed cards cannot be silently excluded forever
+  - 选题 = 到期复习题（按紧迫度排序）+ 每日新题（数量可配置，按自然日累计，每题库独立配额）；到期/新题池忽略「未答/已答」筛选（其它筛选仍生效），避免答过的到期卡片被永久排除。图片题同样参与到期/新题选择，展示答案后选择四级评分写入 FSRS
+    Practice set = due reviews (sorted by urgency) + daily new questions (configurable quota, per-day, per-bank). The due/new pool ignores the answered/unanswered filter (other filters still apply), so reviewed cards cannot be silently excluded forever. Image questions participate in due/new selection too; after revealing the answer, the chosen four-level rating updates FSRS
   - 答对按 FSRS 拉长复习间隔，答错进入再学习并在当天重现
     Correct answers extend intervals via FSRS; mistakes trigger relearning and reappear the same day
   - 练习集中显著标明题目来源：🆕 新题 / 🔁 复习 / ⚡ 提前复习
@@ -157,7 +173,8 @@ Each question bank has a same-name state file next to it (`题库.csv.sidecar.js
 
 | 设置 / Setting | 说明 / Description |
 |---|---|
-| CSV 文件路径 / Bank Path | 题库路径（.csv 或编译产物 .cqv），下方展示对应状态文件路径 / Path to the bank (.csv or .cqv); the corresponding state file path is shown below |
+| CSV 文件路径 / Bank Path | 题库路径（.csv 或编译产物 .cqv），下方展示对应状态文件路径；留空则只使用图片题 / Path to the bank (.csv or .cqv); clear it to use images only |
+| 图片题文件夹 / Image Folder | vault 内图片文件夹，递归扫描 png/jpg/jpeg/webp/gif/bmp；文件名去扩展名=答案 / Vault image folder; recursive png/jpg/jpeg/webp/gif/bmp; filename without extension = answer |
 | 随机题目顺序 / Random Order | 每次加载时随机排列题目 |
 | 随机选项顺序 / Random Options | 每题选项顺序随机 |
 | 随机考试题数 / Random Exam Count | 随机考试从当前筛选范围抽取的题数（默认 100，不足时取全部） |

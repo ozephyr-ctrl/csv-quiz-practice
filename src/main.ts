@@ -10,6 +10,7 @@ import { QuizView } from "./quizView";
 import { StateManager } from "./stateManager";
 import { CSVWriteQueue } from "./csvHandler";
 import { countDueCards } from "./utils";
+import { normalizeVaultFolder, resolveContentPath } from "./contentSource";
 
 export default class CSVQuizPlugin extends Plugin {
   settings: PluginSettings;
@@ -27,27 +28,30 @@ export default class CSVQuizPlugin extends Plugin {
     await this.stateManager.loadLegacyQuizState();
 
     // 阶段 4：迁移旧版进度——data.json.quizState → 当前 csvPath 的 sidecar（无视图场景）
+    // 仅图片模式没有 CSV 内容源，旧版 CSV 进度无可迁移目标，直接跳过。
     try {
-      const result = await this.stateManager.migrateLegacyState(
-        this.settings.csvPath,
-        {
-          favorite: this.settings.defaultFilterFavorite,
-          mastered: this.settings.defaultFilterMastered,
-          repeat: this.settings.defaultFilterRepeat,
-          wrong: this.settings.defaultFilterWrong,
+      if (this.settings.csvPath) {
+        const result = await this.stateManager.migrateLegacyState(
+          this.settings.csvPath,
+          {
+            favorite: this.settings.defaultFilterFavorite,
+            mastered: this.settings.defaultFilterMastered,
+            repeat: this.settings.defaultFilterRepeat,
+            wrong: this.settings.defaultFilterWrong,
+          }
+        );
+        if (result.status === "migrated") {
+          new Notice("旧版刷题进度已迁移至新格式");
+        } else if (result.status === "rejected") {
+          const tips: Record<string, string> = {
+            "csv-missing": "题库文件不存在，无法迁移旧进度",
+            "csv-read-error": "题库文件读取失败，无法迁移旧进度",
+            "bad-id": "题库文件存在空题号或重复题号，无法迁移旧进度，请修正后重试",
+            "path-mismatch": "旧进度所属题库与当前设置不一致，无法迁移（可恢复旧路径后重试）",
+            "bad-state": "旧版进度数据损坏，无法迁移，已跳过",
+          };
+          new Notice(`旧版刷题进度迁移被拒绝：${tips[result.reason]}`);
         }
-      );
-      if (result.status === "migrated") {
-        new Notice("旧版刷题进度已迁移至新格式");
-      } else if (result.status === "rejected") {
-        const tips: Record<string, string> = {
-          "csv-missing": "题库文件不存在，无法迁移旧进度",
-          "csv-read-error": "题库文件读取失败，无法迁移旧进度",
-          "bad-id": "题库文件存在空题号或重复题号，无法迁移旧进度，请修正后重试",
-          "path-mismatch": "旧进度所属题库与当前设置不一致，无法迁移（可恢复旧路径后重试）",
-          "bad-state": "旧版进度数据损坏，无法迁移，已跳过",
-        };
-        new Notice(`旧版刷题进度迁移被拒绝：${tips[result.reason]}`);
       }
     } catch (e) {
       console.error("CSV Quiz: 迁移旧进度失败", e);
@@ -142,15 +146,19 @@ export default class CSVQuizPlugin extends Plugin {
    * 无状态（新题库首次使用）直接切换。未变化时直接忽略。
    */
   async changeQuizPath(newPath: string): Promise<void> {
-    if (newPath === this.settings.csvPath) return;
+    const nextPath = newPath.trim();
+    if (nextPath === this.settings.csvPath) return;
     const prevPath = this.settings.csvPath;
+    const prevContentPath = this.getContentPath();
     const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
     const view = leaf?.view as QuizView | undefined;
     if (view && view.hasLoadedState()) {
-      const confirmed = await view.confirmQuizSwitch(newPath);
+      const confirmed = await view.confirmQuizSwitch(
+        nextPath || "（仅使用图片题）"
+      );
       if (!confirmed) return;
     }
-    this.settings.csvPath = newPath;
+    this.settings.csvPath = nextPath;
     await this.saveSettings();
     // 切换即落盘：flush 当前 sidecar 并清空 contentPath，避免刷新时误清旧题库状态
     try {
@@ -163,6 +171,74 @@ export default class CSVQuizPlugin extends Plugin {
       this.settings.csvPath = prevPath;
       await this.saveSettings();
       return;
+    }
+    // 仅在“新增/移除 CSV 导致内容源锚点变化”时迁移状态：
+    // 图片-only → 混合（图片 sidecar 并入 CSV sidecar）；混合 → 图片-only（复制回图片 sidecar）。
+    // 切换不同 CSV 题库时不迁移，保持各题库状态独立。
+    const nextContentPath = this.getContentPath();
+    const anchorChanged =
+      prevContentPath !== "" &&
+      nextContentPath !== "" &&
+      prevContentPath !== nextContentPath &&
+      ((!prevPath && !!nextPath) || (!!prevPath && !nextPath));
+    if (anchorChanged) {
+      try {
+        const res = await this.stateManager.transferSidecar(
+          prevContentPath,
+          nextContentPath
+        );
+        if (res.status === "error") {
+          new Notice("图片题/文字题进度合并失败，已保留原状态文件");
+        }
+      } catch (e) {
+        console.error("CSV Quiz: 内容源切换时迁移状态失败", e);
+        new Notice("图片题/文字题进度合并失败，已保留原状态文件");
+      }
+    }
+    this.refreshQuiz();
+  }
+
+  /**
+   * 图片题文件夹变更入口：有状态时轻量确认；切换即落盘并刷新。
+   * 仅图片模式下文件夹即内容源，换文件夹视为新题库，不迁移旧状态。
+   */
+  async changeImageFolder(newPath: string): Promise<void> {
+    const nextPath = normalizeVaultFolder(newPath);
+    if (nextPath === this.settings.imageFolder) return;
+    const prevPath = this.settings.imageFolder;
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
+    const view = leaf?.view as QuizView | undefined;
+    if (view && view.hasLoadedState()) {
+      const confirmed = await view.confirmQuizSwitch(
+        nextPath ? `图片文件夹「${nextPath}」` : "（不启用图片题）"
+      );
+      if (!confirmed) return;
+    }
+    this.settings.imageFolder = nextPath;
+    await this.saveSettings();
+    try {
+      await this.stateManager.unloadSidecar();
+    } catch (e) {
+      console.error("CSV Quiz: 切换图片文件夹前保存当前进度失败", e);
+      new Notice("当前进度保存失败，已中止切换图片文件夹");
+      this.settings.imageFolder = prevPath;
+      await this.saveSettings();
+      return;
+    }
+    // 已选 CSV/CQV 时，图片状态统一存 CSV sidecar；若该图片文件夹有历史
+    // 图片-only sidecar，先合并进来再刷新，避免切换后丢进度。
+    if (this.settings.csvPath && nextPath) {
+      try {
+        const res = await this.stateManager.mergeImageSidecar(
+          this.settings.csvPath,
+          nextPath
+        );
+        if (res.status === "error") {
+          new Notice("图片题历史进度合并失败，已保留原状态文件");
+        }
+      } catch (e) {
+        console.error("CSV Quiz: 合并图片题历史进度失败", e);
+      }
     }
     this.refreshQuiz();
   }
@@ -226,9 +302,13 @@ export default class CSVQuizPlugin extends Plugin {
       ...DEFAULT_SETTINGS,
       ...clean,
       csvPath:
-        typeof raw.csvPath === "string" && raw.csvPath
-          ? raw.csvPath
+        typeof raw.csvPath === "string"
+          ? raw.csvPath.trim()
           : DEFAULT_SETTINGS.csvPath,
+      imageFolder:
+        typeof raw.imageFolder === "string"
+          ? normalizeVaultFolder(raw.imageFolder)
+          : DEFAULT_SETTINGS.imageFolder,
       autoNextDelay: toNumber(
         raw.autoNextDelay,
         DEFAULT_SETTINGS.autoNextDelay
@@ -264,15 +344,22 @@ export default class CSVQuizPlugin extends Plugin {
     await this.stateManager.flushSettingsSave();
   }
 
+  /** 当前内容源锚点：CSV/CQV 优先，否则图片文件夹；用于 sidecar 命名与状态匹配。 */
+  private getContentPath(): string {
+    return resolveContentPath(this.settings.csvPath, this.settings.imageFolder);
+  }
+
   /** 确保当前题库的 sidecar 状态已载入内存（无视图时面板未载入）。返回是否可用。 */
   private async ensureSidecarLoaded(): Promise<boolean> {
+    const contentPath = this.getContentPath();
+    if (!contentPath) return false;
     const st = this.stateManager.getState();
-    if (st !== null && this.stateManager.getContentPath() === this.settings.csvPath) {
+    if (st !== null && this.stateManager.getContentPath() === contentPath) {
       return true;
     }
     // 未载入或路径不匹配（含面板从未打开 contentPath=null）：按当前设置载入。
     // loadSidecar 会正确设置 contentPath/currentState；corrupt 仍安全拒绝。
-    const res = await this.stateManager.loadSidecar(this.settings.csvPath, {
+    const res = await this.stateManager.loadSidecar(contentPath, {
       favorite: this.settings.defaultFilterFavorite,
       mastered: this.settings.defaultFilterMastered,
       repeat: this.settings.defaultFilterRepeat,
@@ -299,7 +386,7 @@ export default class CSVQuizPlugin extends Plugin {
       } else {
         // M5: 无视图时 sidecar 状态未载入（currentState 为 null），先确保载入
         if (!(await this.ensureSidecarLoaded())) {
-          new Notice("无法加载题库状态，请先打开刷题面板");
+          new Notice("无法加载题库状态：请先设置题库文件或图片题文件夹，并打开刷题面板");
           return;
         }
         const state = this.stateManager.getState();
@@ -350,7 +437,7 @@ export default class CSVQuizPlugin extends Plugin {
     // W1: 无视图时先确保 sidecar 状态已载入，否则 clearState() 走兼容分支
     // 写 data.json.quizState（而非 sidecar），磁盘 sidecar 原样保留、静默无效
     if (!(await this.ensureSidecarLoaded())) {
-      new Notice("无法加载题库状态，请先打开刷题面板");
+      new Notice("无法加载题库状态：请先设置题库文件或图片题文件夹，并打开刷题面板");
       return;
     }
     await this.stateManager.clearState();
@@ -371,7 +458,7 @@ export default class CSVQuizPlugin extends Plugin {
     } else {
       // M5: 无视图时先确保 sidecar 状态已载入，避免静默 no-op
       if (!(await this.ensureSidecarLoaded())) {
-        new Notice("无法加载题库状态，请先打开刷题面板");
+        new Notice("无法加载题库状态：请先设置题库文件或图片题文件夹，并打开刷题面板");
         return;
       }
       const state = this.stateManager.getState();
@@ -392,7 +479,7 @@ export default class CSVQuizPlugin extends Plugin {
       // M5: 无视图时先确保 sidecar 状态已载入，避免静默 no-op
       // （未开过面板且切换过题库路径时 currentState 为 null）
       if (!(await this.ensureSidecarLoaded())) {
-        new Notice("无法加载题库状态，请先打开刷题面板");
+        new Notice("无法加载题库状态：请先设置题库文件或图片题文件夹，并打开刷题面板");
         return;
       }
       const state = this.stateManager.getState();

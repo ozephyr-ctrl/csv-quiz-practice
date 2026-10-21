@@ -1,17 +1,20 @@
 import {
   App,
+  AbstractInputSuggest,
   Plugin,
   PluginSettingTab,
   Setting,
   Notice,
   SuggestModal,
   TFile,
+  TFolder,
   SettingDefinitionItem,
   ToggleComponent,
 } from "obsidian";
 import { PluginSettings, DEFAULT_SETTINGS } from "./types";
 import { askResetChoice } from "./modals";
 import { sidecarPathFor } from "./sidecar";
+import { normalizeVaultFolder, resolveContentPath } from "./contentSource";
 
 interface PluginHandle {
   settings: PluginSettings;
@@ -24,6 +27,7 @@ interface PluginHandle {
   syncRandomExamCount(): void;
   resetDailyNewQuota(): Promise<void>;
   changeQuizPath(path: string): Promise<void>;
+  changeImageFolder(path: string): Promise<void>;
   compileQuizToCqv(): Promise<void>;
   exportQuizMetaToCsv(): Promise<void>;
 }
@@ -61,14 +65,41 @@ export class CSVQuizSettingTab extends PluginSettingTab {
       {
         name: "CSV 文件路径",
         desc:
-          "题库文件相对于库根目录的路径（.csv 或编译产物 .cqv）；状态文件: " +
-          sidecarPathFor(this.plugin.settings.csvPath),
+          "题库文件相对于库根目录的路径（.csv 或编译产物 .cqv）；留空则只使用图片题。状态文件: " +
+          this.contentSidecarLabel(),
         control: {
           type: "file",
           key: "csvPath",
           defaultValue: DEFAULT_SETTINGS.csvPath,
           filter: (file: TFile) =>
             file.extension === "csv" || file.extension === "cqv",
+        },
+      },
+      {
+        name: "图片题文件夹",
+        desc:
+          "vault 内文件夹（递归扫描 png/jpg/jpeg/webp/gif/bmp）；文件名去扩展名=答案，图片=题干。开启记忆练习后展示四级评分。",
+        control: {
+          type: "folder",
+          key: "imageFolder",
+          defaultValue: DEFAULT_SETTINGS.imageFolder,
+          placeholder: "例如：图片题",
+          filter: (folder: TFolder) =>
+            !folder.path.split("/").some((p) => p.startsWith(".")),
+        },
+      },
+      {
+        name: "仅使用图片题",
+        desc: "清空 CSV/CQV 路径，只加载图片题文件夹；图片文件夹为空时会提示无法加载。",
+        action: () => {
+          void this.plugin.changeQuizPath("");
+        },
+      },
+      {
+        name: "清除图片题文件夹",
+        desc: "关闭图片题模式；若同时没有 CSV/CQV，将无法加载题目。",
+        action: () => {
+          void this.plugin.changeImageFolder("");
         },
       },
       {
@@ -129,7 +160,7 @@ export class CSVQuizSettingTab extends PluginSettingTab {
           },
           {
             name: "非记忆模式答题参与FSRS",
-            desc: "常规模式/随机考试中答题也更新记忆卡片（FSRS 间隔重复）；关闭后仅记忆练习更新卡片",
+            desc: "常规模式/随机考试中答题也更新记忆卡片（FSRS 间隔重复）；关闭后仅记忆练习更新卡片。图片题的四级评分始终写 FSRS（不受此开关影响）",
             control: { type: "toggle", key: "memoryUpdateInNormalMode" },
           },
         ],
@@ -325,6 +356,10 @@ export class CSVQuizSettingTab extends PluginSettingTab {
       await this.plugin.changeQuizPath(String(value));
       return;
     }
+    if (key === "imageFolder") {
+      await this.plugin.changeImageFolder(String(value));
+      return;
+    }
     if (key === "randomOrder") {
       await this.handleRandomOrderToggle(value === true);
       return;
@@ -402,6 +437,7 @@ export class CSVQuizSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("刷题啊 - 设置").setHeading();
 
     this.addCSVPathSetting(containerEl);
+    this.addImageFolderSetting(containerEl);
     this.addToggleSetting(
       containerEl,
       "随机题目顺序",
@@ -459,7 +495,7 @@ export class CSVQuizSettingTab extends PluginSettingTab {
     this.addToggleSetting(
       containerEl,
       "非记忆模式答题参与FSRS",
-      "常规模式/随机考试中答题也更新记忆卡片（FSRS 间隔重复）；关闭后仅记忆练习更新卡片",
+      "常规模式/随机考试中答题也更新记忆卡片（FSRS 间隔重复）；关闭后仅记忆练习更新卡片。图片题的四级评分始终写 FSRS（不受此开关影响）",
       "memoryUpdateInNormalMode"
     );
 
@@ -590,14 +626,25 @@ export class CSVQuizSettingTab extends PluginSettingTab {
       );
   }
 
+  /** 当前内容源 sidecar 展示文本（CSV/CQV 或图片文件夹）。 */
+  private contentSidecarLabel(): string {
+    const anchor = resolveContentPath(
+      this.plugin.settings.csvPath,
+      this.plugin.settings.imageFolder
+    );
+    return anchor ? sidecarPathFor(anchor) : "（未设置内容源）";
+  }
+
   private addCSVPathSetting(containerEl: HTMLElement): void {
+    let textComponent: { inputEl: HTMLInputElement } | null = null;
     new Setting(containerEl)
       .setName("CSV 文件路径")
       .setDesc(
-        "题库文件相对于库根目录的路径（.csv 或编译产物 .cqv）；状态文件: " +
-          sidecarPathFor(this.plugin.settings.csvPath)
+        "题库文件相对于库根目录的路径（.csv 或编译产物 .cqv）；留空则只使用图片题。状态文件: " +
+          this.contentSidecarLabel()
       )
       .addText((text) => {
+        textComponent = text;
         const originalPath = this.plugin.settings.csvPath;
         text.setPlaceholder("题库.csv").setValue(originalPath);
         // M4: 文本输入不再在 onChange 击键时直接写 settings.csvPath/saveSettings
@@ -606,13 +653,58 @@ export class CSVQuizSettingTab extends PluginSettingTab {
         // 写入设置 + 确认 + 切换。
         text.inputEl.addEventListener("change", () => {
           const finalValue = text.inputEl.value;
-          if (finalValue !== originalPath) {
+          // 与实时设置比较（不能捕获 display() 时的旧值，否则改走再改回会被吞）
+          if (finalValue !== this.plugin.settings.csvPath) {
             void this.plugin.changeQuizPath(finalValue);
           }
         });
       })
       .addButton((btn) => {
         btn.setButtonText("从库中选择").onClick(() => this.pickCSVFile());
+      })
+      .addButton((btn) => {
+        btn.setButtonText("清空").onClick(() => {
+          if (textComponent) textComponent.inputEl.value = "";
+          void this.plugin.changeQuizPath("");
+        });
+      });
+  }
+
+  private addImageFolderSetting(containerEl: HTMLElement): void {
+    let suggest: FolderSuggest | null = null;
+    let textComponent: { inputEl: HTMLInputElement } | null = null;
+    new Setting(containerEl)
+      .setName("图片题文件夹")
+      .setDesc(
+        "vault 内文件夹（递归扫描 png/jpg/jpeg/webp/gif/bmp）；文件名去扩展名=答案，图片=题干；分类为 识图/一级子文件夹/二级子文件夹。"
+      )
+      .addText((text) => {
+        textComponent = text;
+        const originalPath = this.plugin.settings.imageFolder;
+        text.setPlaceholder("例如：图片题").setValue(originalPath);
+        text.inputEl.addEventListener("change", () => {
+          const finalValue = normalizeVaultFolder(text.inputEl.value);
+          text.setValue(finalValue);
+          // 与实时设置比较，避免「选走再选回」被陈旧基准吞掉
+          if (finalValue !== this.plugin.settings.imageFolder) {
+            void this.plugin.changeImageFolder(finalValue);
+          }
+        });
+        suggest = new FolderSuggest(this.app, text.inputEl);
+        suggest.onSelect((folder) => {
+          const next = normalizeVaultFolder(folder.path);
+          text.setValue(next);
+          if (next !== this.plugin.settings.imageFolder) {
+            void this.plugin.changeImageFolder(next);
+          }
+        });
+      })
+      .addButton((btn) => {
+        btn.setButtonText("清空").onClick(() => {
+          if (textComponent) textComponent.inputEl.value = "";
+          suggest?.close();
+          void this.plugin.changeImageFolder("");
+        });
       });
   }
 
@@ -748,6 +840,39 @@ export class CSVQuizSettingTab extends PluginSettingTab {
             void this.plugin.saveSettings();
           })
       );
+  }
+}
+
+class FolderSuggest extends AbstractInputSuggest<TFolder> {
+  private readonly input: HTMLInputElement;
+
+  constructor(app: App, inputEl: HTMLInputElement) {
+    super(app, inputEl);
+    this.input = inputEl;
+    this.limit = 100;
+  }
+
+  protected getSuggestions(query: string): TFolder[] {
+    const q = query.trim().toLowerCase();
+    return this.app.vault
+      .getAllFolders(false)
+      .filter(
+        (folder) =>
+          !folder.path.split("/").some((segment) => segment.startsWith("."))
+      )
+      .filter((folder) => q === "" || folder.path.toLowerCase().includes(q))
+      .slice(0, 100);
+  }
+
+  renderSuggestion(folder: TFolder, el: HTMLElement): void {
+    el.setText(folder.path);
+  }
+
+  selectSuggestion(folder: TFolder, evt: MouseEvent | KeyboardEvent): void {
+    this.setValue(folder.path);
+    this.input.trigger("input");
+    this.close();
+    super.selectSuggestion(folder, evt);
   }
 }
 

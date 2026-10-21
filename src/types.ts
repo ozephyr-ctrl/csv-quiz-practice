@@ -14,6 +14,10 @@ export interface Question {
   mastered: string;
   repeat: string;
   wrong: string;
+  /** 图片题的 vault 内相对路径；存在即图片题（无选项，answer=文件名去扩展名）。 */
+  imagePath?: string;
+  /** 图片题在全部图片题中的稳定序号（按文件名排序后分配），未评分时用于脱敏显示。 */
+  imageNumber?: number;
 }
 
 /**
@@ -109,6 +113,8 @@ export interface PluginSettings {
   keyMastered: string;
   /** 标记快捷键：重复 */
   keyRepeat: string;
+  /** 图片题文件夹（vault 相对路径；空串 = 不启用） */
+  imageFolder: string;
 }
 
 export interface PluginData {
@@ -145,4 +151,5 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   keyFavorite: "m",
   keyMastered: "e",
   keyRepeat: "x",
+  imageFolder: "",
 };

@@ -24,6 +24,7 @@ import {
   SIDECAR_SAVE_DEBOUNCE_MS,
 } from "./sidecar";
 import { checkIdQuality, parseCSV } from "./csvHandler";
+import { normalizeVaultFolder } from "./contentSource";
 
 interface DataPatch {
   settings?: PluginSettings;
@@ -143,6 +144,12 @@ export interface SidecarMergeOutcome {
   archived?: number;
   /** 归档失败的副本数（仍会再次被检测到，下次可重试）。 */
   archiveFailed?: number;
+}
+
+/** 内容源之间转移 sidecar 的结果。status=error 时携带 reason（不抛出）。 */
+export interface SidecarMergeOpResult {
+  status: "skipped" | "copied" | "merged" | "error";
+  reason?: string;
 }
 
 export class StateManager {
@@ -845,6 +852,140 @@ export class StateManager {
       archived,
       archiveFailed,
     };
+  }
+
+  /** 取内容源 sidecar 的有效时间戳：state.updatedAt（有限正数）优先，
+   *  否则文件 mtime，都拿不到返回 0（绝不回退 Date.now()，否则「现在」会压掉真实较新数据）。 */
+  private async sidecarTimestampMs(
+    contentPath: string,
+    data: SidecarData
+  ): Promise<number> {
+    const updatedAt = data.state.updatedAt;
+    if (
+      typeof updatedAt === "number" &&
+      Number.isFinite(updatedAt) &&
+      updatedAt > 0
+    ) {
+      return updatedAt;
+    }
+    try {
+      const stat = await this.vault.adapter.stat(sidecarPathFor(contentPath));
+      const mtime = stat?.mtime;
+      if (typeof mtime === "number" && Number.isFinite(mtime) && mtime > 0) {
+        return mtime;
+      }
+    } catch {
+      // 拿不到 mtime 视为未知
+    }
+    return 0;
+  }
+
+  /**
+   * 把 from 内容源的 sidecar 复制/合并到 to 内容源（不删除 from）。
+   * 用于「图片文件夹-only ↔ CSV 锚点」切换：用户补上/去掉 CSV 路径时，
+   * 让进度跟随内容源迁移，且保留源文件以便回退。
+   * - 空路径或 from === to → skipped
+   * - from 缺失 → skipped；from 损坏 → error（不抛，仅 console.error）
+   * - to 缺失 → copied（直接写入 from 的数据）
+   * - to ok/recovered → merged（answered 并集、meta/memoryCards 取较新）
+   */
+  async transferSidecar(
+    fromContentPath: string,
+    toContentPath: string
+  ): Promise<SidecarMergeOpResult> {
+    const fromPath = fromContentPath.trim();
+    const toPath = toContentPath.trim();
+    if (fromPath === "" || toPath === "") {
+      return { status: "skipped", reason: "empty-path" };
+    }
+    if (fromPath === toPath) {
+      return { status: "skipped", reason: "same-path" };
+    }
+
+    try {
+      const fromResult = await readSidecar(this.vault, fromPath);
+      if (fromResult.status === "missing") {
+        return { status: "skipped", reason: "source-missing" };
+      }
+      if (fromResult.status === "corrupt") {
+        console.error(
+          "CSV Quiz: 读取源内容源 sidecar 失败，跳过转移",
+          fromPath,
+          fromResult.reason
+        );
+        return { status: "error", reason: fromResult.reason };
+      }
+
+      const fromData = fromResult.data;
+      const fromTs = await this.sidecarTimestampMs(fromPath, fromData);
+
+      const toResult = await readSidecar(this.vault, toPath);
+      if (toResult.status === "corrupt") {
+        // 目标损坏：不覆盖（可能仍可人工修复/从 bak 恢复），交回调用方处理
+        console.error(
+          "CSV Quiz: 目标内容源 sidecar 损坏，跳过转移",
+          toPath,
+          toResult.reason
+        );
+        return { status: "error", reason: toResult.reason };
+      }
+      if (toResult.status === "missing") {
+        await writeSidecar(this.vault, toPath, fromData);
+        return { status: "copied" };
+      }
+
+      // ok / recovered：以目标为 base 合并（recovered 视为 ok 合并）
+      const toTs = await this.sidecarTimestampMs(toPath, toResult.data);
+      const merged = mergeSidecarData(toResult.data, toTs, [
+        { path: sidecarPathFor(fromPath), data: fromData, tsMs: fromTs },
+      ]);
+      await writeSidecar(this.vault, toPath, merged.data);
+      return { status: "merged" };
+    } catch (e: unknown) {
+      const reason = e instanceof Error ? e.message : String(e);
+      console.error("CSV Quiz: 转移 sidecar 失败", fromPath, "→", toPath, e);
+      return { status: "error", reason };
+    }
+  }
+
+  /**
+   * 同时有 CSV 与图片文件夹时，把图片文件夹的 `<folder>.sidecar.json`
+   * 合并进 CSV sidecar；成功后把图片 sidecar 归档为 `.merged`（失败保留原文件，
+   * 下次可重试）。返回 copied/merged/skipped/error，归档失败不影响 status。
+   */
+  async mergeImageSidecar(
+    csvPath: string,
+    imageFolder: string
+  ): Promise<SidecarMergeOpResult> {
+    const csv = csvPath.trim();
+    const imagePath = normalizeVaultFolder(imageFolder);
+    if (csv === "" || imagePath === "") {
+      return { status: "skipped", reason: "empty-path" };
+    }
+    if (csv === imagePath) {
+      return { status: "skipped", reason: "same-path" };
+    }
+
+    const result = await this.transferSidecar(imagePath, csv);
+    if (result.status !== "copied" && result.status !== "merged") {
+      return result;
+    }
+
+    // 归档源 sidecar（重试式覆盖：目标 .merged 已存在时先删再改名）
+    const srcPath = sidecarPathFor(imagePath);
+    try {
+      if (!(await this.vault.adapter.exists(srcPath))) return result;
+      await renameOverwriteWithRetry(
+        this.vault,
+        srcPath,
+        srcPath + SIDECAR_MERGED_SUFFIX,
+        { budgetMs: 3000 }
+      );
+    } catch (e) {
+      // 归档失败只记日志：合并已成功，原文件保留可下次重试
+      console.error("CSV Quiz: 归档图片内容源 sidecar 失败", srcPath, e);
+    }
+    return result;
   }
 
   /**
