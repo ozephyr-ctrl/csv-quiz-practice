@@ -1908,6 +1908,13 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
             }
           },
           {
+            name: "\u5237\u65B0\u56FE\u7247\u9898\u5E93",
+            desc: "\u91CD\u65B0\u626B\u63CF\u56FE\u7247\u9898\u6587\u4EF6\u5939\uFF08\u65B0\u589E/\u5220\u9664/\u66FF\u6362\u56FE\u7247\uFF09\uFF0C\u4FDD\u7559\u7B54\u9898\u8BB0\u5F55\u4E0E FSRS \u5361\u7247\uFF1B\u9700\u9762\u677F\u5DF2\u6253\u5F00",
+            action: () => {
+              void this.plugin.refreshImageBank();
+            }
+          },
+          {
             name: "\u4F18\u5316\u9898\u5E93",
             desc: "\u628A\u5F53\u524D CSV \u9898\u5E93\u7F16\u8BD1\u4E3A\u5206\u53D1\u4EA7\u7269 .cqv\uFF08\u9700\u9762\u677F\u5DF2\u6253\u5F00\uFF09",
             action: () => {
@@ -2167,6 +2174,13 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
     new import_obsidian3.Setting(containerEl).setName("\u91CD\u7F6E\u5237\u9898\u8FDB\u5EA6").setDesc("\u6309\u9009\u62E9\u6E05\u7406\u7B54\u9898\u8BB0\u5F55\u548C/\u6216\u8BB0\u5FC6\u5361\u7247\uFF1B\u5168\u90E8\u91CD\u7F6E\u4F1A\u91CD\u65B0\u52A0\u8F7D\u9898\u5E93").addButton(
       (btn) => btn.setButtonText("\u91CD\u7F6E").onClick(() => {
         void this.handleResetProgress();
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("\u5237\u65B0\u56FE\u7247\u9898\u5E93").setDesc(
+      "\u91CD\u65B0\u626B\u63CF\u56FE\u7247\u9898\u6587\u4EF6\u5939\uFF08\u65B0\u589E/\u5220\u9664/\u66FF\u6362\u56FE\u7247\uFF09\uFF0C\u4FDD\u7559\u7B54\u9898\u8BB0\u5F55\u4E0E FSRS \u5361\u7247\uFF1B\u9700\u9762\u677F\u5DF2\u6253\u5F00"
+    ).addButton(
+      (btn) => btn.setButtonText("\u5237\u65B0").onClick(() => {
+        void this.plugin.refreshImageBank();
       })
     );
     new import_obsidian3.Setting(containerEl).setName("\u4F18\u5316\u9898\u5E93").setDesc("\u628A\u5F53\u524D CSV \u9898\u5E93\u7F16\u8BD1\u4E3A\u5206\u53D1\u4EA7\u7269 .cqv\uFF08\u9700\u9762\u677F\u5DF2\u6253\u5F00\uFF09").addButton(
@@ -8154,16 +8168,12 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
    */
   resolveImageDisplay(path, answerShown, questionId) {
     if (!path) return { url: null, loading: false };
-    if (answerShown) {
-      this.revokeImageBlob();
-      return { url: this.vault.adapter.getResourcePath(path), loading: false };
-    }
     if (this.imageBlobPath === path) {
       if (this.imageBlobUrl) return { url: this.imageBlobUrl, loading: false };
       if (this.imageBlobLoadingPath === path) {
         return { url: null, loading: true };
       }
-      return { url: null, loading: false };
+      return answerShown ? { url: this.vault.adapter.getResourcePath(path), loading: false } : { url: null, loading: false };
     }
     this.revokeImageBlob();
     this.imageBlobPath = path;
@@ -8577,11 +8587,19 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     );
     return true;
   }
-  async refresh() {
+  async refresh(preserveState = false) {
     var _a, _b, _c;
     const epoch = ++this.loadEpoch;
     this.canPersistState = false;
     await this.saveCurrentEdit();
+    if (preserveState && !this.isClosed) {
+      try {
+        await this.stateManager.saveStateImmediately(this.buildCurrentState());
+      } catch (e) {
+        console.error("CSV Quiz: \u5237\u65B0\u524D\u4FDD\u5B58\u8FDB\u5EA6\u5931\u8D25", e);
+      }
+    }
+    this.revokeImageBlob();
     if (this.isClosed) {
       this.canPersistState = true;
       return;
@@ -8642,7 +8660,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         this.contentMtimeMs = null;
       }
       if (epoch !== this.loadEpoch) return;
-      if (!wasSwitching && this.stateManager.getContentPath() === contentPath) {
+      if (!preserveState && !wasSwitching && this.stateManager.getContentPath() === contentPath) {
         await this.stateManager.clearState();
         if (this.isClosed) {
           this.canPersistState = true;
@@ -8678,7 +8696,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       this.exitRandomPractice();
       this.exitFilterPractice();
       this.exitMemoryPractice();
-      if (wasSwitching) {
+      if (wasSwitching || preserveState) {
         this.applyRestore(settings, loadResult.state);
       } else {
         this.applyFreshStart(settings, loadResult.state);
@@ -8689,7 +8707,9 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       this.saveState();
       this.startAutoSave();
       (_c = (_b = this.plugin).refreshMemoryReminder) == null ? void 0 : _c.call(_b);
-      new import_obsidian6.Notice(wasSwitching ? "\u5DF2\u5207\u6362\u9898\u5E93" : "\u5DF2\u5237\u65B0\uFF0C\u91CD\u65B0\u5F00\u59CB");
+      new import_obsidian6.Notice(
+        wasSwitching ? "\u5DF2\u5207\u6362\u9898\u5E93" : preserveState ? "\u56FE\u7247\u9898\u5E93\u5DF2\u5237\u65B0" : "\u5DF2\u5237\u65B0\uFF0C\u91CD\u65B0\u5F00\u59CB"
+      );
     } catch (e) {
       console.error("CSV Quiz: Refresh failed", e);
       this.showError(`\u5237\u65B0\u5931\u8D25: ${e instanceof Error ? e.message : String(e)}`);
@@ -9901,6 +9921,28 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
     const view = leaf == null ? void 0 : leaf.view;
     if (view) {
       view.syncSwipeNavigation();
+    }
+  }
+  /**
+   * 手动刷新图片题库：重新扫描图片文件夹并保留当前答题/FSRS 进度。
+   * 面板未打开时无需处理，下次打开会自然重新扫描。
+   */
+  async refreshImageBank() {
+    if (!this.settings.imageFolder) {
+      new import_obsidian8.Notice("\u672A\u8BBE\u7F6E\u56FE\u7247\u9898\u6587\u4EF6\u5939");
+      return;
+    }
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
+    const view = leaf == null ? void 0 : leaf.view;
+    if (!view) {
+      new import_obsidian8.Notice("\u5237\u9898\u9762\u677F\u672A\u6253\u5F00\uFF1A\u56FE\u7247\u9898\u5E93\u5C06\u5728\u4E0B\u6B21\u6253\u5F00\u65F6\u91CD\u65B0\u626B\u63CF");
+      return;
+    }
+    try {
+      await view.refresh(true);
+    } catch (e) {
+      console.error("CSV Quiz: \u5237\u65B0\u56FE\u7247\u9898\u5E93\u5931\u8D25", e);
+      new import_obsidian8.Notice("\u5237\u65B0\u56FE\u7247\u9898\u5E93\u5931\u8D25");
     }
   }
   /** 「随机考试题数」设置变更后同步视图按钮文案（即时生效）。 */

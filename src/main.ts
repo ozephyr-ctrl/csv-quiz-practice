@@ -501,6 +501,29 @@ export default class CSVQuizPlugin extends Plugin {
     }
   }
 
+  /**
+   * 手动刷新图片题库：重新扫描图片文件夹并保留当前答题/FSRS 进度。
+   * 面板未打开时无需处理，下次打开会自然重新扫描。
+   */
+  async refreshImageBank(): Promise<void> {
+    if (!this.settings.imageFolder) {
+      new Notice("未设置图片题文件夹");
+      return;
+    }
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
+    const view = leaf?.view as QuizView | undefined;
+    if (!view) {
+      new Notice("刷题面板未打开：图片题库将在下次打开时重新扫描");
+      return;
+    }
+    try {
+      await view.refresh(true);
+    } catch (e) {
+      console.error("CSV Quiz: 刷新图片题库失败", e);
+      new Notice("刷新图片题库失败");
+    }
+  }
+
   /** 「随机考试题数」设置变更后同步视图按钮文案（即时生效）。 */
   syncRandomExamCount(): void {
     const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();

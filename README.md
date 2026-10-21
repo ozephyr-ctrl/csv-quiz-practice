@@ -95,8 +95,8 @@ Each question bank has a same-name state file next to it (`题库.csv.sidecar.js
   Before clicking "Show answer" only the image is shown. Clicking reveals the answer and marks the question answered. With memory practice enabled, four rating buttons (Again/Hard/Good/Easy) update FSRS and auto-advance; with memory disabled the ratings are hidden
 - 图片题不计入文字题对错统计；随机考试不包含图片题；普通随机顺序时与文字题混排，非随机时文字题在前、图片题按文件名排序
   Image questions are excluded from text-question accuracy; random exams exclude them. With random order they mix with text questions; without random order text questions come first, images sorted by filename
-- 标签/分类只读；收藏/掌握/重复/错题仍可编辑；进度弹窗未评分显示「图片题 #序号」，评分后显示文件名
-  Tags/categories are read-only; favorite/mastered/repeat/wrong remain editable. The progress dialog shows "Image #N" before rating and the filename after rating
+- 标签/分类只读；收藏/掌握/重复/错题仍可编辑；进度弹窗未评分显示「图片题 #序号」，评分后显示文件名。设置页「刷新图片题库」可重新扫描图片文件夹的新增/删除/替换，保留答题记录与 FSRS 卡片
+  Tags/categories are read-only; favorite/mastered/repeat/wrong remain editable. The progress dialog shows "Image #N" before rating and the filename after rating. The settings page provides "Refresh image bank" to rescan added/removed/replaced images while keeping answers and FSRS cards
 
 ### 练习模式 / Practice Modes
 

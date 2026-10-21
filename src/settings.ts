@@ -28,6 +28,7 @@ interface PluginHandle {
   resetDailyNewQuota(): Promise<void>;
   changeQuizPath(path: string): Promise<void>;
   changeImageFolder(path: string): Promise<void>;
+  refreshImageBank(): Promise<void>;
   compileQuizToCqv(): Promise<void>;
   exportQuizMetaToCsv(): Promise<void>;
 }
@@ -319,6 +320,13 @@ export class CSVQuizSettingTab extends PluginSettingTab {
             },
           },
           {
+            name: "刷新图片题库",
+            desc: "重新扫描图片题文件夹（新增/删除/替换图片），保留答题记录与 FSRS 卡片；需面板已打开",
+            action: () => {
+              void this.plugin.refreshImageBank();
+            },
+          },
+          {
             name: "优化题库",
             desc: "把当前 CSV 题库编译为分发产物 .cqv（需面板已打开）",
             action: () => {
@@ -606,6 +614,16 @@ export class CSVQuizSettingTab extends PluginSettingTab {
       .addButton((btn) =>
         btn.setButtonText("重置").onClick(() => {
           void this.handleResetProgress();
+        })
+      );
+    new Setting(containerEl)
+      .setName("刷新图片题库")
+      .setDesc(
+        "重新扫描图片题文件夹（新增/删除/替换图片），保留答题记录与 FSRS 卡片；需面板已打开"
+      )
+      .addButton((btn) =>
+        btn.setButtonText("刷新").onClick(() => {
+          void this.plugin.refreshImageBank();
         })
       );
     new Setting(containerEl)

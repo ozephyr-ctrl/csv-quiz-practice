@@ -3615,16 +3615,15 @@ export class QuizView extends ItemView {
     questionId: string
   ): { url: string | null; loading: boolean } {
     if (!path) return { url: null, loading: false };
-    if (answerShown) {
-      this.revokeImageBlob();
-      return { url: this.vault.adapter.getResourcePath(path), loading: false };
-    }
     if (this.imageBlobPath === path) {
       if (this.imageBlobUrl) return { url: this.imageBlobUrl, loading: false };
       if (this.imageBlobLoadingPath === path) {
         return { url: null, loading: true };
       }
-      return { url: null, loading: false };
+      // 读取失败：答案已展示时退回 resource path（答案已可见，不再担心文件名泄露）
+      return answerShown
+        ? { url: this.vault.adapter.getResourcePath(path), loading: false }
+        : { url: null, loading: false };
     }
 
     this.revokeImageBlob();
@@ -4146,11 +4145,20 @@ export class QuizView extends ItemView {
     return true;
   }
 
-  async refresh(): Promise<void> {
+  async refresh(preserveState: boolean = false): Promise<void> {
     // M2: 记录本次加载世代号（新流程开始会自增，使本流程过期）
     const epoch = ++this.loadEpoch;
     this.canPersistState = false;
     await this.saveCurrentEdit();
+    // 手动刷新图片题库：保留当前内存进度，先立即落盘，避免 loadSidecar 覆盖未保存状态
+    if (preserveState && !this.isClosed) {
+      try {
+        await this.stateManager.saveStateImmediately(this.buildCurrentState());
+      } catch (e) {
+        console.error("CSV Quiz: 刷新前保存进度失败", e);
+      }
+    }
+    this.revokeImageBlob();
     // F1: 保存编辑期间视图被关闭 → 中止。onClose 已保存进度；恢复
     // canPersistState 为刷新前的值（true），已关闭视图不会因此触发任何写盘。
     if (this.isClosed) {
@@ -4242,7 +4250,11 @@ export class QuizView extends ItemView {
 
       // 载入目标题库的 sidecar 状态（切换语义：恢复其已有进度；重置语义：重新载入空状态）。
       // 切换时旧题库状态已在 changeQuizPath 的 unloadSidecar 落盘，无需 clearState。
-      if (!wasSwitching && this.stateManager.getContentPath() === contentPath) {
+      if (
+        !preserveState &&
+        !wasSwitching &&
+        this.stateManager.getContentPath() === contentPath
+      ) {
         // 同一题库的重置刷新（全部重置语义）：写空 sidecar 保留文件 + 清 meta/state
         await this.stateManager.clearState();
         // F1: clearState 期间视图被关闭 → 中止（onClose 已保存进度）
@@ -4294,8 +4306,8 @@ export class QuizView extends ItemView {
       this.exitFilterPractice();
       this.exitMemoryPractice();
 
-      if (wasSwitching) {
-        // S1: 切换题库 → 恢复新题库已存进度（含已存筛选；无 sidecar 时为空状态+默认筛选）
+      if (wasSwitching || preserveState) {
+        // S1: 切换题库 → 恢复新题库已存进度；手动刷新 → 保留当前进度。
         this.applyRestore(settings, loadResult.state);
       } else {
         // 同一题库重置刷新：Fresh start（重置进度，筛选回到默认值）
@@ -4313,7 +4325,13 @@ export class QuizView extends ItemView {
       // 3D: 状态栏立即刷新为新题库的待复习数
       (this.plugin as unknown as { refreshMemoryReminder?: () => void })
         .refreshMemoryReminder?.();
-      new Notice(wasSwitching ? "已切换题库" : "已刷新，重新开始");
+      new Notice(
+        wasSwitching
+          ? "已切换题库"
+          : preserveState
+            ? "图片题库已刷新"
+            : "已刷新，重新开始"
+      );
     } catch (e: unknown) {
       console.error("CSV Quiz: Refresh failed", e);
       this.showError(`刷新失败: ${e instanceof Error ? e.message : String(e)}`);
