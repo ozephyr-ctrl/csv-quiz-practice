@@ -159,7 +159,142 @@ describe("filterQuestions", () => {
   });
 });
 
+describe("parseCSV 简答题（16 列兼容）", () => {
+  const header16 = header + ",简答题方向";
+
+  /** CSV 单元格编码（含逗号/引号/换行时加引号）。 */
+  function cell(value: string): string {
+    return /[",\n\r]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+  }
+
+  function buildRow(cells: string[]): string {
+    return cells.map(cell).join(",");
+  }
+
+  /** 15 列简答题行（无方向列）。 */
+  function shortCells(overrides: Record<number, string> = {}): string[] {
+    const cells = [
+      "s1",
+      "什么是 X？",
+      "",
+      "",
+      "",
+      "",
+      "答案原文",
+      "#简答题 #概念",
+      "cat1",
+      "cat2",
+      "",
+      "0",
+      "",
+      "0",
+      "",
+    ];
+    for (const [index, value] of Object.entries(overrides)) {
+      cells[Number(index)] = value;
+    }
+    return cells;
+  }
+
+  it("15 列简答题：答案原文完全保留（大小写/空白/换行/高亮/HTML）", () => {
+    const rawAnswer =
+      "AbC ==高亮== <table><tr><td>单元格</td></tr></table>\n第二行 ";
+    const content = header + "\n" + buildRow(shortCells({ 6: rawAnswer }));
+    const [q] = parseCSV(content);
+    expect(q.answer).toBe(rawAnswer);
+    expect(q.answer).not.toBe(rawAnswer.toUpperCase());
+    expect(q.kind).toBe("short");
+    expect(q.rawColumnCount).toBe(15);
+    expect(q.rawDirection).toBe("");
+    // 15 列无方向时默认正向
+    expect(q.direction).toBe(">");
+  });
+
+  it("16 列简答题：解析方向 <> 与 <", () => {
+    const content =
+      header16 +
+      "\n" + buildRow([...shortCells({ 0: "s1" }), "<>"]) +
+      "\n" + buildRow([...shortCells({ 0: "s2", 6: "另一答案" }), "<"]) +
+      "\n" + buildRow([...shortCells({ 0: "s3" }), "  "]);
+    const questions = parseCSV(content);
+    expect(questions.map((q) => q.direction)).toEqual(["<>", "<", ">"]);
+    expect(questions.map((q) => q.rawDirection)).toEqual(["<>", "<", "  "]);
+    expect(questions.map((q) => q.rawColumnCount)).toEqual([16, 16, 16]);
+  });
+
+  it("标签不是精确 #简答题 时保持选择题语义（答案大写）", () => {
+    const cells = shortCells({ 6: "b", 7: "#简答题啊 #概念", 2: "甲" });
+    const [q] = parseCSV(header + "\n" + buildRow(cells));
+    expect(q.kind).toBe("choice");
+    expect(q.answer).toBe("B");
+    expect(q.direction).toBeUndefined();
+  });
+
+  it("选择题答案仍大写并 trim；15 列旧格式不回归", () => {
+    const [q] = parseCSV(header + "\n" + row("1", { answer: "  c  " }));
+    expect(q.answer).toBe("C");
+    expect(q.kind).toBe("choice");
+    expect(q.rawColumnCount).toBe(15);
+    expect(q.rawDirection).toBe("");
+    expect(q.direction).toBeUndefined();
+  });
+});
+
+describe("parseCSV 定位信息", () => {
+  const header16 = header + ",简答题方向";
+
+  function buildRow(cells: string[]): string {
+    return cells
+      .map((v) => (/[",\n\r]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v))
+      .join(",");
+  }
+
+  it("sourcePath 与 rowNumber（表头计为第 1 行）", () => {
+    const content =
+      header16 +
+      "\n" + buildRow(["1", "题干一", "甲", "乙", "丙", "丁", "A", "#t", "", "", "", "", "", "", "", ""]) +
+      "\n" + buildRow(["2", "题干二", "", "", "", "", "答案", "#简答题", "", "", "", "", "", "", "", "<>"]);
+    const questions = parseCSV(content, { sourcePath: "题库/示例.csv" });
+    expect(questions.map((q) => q.rowNumber)).toEqual([2, 3]);
+    expect(questions.map((q) => q.sourcePath)).toEqual([
+      "题库/示例.csv",
+      "题库/示例.csv",
+    ]);
+    expect(questions[1].kind).toBe("short");
+  });
+
+  it("缺省 opts 时 sourcePath 为 undefined，rowNumber 仍计算", () => {
+    const questions = parseCSV(header + "\n" + row("1") + "\n" + row("2"));
+    expect(questions[0].sourcePath).toBeUndefined();
+    expect(questions.map((q) => q.rowNumber)).toEqual([2, 3]);
+  });
+
+  it("数据之间有空行时 rowNumber 仍指向真实文件行", () => {
+    const content = header + "\n\n" + row("1") + "\n\n\n" + row("2");
+    const questions = parseCSV(content);
+    expect(questions.map((q) => q.id)).toEqual(["1", "2"]);
+    // 表头第 1 行；row("1") 第 3 行；row("2") 第 6 行
+    expect(questions.map((q) => q.rowNumber)).toEqual([3, 6]);
+  });
+
+  it("全空白行与纯逗号行被过滤，但仍占行号", () => {
+    const content = header + "\n" + row("1") + "\n   \n,,,,\n" + row("2");
+    const questions = parseCSV(content);
+    expect(questions.map((q) => q.id)).toEqual(["1", "2"]);
+    expect(questions.map((q) => q.rowNumber)).toEqual([2, 5]);
+  });
+
+  it("表头前有空行时，表头为首个非空记录且行号含空行偏移", () => {
+    const content = "\n" + header + "\n" + row("1");
+    const questions = parseCSV(content);
+    expect(questions).toHaveLength(1);
+    expect(questions[0].id).toBe("1");
+    expect(questions[0].rowNumber).toBe(3);
+  });
+});
+
 describe("buildDisplayOrder", () => {
+
   const questions = parseCSV(header + "\n" + row("1") + "\n" + row("2") + "\n" + row("3"));
 
   it("合法保存顺序被复用", () => {

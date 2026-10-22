@@ -26,12 +26,12 @@ A CSV/image-folder-based quiz practice plugin for Obsidian. Write your question 
 
 ## CSV 格式 / CSV Format
 
-CSV 文件必须为 **BOM 前缀的 UTF-8** 编码，15 列：
+CSV 文件必须为 **BOM 前缀的 UTF-8** 编码。普通选择题为 15 列；简答题在末尾增加可选第 16 列 `简答题方向`：
 
-The CSV file must be **BOM-prefixed UTF-8** with 15 columns:
+The CSV file must be **BOM-prefixed UTF-8**. Choice questions use 15 columns; short-answer questions may append an optional 16th column, `简答题方向`:
 
 ```
-序号,题干,选项A,选项B,选项C,选项D,正确答案,标签,一级分类,二级分类,三级分类,收藏,掌握,重复,错题
+序号,题干,选项A,选项B,选项C,选项D,正确答案,标签,一级分类,二级分类,三级分类,收藏,掌握,重复,错题,简答题方向
 ```
 
 | 列 / Column | 说明 / Description |
@@ -39,7 +39,7 @@ The CSV file must be **BOM-prefixed UTF-8** with 15 columns:
 | 序号 / ID | 题目的唯一标识，必须非空且不重复（空或重复题号将拒绝加载）/ Unique non-empty ID (empty/duplicate IDs are rejected) |
 | 题干 / Stem | 支持 Markdown 渲染 / Supports Markdown rendering |
 | 选项A~D / Options A-D | 四个选项 / Four answer options |
-| 正确答案 / Correct Answer | `A`, `B`, `C` 或 `D` |
+| 正确答案 / Correct Answer | 选择题填 `A`、`B`、`C` 或 `D`；简答题填答案原文（支持完整 Obsidian Markdown/HTML，保留大小写与换行）/ Choice: `A`-`D`; short answer: the answer text (full Obsidian Markdown/HTML, case and line breaks preserved) |
 | 标签 / Tags | 空格分隔，如 `#数学 #代数` / Space-separated, e.g. `#Math #Algebra` |
 | 一级~三级分类 / Categories | 三级分类体系，用于筛选 / 3-level category hierarchy for filtering |
 | 收藏/掌握/错题 / Favorite/Mastered/Wrong | 初始标记：`1` = 是 / yes, `0` = 否 / no。**运行中的变更保存在状态文件，不再写回 CSV** / Initial flags; runtime changes go to the sidecar state file, not the CSV |
@@ -50,6 +50,25 @@ The CSV file must be **BOM-prefixed UTF-8** with 15 columns:
 ```
 1,1+1=?,1,2,3,4,B,#数学 #加法,#数学,,,1,,,
 ```
+
+### 简答题 / Short Answer
+
+- 标签列必须含精确 token `#简答题`，且选项 A/B/C/D 全为空；第 7 列填答案原文。
+  The tags column must contain the exact token `#简答题`, options A-D must be empty, and the 7th column holds the answer text.
+- 15 列旧 CSV 也支持简答题：没有第 16 列时方向默认单向。普通选择题行的第 16 列必须为空；超过 16 列、或任何行 ID 含 `::`，会整库拒绝。
+  15-column CSVs are supported too: without the 16th column, direction defaults to forward. The 16th column must be empty on choice rows; more than 16 columns, or any row ID containing `::`, rejects the whole bank.
+- `简答题方向`：`>` 单向、`<` 仅反向、`<>` 双向、空值等同 `>`；其它值整库拒绝。
+  Direction: `>` forward, `<` reverse-only, `<>` both, empty = `>`; other values reject the whole bank.
+- `<` 只生成反向卡；`<>` 生成正向卡和反向卡（正向卡 id 为原题号，反向卡 id 为 `原题号::rev`，顺序正向紧跟反向）。反向卡的题干是原答案，答案是原题干。
+  `<` produces only the reverse card; `<>` produces forward then reverse cards (reverse id = `id::rev`). The reverse card swaps stem and answer.
+- 正向/反向卡共享标签、分类、收藏、掌握、重复、错题；已答状态与 FSRS 卡片各自独立，进度和每日新题配额各算一张。
+  Forward/reverse cards share tags, categories and flags, but have independent answered state and FSRS cards; each counts separately in progress and daily new quota.
+- 题干与答案按完整 Obsidian Markdown 渲染（`==高亮==`、HTML 表格、数学、代码、wikilink/嵌入等）；答案在点击「展示答案」前不会进入 DOM。
+  Stem and answer use the full Obsidian Markdown renderer; the answer is not inserted into the DOM before “展示答案”.
+- 展示答案即记为已答；记忆曲线开启时显示四级评分，关闭时只显示答案。简答题不计文字题对错统计，不进入随机考试，进度弹窗单独统计。
+  Revealing marks it answered; four-level rating appears only when memory is enabled. Short answers are excluded from text correctness stats and random exams, and are counted separately in the progress modal.
+- 编辑面板只编辑标签/分类；答案与方向请在源 CSV 中修改。`#简答题` 是保留标签：简答题不能删除，普通题不能添加。
+  The edit panel only edits tags/categories; edit answers and direction in the source CSV. `#简答题` is reserved: short answers cannot remove it, choice questions cannot add it.
 
 ---
 
@@ -68,14 +87,23 @@ The CSV file must be **BOM-prefixed UTF-8** with 15 columns:
   "type": "csvquiz-bank",
   "version": 1,
   "content": "题库.csv",
+  "contents": ["补充题库.csv", "另一份.cqv"],
   "imageFolder": "图片题"
 }
 ```
 
-- `content` 可指向 `.csv` 或 `.cqv`。
-- `content` / `imageFolder` 相对 manifest 所在目录；禁止 `..` 和绝对路径。
-- `type` 不匹配 → 当作无关 manifest 忽略；JSON 损坏、版本不是 1、字段缺失、content 不存在、imageFolder 不存在或没有图片 → 报错不加载。
-- manifest 手工创建，程序不自动生成/覆盖；编译 `.cqv` 不会自动写 manifest。
+- `content` 是主内容文件，必填；`contents` 是额外内容文件数组，可选；加载顺序为 `content` 后接 `contents`。
+  `content` is the required primary file; optional `contents` lists additional files, loaded after `content`.
+- `content` / `contents` 支持 `.csv` / `.cqv`；`imageFolder` 可省略（省略表示无图片）。
+  `content` / `contents` accept `.csv` / `.cqv`; `imageFolder` may be omitted for a text-only manifest.
+- 路径均相对 manifest 所在目录；禁止 `..` 和绝对路径；content/contents 归一化后重复、文件缺失或扩展名非法 → 整库失败。
+  Paths are relative to the manifest directory; `..`, absolute paths, duplicates, missing files or bad extensions fail the whole bank.
+- `imageFolder` 存在时仍要求至少一张受支持图片；根目录用 `"."`。
+  When present, `imageFolder` must contain at least one supported image; use `"."` for the vault root.
+- `type` 不匹配 → 当作无关 manifest 忽略；JSON 损坏、版本不是 1、content 缺失 → 报错不加载。
+  Type mismatch is ignored as an unrelated manifest; bad JSON, version other than 1, or missing content is a hard error.
+- manifest 手工创建，程序不自动生成/覆盖；旧配置迁移生成的 manifest 仅含 `content` + `imageFolder`。
+  Manifests are created manually; the legacy migration only writes `content` + `imageFolder`.
 
 Choose an explicit source type in settings:
 
@@ -144,13 +172,13 @@ Each state file holds answer records, statistics, FSRS cards, filters, favorite/
 
 ### 练习模式 / Practice Modes
 
-- **随机考试**：按当前筛选条件从**全部文字题**（不限未答，**不含图片题**）随机抽取作为考试集，题数可在设置中修改（默认 100，不足自适应）；答题过程中**不显示对错与正确答案**，全部答完后弹出评分（每题 1 分），关闭评分后可继续在题目列表/题目间复盘错题，退出考试模式前不会自动离开
+- **随机考试**：按当前筛选条件从**全部普通选择题**（不限未答，**不含图片题、简答题**）随机抽取作为考试集，题数可在设置中修改（默认 100，不足自适应）；答题过程中**不显示对错与正确答案**，全部答完后弹出评分（每题 1 分），关闭评分后可继续在题目列表/题目间复盘错题，退出考试模式前不会自动离开
   **Random exam**: pick a configurable number of **text** questions (default 100, respecting current filters, answered or not; image questions excluded) as an exam set. Correctness and answers stay hidden during the exam; after all questions are answered a score dialog appears (1 point per question). Closing it keeps the exam session open for review until you exit
-- **按当前筛选练习**：把当前筛选结果中的**全部题目**（含图片题）随机打乱后作为一个练习集，不限制题数，答题过程与普通刷题一致（即时反馈对错；图片题展示答案后可评分）
+- **按当前筛选练习**：把当前筛选结果中的**全部题目**（含图片题、简答题）随机打乱后作为一个练习集，不限制题数，答题过程与普通刷题一致（即时反馈对错；图片题/简答题展示答案后可评分）
   **Practice current filter**: shuffle all questions matching the current filters (including image questions) into one session (no question-count cap), with instant answer feedback like normal practice; image questions can be rated after revealing the answer
 - **记忆练习（FSRS 间隔重复）**：基于记忆曲线的智能复习
   **Memory practice (FSRS spaced repetition)**: smart review based on memory curve
-  - 选题 = 到期复习题（按紧迫度排序）+ 每日新题（数量可配置，按自然日累计，每题库独立配额）；到期/新题池忽略「未答/已答」筛选（其它筛选仍生效），避免答过的到期卡片被永久排除。图片题同样参与到期/新题选择，展示答案后选择四级评分写入 FSRS
+  - 选题 = 到期复习题（按紧迫度排序）+ 每日新题（数量可配置，按自然日累计，每题库独立配额）；到期/新题池忽略「未答/已答」筛选（其它筛选仍生效），避免答过的到期卡片被永久排除。图片题、简答题同样参与到期/新题选择，展示答案后选择四级评分写入 FSRS；`<>` 的正向/反向卡各占一张
     Practice set = due reviews (sorted by urgency) + daily new questions (configurable quota, per-day, per-bank). The due/new pool ignores the answered/unanswered filter (other filters still apply), so reviewed cards cannot be silently excluded forever. Image questions participate in due/new selection too; after revealing the answer, the chosen four-level rating updates FSRS
   - 答对按 FSRS 拉长复习间隔，答错进入再学习并在当天重现
     Correct answers extend intervals via FSRS; mistakes trigger relearning and reappear the same day
@@ -184,21 +212,27 @@ Each state file holds answer records, statistics, FSRS cards, filters, favorite/
 
 - 答题过程中可编辑当前题目的标签、分类和标记（收藏/掌握/重复/错题）
   Edit tags, categories, and flags of the current question during practice
+- 简答题只开放标签/分类编辑；答案与 `简答题方向` 请在源 CSV 中修改。`#简答题` 是保留标签：简答题不能删除，普通题不能添加
+  Short answers only allow tag/category edits; edit the answer and direction in the source CSV. `#简答题` is reserved: short answers cannot remove it, choice questions cannot add it
+- `<>` 的正向/反向卡共享标签、分类与标记；修改任一卡会同步到同一 CSV 行
+  Forward/reverse cards share tags, categories and flags; editing either card updates the same CSV row
 - 修改自动保存到**状态文件**（不修改题库文件本身）
   Changes auto-save to the **state file** (the bank file itself is not modified)
-- **导出修改到 CSV**（编辑者用）：把状态文件中的标签/分类/重复修改写回 CSV 并清除对应覆盖，随题库一起发布
-  **Export changes to CSV** (for bank authors): write tag/category/repeat edits from the state file back into the CSV and clear the overrides, so they ship with the bank
+- **导出修改到 CSV**（编辑者用）：把状态文件中的标签/分类/重复修改写回题目所属 CSV 并清除对应覆盖；多 CSV manifest 会逐文件写回，`.cqv` 源跳过
+  **Export changes to CSV** (for bank authors): write tag/category/repeat edits back to each question's source CSV and clear the overrides; multi-CSV manifests are written per file, `.cqv` sources are skipped
 
 ### 编译产物（.cqv）/ Compiled Bank (.cqv)
 
 - 设置页「**优化题库**」：把 CSV 编译为同目录 `.cqv` 二进制产物（校验题号质量，可附一句备注），随产物分发
   Settings page "**Optimize Bank**": compile the CSV into a `.cqv` binary artifact next to it (ID quality validated, optional note), for distribution
-- 使用者把 `.cqv` 设为题库路径即可使用：产物只读、解析更快、不会被误改；产物更新后状态按题号自动对齐
-  Consumers set the `.cqv` as the bank path: read-only, faster to load, safe from accidental edits; state stays aligned by question ID when the artifact is updated
+- CQV v1 仍可读取；含简答题/方向或多 CSV 源时写 v2（14 字段 + 有序源文件列表），多 CSV 会按顺序合并为一个产物
+  CQV v1 remains readable; short answers/directions or multiple CSV sources are written as v2 (14 fields + ordered source files); multiple CSVs are merged in order into one artifact
+- 编译要求全部源为 CSV；manifest 的 content/contents 中混有 `.cqv` 时拒编。使用者把 `.cqv` 设为来源即可使用：产物只读、解析更快、不会被误改；产物更新后状态按题号自动对齐
+  Compilation requires all sources to be CSV; a manifest mixing `.cqv` sources is rejected. Consumers can set the `.cqv` as the source: read-only, faster, safe from accidental edits; state stays aligned by question ID
 - `.cqv` 与同名 CSV 的状态文件相互独立（同题库换格式 = 换状态）
   The `.cqv` and its CSV counterpart keep separate state files (switching format = separate state)
-- **安全提示**：题干按 Markdown 渲染（可含内嵌 HTML），请只打开来自**可信来源**的题库（CSV 或 `.cqv`）
-  **Security note**: stems are rendered as Markdown (embedded HTML included) — only open banks (CSV or `.cqv`) from **trusted sources**
+- **安全提示**：题干和简答答案按 Markdown 渲染（可含内嵌 HTML），请只打开来自**可信来源**的题库（CSV 或 `.cqv`）
+  **Security note**: stems and short-answer answers are rendered as Markdown (embedded HTML included) — only open banks (CSV or `.cqv`) from **trusted sources**
 
 ### 进度持久化 / Persistence
 

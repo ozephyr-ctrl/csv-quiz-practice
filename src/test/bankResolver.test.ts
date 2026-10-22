@@ -168,6 +168,7 @@ describe("parseBankManifest", () => {
     expect(result.status).toBe("ok");
     if (result.status !== "ok") return;
     expect(result.contentPath).toBe("banks/x/题库.csv");
+    expect(result.contentPaths).toEqual(["banks/x/题库.csv"]);
     expect(result.imageFolder).toBe("banks/x/imgs");
     expect(result.manifest).toEqual({
       type: MANIFEST_TYPE,
@@ -175,6 +176,109 @@ describe("parseBankManifest", () => {
       content: "题库.csv",
       imageFolder: "imgs",
     });
+  });
+
+  it("旧 v1 manifest（content+imageFolder）解析结果与 4.1.0 逐字段一致", () => {
+    const result = parseBankManifest(
+      manifestText({ content: "题库.csv", imageFolder: "imgs" }),
+      "banks/x"
+    );
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    expect(result.contentPath).toBe("banks/x/题库.csv");
+    expect(result.contentPaths).toEqual(["banks/x/题库.csv"]);
+    expect(result.imageFolder).toBe("banks/x/imgs");
+    // 不新增 contents 字段，manifest 仍逐字段与旧版一致
+    expect(result.manifest).toEqual({
+      type: MANIFEST_TYPE,
+      version: 1,
+      content: "题库.csv",
+      imageFolder: "imgs",
+    });
+    expect(Object.prototype.hasOwnProperty.call(result.manifest, "contents")).toBe(
+      false
+    );
+  });
+
+  it("contents：顺序为 [content, ...contents]，路径按题库文件夹拼接", () => {
+    const result = parseBankManifest(
+      manifestText({
+        content: "main.csv",
+        contents: ["extra1.csv", "sub/extra2.cqv"],
+        imageFolder: "img",
+      }),
+      "banks/x"
+    );
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    expect(result.contentPaths).toEqual([
+      "banks/x/main.csv",
+      "banks/x/extra1.csv",
+      "banks/x/sub/extra2.cqv",
+    ]);
+    expect(result.contentPath).toBe("banks/x/main.csv");
+    expect(result.manifest.contents).toEqual(["extra1.csv", "sub/extra2.cqv"]);
+  });
+
+  it("contents 与 content 重复（归一化后）→ error", () => {
+    const result = parseBankManifest(
+      manifestText({ content: "a.csv", contents: ["./a.csv"] }),
+      "banks/x"
+    );
+    expect(result.status).toBe("error");
+    if (result.status !== "error") return;
+    expect(result.message).toContain("重复");
+    expect(result.message).toContain("a.csv");
+  });
+
+  it("contents 内部重复（./a.csv vs a.csv）→ error", () => {
+    const result = parseBankManifest(
+      manifestText({ content: "main.csv", contents: ["./a.csv", "a.csv"] }),
+      "banks/x"
+    );
+    expect(result.status).toBe("error");
+    if (result.status !== "error") return;
+    expect(result.message).toContain("重复");
+  });
+
+  it("contents 逐项禁止 ..、绝对路径、反斜杠与坏扩展名", () => {
+    for (const contents of [
+      ["../a.csv"],
+      ["sub/../a.csv"],
+      ["/a.csv"],
+      ["C:/a.csv"],
+      ["sub\\a.csv"],
+      ["note.md"],
+      ["a"],
+    ]) {
+      expect(
+        parseBankManifest(manifestText({ contents }), "banks/x").status
+      ).toBe("error");
+    }
+  });
+
+  it("contents 非数组或含非字符串 → error", () => {
+    for (const contents of ["a.csv", 42, null, ["ok.csv", 1], ["ok.csv", ""]]) {
+      expect(
+        parseBankManifest(manifestText({ contents }), "banks/x").status
+      ).toBe("error");
+    }
+  });
+
+  it("imageFolder 省略 → 无图片（imageFolder 为空串）", () => {
+    const text = JSON.stringify({
+      type: MANIFEST_TYPE,
+      version: 1,
+      content: "题库.csv",
+    });
+    const result = parseBankManifest(text, "banks/x");
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    expect(result.imageFolder).toBe("");
+    expect(result.contentPaths).toEqual(["banks/x/题库.csv"]);
+    expect(
+      Object.prototype.hasOwnProperty.call(result.manifest, "imageFolder")
+    ).toBe(false);
   });
 
   it("根题库：路径不带前缀；imageFolder '.' 解析为 vault 根", () => {
@@ -223,7 +327,7 @@ describe("parseBankManifest", () => {
     ).toBe("error");
   });
 
-  it("content/imageFolder 缺失或类型错误 → error", () => {
+  it("content 缺失或类型错误 → error", () => {
     expect(
       parseBankManifest(manifestText({ content: "" }), "banks/x").status
     ).toBe("error");
@@ -231,11 +335,19 @@ describe("parseBankManifest", () => {
       parseBankManifest(manifestText({ content: 123 }), "banks/x").status
     ).toBe("error");
     expect(
-      parseBankManifest(manifestText({ imageFolder: undefined }), "banks/x")
-        .status
+      parseBankManifest(manifestText({ content: undefined }), "banks/x").status
+    ).toBe("error");
+  });
+
+  it("imageFolder 存在但为空/空白或类型错误 → error", () => {
+    expect(
+      parseBankManifest(manifestText({ imageFolder: "" }), "banks/x").status
     ).toBe("error");
     expect(
       parseBankManifest(manifestText({ imageFolder: "  " }), "banks/x").status
+    ).toBe("error");
+    expect(
+      parseBankManifest(manifestText({ imageFolder: 123 }), "banks/x").status
     ).toBe("error");
   });
 
@@ -501,6 +613,73 @@ describe("resolveBankSource：manifest 模式", () => {
     if (result.status !== "prompt") return;
     expect(result.reason).toBe("type-mismatch");
   });
+
+  it("带 contents 的 manifest → contentPaths 含全部文件", async () => {
+    const manifest = JSON.stringify({
+      type: MANIFEST_TYPE,
+      version: 1,
+      content: "main.csv",
+      contents: ["extra1.csv", "extra2.cqv"],
+    });
+    const vault = makeVault(
+      [
+        "banks/a/manifest.json",
+        "banks/a/main.csv",
+        "banks/a/extra1.csv",
+        "banks/a/extra2.cqv",
+      ],
+      { "banks/a/manifest.json": manifest }
+    );
+    const result = await resolveBankSource(vault, { bankFolder: "banks/a" });
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    expect(result.source.mode).toBe("manifest");
+    expect(result.source.contentPaths).toEqual([
+      "banks/a/main.csv",
+      "banks/a/extra1.csv",
+      "banks/a/extra2.cqv",
+    ]);
+    expect(result.source.contentPath).toBe("banks/a/main.csv");
+    expect(result.source.imageFolder).toBe("");
+  });
+
+  it("带 contents 且缺图片文件夹 → 仍 OK（图片可选）", async () => {
+    const manifest = JSON.stringify({
+      type: MANIFEST_TYPE,
+      version: 1,
+      content: "main.csv",
+      contents: ["extra.csv"],
+      imageFolder: "img",
+    });
+    const vault = makeVault(
+      ["banks/a/manifest.json", "banks/a/main.csv", "banks/a/extra.csv"],
+      { "banks/a/manifest.json": manifest }
+    );
+    const result = await resolveBankSource(vault, { bankFolder: "banks/a" });
+    expect(result.status).toBe("error");
+    if (result.status !== "error") return;
+    expect(result.reason).toBe("image-folder-empty");
+
+    const noImage = makeVault(
+      ["banks/a/manifest.json", "banks/a/main.csv", "banks/a/extra.csv"],
+      {
+        "banks/a/manifest.json": JSON.stringify({
+          type: MANIFEST_TYPE,
+          version: 1,
+          content: "main.csv",
+          contents: ["extra.csv"],
+        }),
+      }
+    );
+    const ok = await resolveBankSource(noImage, { bankFolder: "banks/a" });
+    expect(ok.status).toBe("ok");
+    if (ok.status !== "ok") return;
+    expect(ok.source.contentPaths).toEqual([
+      "banks/a/main.csv",
+      "banks/a/extra.csv",
+    ]);
+    expect(ok.source.imageFolder).toBe("");
+  });
 });
 
 describe("resolveBankSource：无 manifest", () => {
@@ -722,6 +901,7 @@ describe("resolveConfiguredSource：manifest", () => {
     if (result.status !== "ok") return;
     expect(result.source.mode).toBe("manifest");
     expect(result.source.contentPath).toBe("banks/a/题库.csv");
+    expect(result.source.contentPaths).toEqual(["banks/a/题库.csv"]);
     expect(result.source.imageFolder).toBe("banks/a/imgs");
     expect(result.source.anchor).toBe("banks/a/manifest");
     expect(result.source.manifest).not.toBeNull();
@@ -793,6 +973,108 @@ describe("resolveConfiguredSource：manifest", () => {
     expect(result.source.contentPath).toBe("题库.csv");
     expect(result.source.imageFolder).toBe("/");
     expect(result.source.anchor).toBe("manifest");
+  });
+
+  it("contents：返回全部内容文件；imageFolder 省略时跳过图片扫描", async () => {
+    const manifest = JSON.stringify({
+      type: MANIFEST_TYPE,
+      version: 1,
+      content: "main.csv",
+      contents: ["extra1.csv", "extra2.cqv"],
+    });
+    const vault = makeVault(
+      [
+        "banks/a/manifest.json",
+        "banks/a/main.csv",
+        "banks/a/extra1.csv",
+        "banks/a/extra2.cqv",
+      ],
+      { "banks/a/manifest.json": manifest }
+    );
+    const result = await resolveConfiguredSource(vault, {
+      sourceType: "manifest",
+      sourcePath: "banks/a",
+    });
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    expect(result.source.contentPaths).toEqual([
+      "banks/a/main.csv",
+      "banks/a/extra1.csv",
+      "banks/a/extra2.cqv",
+    ]);
+    expect(result.source.contentPath).toBe("banks/a/main.csv");
+    expect(result.source.imageFolder).toBe("");
+  });
+
+  it("contents 中任一文件缺失 → error（列出缺失路径）", async () => {
+    const manifest = JSON.stringify({
+      type: MANIFEST_TYPE,
+      version: 1,
+      content: "main.csv",
+      contents: ["extra1.csv", "extra2.csv"],
+    });
+    const vault = makeVault(
+      ["banks/a/manifest.json", "banks/a/main.csv", "banks/a/extra1.csv"],
+      { "banks/a/manifest.json": manifest }
+    );
+    const result = await resolveConfiguredSource(vault, {
+      sourceType: "manifest",
+      sourcePath: "banks/a",
+    });
+    expect(result.status).toBe("error");
+    if (result.status !== "error") return;
+    expect(result.reason).toBe("content-missing");
+    expect(result.message).toContain("banks/a/extra2.csv");
+  });
+
+  it("imageFolder 存在但目录无图片 → error", async () => {
+    const vault = makeVault(
+      ["banks/a/manifest.json", "banks/a/main.csv", "banks/a/img/readme.txt"],
+      { "banks/a/manifest.json": manifestText({ content: "main.csv" }) }
+    );
+    const result = await resolveConfiguredSource(vault, {
+      sourceType: "manifest",
+      sourcePath: "banks/a",
+    });
+    expect(result.status).toBe("error");
+    if (result.status !== "error") return;
+    expect(result.reason).toBe("image-folder-empty");
+  });
+
+  it("imageFolder 存在但为空串 → error（manifest 无效）", async () => {
+    const vault = makeVault(
+      ["banks/a/manifest.json", "banks/a/main.csv"],
+      { "banks/a/manifest.json": manifestText({ content: "main.csv", imageFolder: "" }) }
+    );
+    const result = await resolveConfiguredSource(vault, {
+      sourceType: "manifest",
+      sourcePath: "banks/a",
+    });
+    expect(result.status).toBe("error");
+    if (result.status !== "error") return;
+    expect(result.reason).toBe("manifest-invalid");
+  });
+
+  it("根 manifest + imageFolder '.' + contents → 正常", async () => {
+    const manifest = JSON.stringify({
+      type: MANIFEST_TYPE,
+      version: 1,
+      content: "main.csv",
+      contents: ["extra.csv"],
+      imageFolder: ".",
+    });
+    const vault = makeVault(
+      ["manifest.json", "main.csv", "extra.csv", "a.png"],
+      { "manifest.json": manifest }
+    );
+    const result = await resolveConfiguredSource(vault, {
+      sourceType: "manifest",
+      sourcePath: "/",
+    });
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    expect(result.source.contentPaths).toEqual(["main.csv", "extra.csv"]);
+    expect(result.source.imageFolder).toBe("/");
   });
 });
 

@@ -46,10 +46,12 @@ const CSV_EXTENSIONS = new Set(["csv", "cqv"]);
 export interface BankManifest {
   type: "csvquiz-bank";
   version: 1;
-  /** .csv/.cqv，相对 manifest 所在目录。 */
+  /** .csv/.cqv，相对 manifest 所在目录（主内容文件，必填）。 */
   content: string;
-  /** 图片文件夹，相对 manifest 所在目录。 */
-  imageFolder: string;
+  /** 额外内容文件（可选，顺序排在 content 之后），.csv/.cqv，相对 manifest 所在目录。 */
+  contents?: string[];
+  /** 图片文件夹，相对 manifest 所在目录；省略表示无图片。 */
+  imageFolder?: string;
 }
 
 /** 解析成功后的来源描述。 */
@@ -57,9 +59,11 @@ export interface ResolvedBankSource {
   mode: "manifest" | "csv" | "image";
   /** 规范化；"/" 表示 vault 根，"" 表示未设置。 */
   bankFolder: string;
-  /** manifest/csv 模式：CSV/CQV 路径；image 模式 ""。 */
+  /** manifest/csv 模式：首个 CSV/CQV 路径（= contentPaths[0]）；image 模式 ""。 */
   contentPath: string;
-  /** manifest/image 模式：图片文件夹；csv 模式 ""。 */
+  /** 全部内容文件（顺序：content 后接 contents）；image 模式为空数组。 */
+  contentPaths: string[];
+  /** manifest/image 模式：图片文件夹（"" 表示无图片）；csv 模式 ""。 */
   imageFolder: string;
   /** sidecar 锚点：manifest 模式 `<folder>/manifest`；csv=contentPath；image=folder。 */
   anchor: string;
@@ -152,7 +156,11 @@ export type ParseBankManifestResult =
   | {
       status: "ok";
       manifest: BankManifest;
+      /** 主内容文件（= contentPaths[0]）。 */
       contentPath: string;
+      /** 完整内容文件顺序：[content, ...contents]。 */
+      contentPaths: string[];
+      /** 图片文件夹；"" 表示无图片。 */
       imageFolder: string;
     }
   | { status: "ignored" }
@@ -201,8 +209,11 @@ function extensionOf(path: string): string {
  * - JSON 解析失败 / 顶层非对象 → error；
  * - `type !== "csvquiz-bank"` → ignored（视为无关 manifest，按无 manifest 处理）；
  * - `version !== 1` → error；
- * - `content`/`imageFolder` 必须是非空字符串，且为安全的相对路径；
- * - `content` 必须是 `.csv`/`.cqv`；`imageFolder` 允许 `"."`（= 题库文件夹自身）。
+ * - `content` 必须是非空字符串，且为安全的相对 .csv/.cqv 路径；
+ * - `contents` 可选：字符串数组，逐项为安全的相对 .csv/.cqv 路径，归一化后不得与
+ *   content 或彼此重复；
+ * - `imageFolder` 可选：省略 = 无图片；存在时必须是非空安全的相对文件夹路径，
+ *   `"."` 表示 manifest 所在文件夹自身（根目录解析为根哨兵 `"/"`）。
  * 返回解析后的 vault 路径（已按 bankFolder 拼接）。
  */
 export function parseBankManifest(
@@ -229,20 +240,15 @@ export function parseBankManifest(
       )}）。`,
     };
   }
+
+  // ---- content（主内容文件，必填） ----
   const contentRaw = record.content;
-  const imageRaw = record.imageFolder;
-  if (
-    typeof contentRaw !== "string" ||
-    contentRaw.trim() === "" ||
-    typeof imageRaw !== "string" ||
-    imageRaw.trim() === ""
-  ) {
+  if (typeof contentRaw !== "string" || contentRaw.trim() === "") {
     return {
       status: "error",
-      message: "manifest.json 的 content 与 imageFolder 必须是非空字符串。",
+      message: "manifest.json 的 content 必须是非空字符串。",
     };
   }
-
   const contentRel = normalizeManifestRelative(contentRaw, false);
   if (!contentRel.ok || contentRel.path === "") {
     return {
@@ -258,33 +264,105 @@ export function parseBankManifest(
     };
   }
 
-  // imageFolder 允许反斜杠（先统一），但仍禁止绝对路径与 `..`；`"."` 表示题库文件夹自身
-  const imageRel = normalizeManifestRelative(imageRaw, true);
-  if (!imageRel.ok) {
-    return {
-      status: "error",
-      message:
-        "manifest.json 的 imageFolder 必须是相对 manifest 所在目录的文件夹路径（禁止绝对路径与 ..）。",
-    };
+  // ---- contents（额外内容文件，可选） ----
+  const contentsRaw = record.contents;
+  const contentsRels: string[] = [];
+  let contentsValues: string[] | undefined;
+  if (contentsRaw !== undefined) {
+    if (!Array.isArray(contentsRaw)) {
+      return {
+        status: "error",
+        message: "manifest.json 的 contents 必须是字符串数组（可省略）。",
+      };
+    }
+    const seen = new Set<string>([contentRel.path]);
+    for (let i = 0; i < contentsRaw.length; i += 1) {
+      const item = contentsRaw[i];
+      if (typeof item !== "string" || item.trim() === "") {
+        return {
+          status: "error",
+          message: `manifest.json 的 contents[${i}] 必须是非空字符串。`,
+        };
+      }
+      const rel = normalizeManifestRelative(item, false);
+      if (!rel.ok || rel.path === "") {
+        return {
+          status: "error",
+          message: `manifest.json 的 contents[${i}] 必须是相对 manifest 所在目录的文件路径（禁止绝对路径、.. 与反斜杠）：${item}`,
+        };
+      }
+      if (!CSV_EXTENSIONS.has(extensionOf(rel.path))) {
+        return {
+          status: "error",
+          message: `manifest.json 的 contents[${i}] 必须是 .csv 或 .cqv 文件：${item}`,
+        };
+      }
+      if (seen.has(rel.path)) {
+        return {
+          status: "error",
+          message: `manifest.json 的内容文件重复（content 与 contents 之间或 contents 内部）：${rel.path}`,
+        };
+      }
+      seen.add(rel.path);
+      contentsRels.push(rel.path);
+    }
+    contentsValues = contentsRaw.map((item) => (item as string).trim());
+  }
+
+  // ---- imageFolder（可选） ----
+  // 省略 = 无图片；存在时允许反斜杠（先统一），但仍禁止绝对路径与 `..`；
+  // `"."` 表示题库文件夹自身。
+  const imageRaw = record.imageFolder;
+  let imageRelPath: string | null = null;
+  let imageValue: string | undefined;
+  if (imageRaw !== undefined) {
+    if (typeof imageRaw !== "string" || imageRaw.trim() === "") {
+      return {
+        status: "error",
+        message:
+          "manifest.json 的 imageFolder 若存在必须是非空字符串（省略表示无图片）。",
+      };
+    }
+    const imageRel = normalizeManifestRelative(imageRaw, true);
+    if (!imageRel.ok) {
+      return {
+        status: "error",
+        message:
+          "manifest.json 的 imageFolder 必须是相对 manifest 所在目录的文件夹路径（禁止绝对路径与 ..）。",
+      };
+    }
+    imageRelPath = imageRel.path;
+    imageValue = imageRaw.trim();
   }
 
   const folder = normalizeBankFolder(bankFolder);
   // `imageFolder: "."` 表示 manifest 所在文件夹自身；根目录解析为根哨兵 `"/"`，
   // 由调用方用 ROOT_IMAGE_ANCHOR 承载根级图片题库的 sidecar。
   const imageFolder =
-    imageRel.path === ""
-      ? folder
-      : joinVaultPath(folder, imageRel.path);
+    imageRelPath === null
+      ? ""
+      : imageRelPath === ""
+        ? folder
+        : joinVaultPath(folder, imageRelPath);
+
+  const contentPath = joinVaultPath(folder, contentRel.path);
+  const contentPaths = [
+    contentPath,
+    ...contentsRels.map((rel) => joinVaultPath(folder, rel)),
+  ];
+  const manifest: BankManifest = {
+    type: MANIFEST_TYPE,
+    version: 1,
+    content: contentRaw.trim(),
+  };
+  if (contentsValues !== undefined) manifest.contents = contentsValues;
+  if (imageValue !== undefined) manifest.imageFolder = imageValue;
 
   return {
     status: "ok",
-    manifest: {
-      type: MANIFEST_TYPE,
-      version: 1,
-      content: contentRaw.trim(),
-      imageFolder: imageRaw.trim(),
-    },
-    contentPath: joinVaultPath(folder, contentRel.path),
+    manifest,
+    contentPath,
+    contentPaths,
     imageFolder,
   };
 }
@@ -533,11 +611,37 @@ function csvSource(folder: string, contentPath: string): BankResolution {
       mode: "csv",
       bankFolder: folder,
       contentPath,
+      contentPaths: [contentPath],
       imageFolder: "",
       anchor: contentPath,
       manifest: null,
     },
   };
+}
+
+/** 逐个检查 vault 路径是否存在，返回缺失的路径列表。 */
+async function missingVaultPaths(
+  vault: Vault,
+  paths: string[]
+): Promise<string[]> {
+  const missing: string[] = [];
+  for (const path of paths) {
+    let exists = false;
+    try {
+      exists = await vault.adapter.exists(path);
+    } catch {
+      exists = false;
+    }
+    if (!exists) missing.push(path);
+  }
+  return missing;
+}
+
+/** 内容文件缺失的统一错误文案（列出全部缺失路径）。 */
+function contentMissingMessage(missing: string[]): string {
+  return missing.length === 1
+    ? `manifest.json 指定的内容文件不存在：${missing[0]}`
+    : `manifest.json 指定的内容文件不存在：${missing.join("、")}`;
 }
 
 /** 把任意 vault 路径规范成无前导 `/`、无反斜杠的形态。 */
@@ -627,6 +731,7 @@ export async function resolveConfiguredSource(
         mode: "image",
         bankFolder: folder,
         contentPath: "",
+        contentPaths: [],
         imageFolder: folder,
         anchor: folder === ROOT_BANK_FOLDER ? ROOT_IMAGE_ANCHOR : folder,
         manifest: null,
@@ -670,27 +775,20 @@ export async function resolveConfiguredSource(
     return configuredError("manifest-invalid", parsed.message);
   }
 
-  let contentExists = false;
-  try {
-    contentExists = await vault.adapter.exists(parsed.contentPath);
-  } catch {
-    contentExists = false;
-  }
-  if (!contentExists) {
-    return configuredError(
-      "content-missing",
-      `manifest.json 指定的内容文件不存在：${parsed.contentPath}`
-    );
+  const missingContent = await missingVaultPaths(vault, parsed.contentPaths);
+  if (missingContent.length > 0) {
+    return configuredError("content-missing", contentMissingMessage(missingContent));
   }
 
-  const files = await listVaultFiles(vault);
-  if (imagePathsUnder(files, parsed.imageFolder).length === 0) {
-    return configuredError(
-      "image-folder-empty",
-      `manifest.json 指定的图片文件夹不存在或没有受支持的图片：${
-        parsed.imageFolder === "" ? ROOT_BANK_FOLDER : parsed.imageFolder
-      }`
-    );
+  // imageFolder 省略/为空 = 无图片，跳过图片扫描与「至少一张图」校验。
+  if (parsed.imageFolder !== "") {
+    const files = await listVaultFiles(vault);
+    if (imagePathsUnder(files, parsed.imageFolder).length === 0) {
+      return configuredError(
+        "image-folder-empty",
+        `manifest.json 指定的图片文件夹不存在或没有受支持的图片：${parsed.imageFolder}`
+      );
+    }
   }
 
   return {
@@ -699,6 +797,7 @@ export async function resolveConfiguredSource(
       mode: "manifest",
       bankFolder: folder,
       contentPath: parsed.contentPath,
+      contentPaths: parsed.contentPaths,
       imageFolder: parsed.imageFolder,
       anchor: manifestAnchorForBank(folder),
       manifest: parsed.manifest,
@@ -937,26 +1036,23 @@ export async function resolveBankSource(
       // 与插件无关的 manifest.json：按「无 manifest」继续，但记下来供提示使用
       hadIgnoredManifest = true;
     } else {
-      let contentExists = false;
-      try {
-        contentExists = await vault.adapter.exists(parsed.contentPath);
-      } catch {
-        contentExists = false;
-      }
-      if (!contentExists) {
+      const missingContent = await missingVaultPaths(vault, parsed.contentPaths);
+      if (missingContent.length > 0) {
         return {
           status: "error",
           reason: "content-missing",
-          message: `manifest.json 指定的内容文件不存在：${parsed.contentPath}`,
+          message: contentMissingMessage(missingContent),
         };
       }
-      if (imagePathsUnder(allFiles, parsed.imageFolder).length === 0) {
+      // imageFolder 省略/为空 = 无图片：跳过扫描，也不报「无图片」。
+      if (
+        parsed.imageFolder !== "" &&
+        imagePathsUnder(allFiles, parsed.imageFolder).length === 0
+      ) {
         return {
           status: "error",
           reason: "image-folder-empty",
-          message: `manifest.json 指定的图片文件夹不存在或没有受支持的图片：${
-            parsed.imageFolder === "" ? ROOT_BANK_FOLDER : parsed.imageFolder
-          }`,
+          message: `manifest.json 指定的图片文件夹不存在或没有受支持的图片：${parsed.imageFolder}`,
         };
       }
       return {
@@ -965,6 +1061,7 @@ export async function resolveBankSource(
           mode: "manifest",
           bankFolder: folder,
           contentPath: parsed.contentPath,
+          contentPaths: parsed.contentPaths,
           imageFolder: parsed.imageFolder,
           anchor: manifestAnchorForBank(folder),
           manifest: parsed.manifest,
@@ -1018,6 +1115,7 @@ export async function resolveBankSource(
         mode: "image",
         bankFolder: folder,
         contentPath: "",
+        contentPaths: [],
         imageFolder: vaultFolderPath(folder),
         anchor: vaultFolderPath(folder),
         manifest: null,

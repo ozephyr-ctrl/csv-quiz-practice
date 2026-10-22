@@ -1615,7 +1615,7 @@ function mergeSidecarData(base, baseTsMs, others) {
 }
 
 // src/settings.ts
-var SOURCE_DESC = "\u663E\u5F0F\u9009\u62E9\u9898\u5E93\u6765\u6E90\uFF1ACSV/CQV \u6587\u4EF6\u3001\u56FE\u7247\u6587\u4EF6\u5939\uFF0C\u6216\u5305\u542B manifest.json \u7684\u590D\u5408\u9898\u5E93\u6587\u4EF6\u5939\u3002\u56FE\u7247/\u590D\u5408\u9898\u5E93\u6587\u4EF6\u5939\u5141\u8BB8 vault \u6839\uFF08\u7528 / \u8868\u793A\uFF09\u3002";
+var SOURCE_DESC = "\u663E\u5F0F\u9009\u62E9\u9898\u5E93\u6765\u6E90\uFF1ACSV/CQV \u6587\u4EF6\u3001\u56FE\u7247\u6587\u4EF6\u5939\uFF0C\u6216\u5305\u542B manifest.json \u7684\u590D\u5408\u9898\u5E93\u6587\u4EF6\u5939\u3002\u590D\u5408\u9898\u5E93\u7528 content \u6307\u5B9A\u4E3B\u6587\u4EF6\u3001contents \u8FFD\u52A0\u989D\u5916 CSV/CQV\uFF0CimageFolder \u53EF\u7701\u7565\uFF08\u65E0\u56FE\u7247\uFF09\u3002\u56FE\u7247/\u590D\u5408\u9898\u5E93\u6587\u4EF6\u5939\u5141\u8BB8 vault \u6839\uFF08\u7528 / \u8868\u793A\uFF09\u3002";
 function normalizeSourceType(value) {
   return value === "csv" || value === "image" || value === "manifest" ? value : "";
 }
@@ -2200,12 +2200,13 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
     const status = this.plugin.bankStatus;
     const source = (status == null ? void 0 : status.status) === "ok" ? status.source : null;
     const settings = this.plugin.settings;
+    const contentFiles = source ? source.contentPaths.length > 0 ? source.contentPaths.join("\u3001") : source.contentPath || "\u2014" : "\u2014";
     const lines = [
       ["\u6765\u6E90\u7C7B\u578B", this.sourceTypeLabel(settings.sourceType)],
       ["\u6765\u6E90\u8DEF\u5F84", settings.sourcePath || "\u2014"],
       ["\u6A21\u5F0F", this.bankModeLabel(status)],
-      ["\u5185\u5BB9\u6587\u4EF6", source ? source.contentPath || "\u2014" : "\u2014"],
-      ["\u56FE\u7247\u6587\u4EF6\u5939", source ? source.imageFolder || "\u2014" : "\u2014"]
+      ["\u5185\u5BB9\u6587\u4EF6", contentFiles],
+      ["\u56FE\u7247\u6587\u4EF6\u5939", source ? source.imageFolder || "\u2014\uFF08\u65E0\u56FE\u7247\uFF09" : "\u2014"]
     ];
     if (source) lines.push(["\u72B6\u6001\u6587\u4EF6", sidecarPathFor(source.anchor)]);
     for (const [label, value] of lines) {
@@ -2412,37 +2413,326 @@ var import_obsidian6 = require("obsidian");
 
 // src/csvHandler.ts
 var import_papaparse = __toESM(require_papaparse_min());
+
+// src/imageBank.ts
+var IMAGE_EXTENSIONS = /* @__PURE__ */ new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "webp",
+  "gif",
+  "bmp"
+]);
+var IMAGE_RATING_LABELS = {
+  again: "\u91CD\u6765",
+  hard: "\u56F0\u96BE",
+  good: "\u826F\u597D",
+  easy: "\u7B80\u5355"
+};
+var IMAGE_CATEGORY = "\u8BC6\u56FE";
+var FALLBACK_CATEGORY = "\u5176\u5B83";
+var IMAGE_TAG = "#\u56FE\u7247\u9898";
+function isImageQuestion(q) {
+  return typeof q.imagePath === "string" && q.imagePath.trim() !== "";
+}
+function isImageRatingKey(value) {
+  return value === "again" || value === "hard" || value === "good" || value === "easy";
+}
+function imageRatingLabel(value) {
+  return isImageRatingKey(value) ? IMAGE_RATING_LABELS[value] : null;
+}
+function imageAnswerFromPath(path) {
+  const normalized = path.replace(/\\/g, "/");
+  const base = normalized.slice(normalized.lastIndexOf("/") + 1);
+  const dot = base.lastIndexOf(".");
+  return dot > 0 ? base.slice(0, dot) : base;
+}
+function normalizeFolder(folder) {
+  return folder.trim().replace(/\\/g, "/").replace(/\/{2,}/g, "/").replace(/^\/+/, "").replace(/\/+$/, "");
+}
+function basename(path) {
+  return path.slice(path.lastIndexOf("/") + 1);
+}
+function extensionOf(path) {
+  const base = basename(path);
+  const dot = base.lastIndexOf(".");
+  return dot >= 0 ? base.slice(dot + 1).toLowerCase() : "";
+}
+function hasHiddenSegment(relativePath) {
+  return relativePath.split("/").some((segment) => segment.startsWith("."));
+}
+function pathCompare(a, b) {
+  return a.localeCompare(b, void 0, { numeric: true, sensitivity: "base" });
+}
+function buildImageQuestions(folder, filePaths) {
+  const trimmed = folder.trim().replace(/\\/g, "/");
+  const root = normalizeFolder(folder);
+  const isVaultRoot = (root === "" || root === ".") && trimmed !== "";
+  if (root === "" && !isVaultRoot) return [];
+  const prefix = isVaultRoot ? "" : `${root}/`;
+  const seen = /* @__PURE__ */ new Set();
+  const entries = [];
+  for (const rawPath of filePaths) {
+    if (typeof rawPath !== "string" || rawPath === "") continue;
+    const path = rawPath.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+    if (isVaultRoot ? path.replace(/^\/+/, "") === "" : !path.startsWith(prefix)) {
+      continue;
+    }
+    const relativePath = isVaultRoot ? path.replace(/^\/+/, "") : path.slice(prefix.length);
+    if (relativePath === "") continue;
+    if (hasHiddenSegment(relativePath)) continue;
+    if (relativePath.endsWith("/")) continue;
+    if (!IMAGE_EXTENSIONS.has(extensionOf(relativePath))) continue;
+    if (seen.has(relativePath)) continue;
+    seen.add(relativePath);
+    entries.push({ relativePath, basename: basename(relativePath) });
+  }
+  entries.sort((a, b) => {
+    const byBasename = pathCompare(a.basename, b.basename);
+    return byBasename !== 0 ? byBasename : pathCompare(a.relativePath, b.relativePath);
+  });
+  return entries.map((entry, index) => {
+    const answer = imageAnswerFromPath(entry.basename);
+    const segments = entry.relativePath.split("/");
+    return {
+      id: `img:${entry.relativePath}`,
+      stem: answer,
+      optionA: "",
+      optionB: "",
+      optionC: "",
+      optionD: "",
+      answer,
+      tags: IMAGE_TAG,
+      category1: IMAGE_CATEGORY,
+      category2: segments.length >= 2 ? segments[0] : FALLBACK_CATEGORY,
+      category3: segments.length >= 3 ? segments[1] : FALLBACK_CATEGORY,
+      favorite: "",
+      mastered: "",
+      repeat: "",
+      wrong: "",
+      imagePath: isVaultRoot ? entry.relativePath : `${root}/${entry.relativePath}`,
+      imageNumber: index + 1
+    };
+  });
+}
+
+// src/shortAnswer.ts
+var SHORT_ANSWER_TAG = "#\u7B80\u7B54\u9898";
+var REVERSE_SUFFIX = "::rev";
+function hasExactTagToken(tags, tag = SHORT_ANSWER_TAG) {
+  if (typeof tags !== "string" || tags.trim() === "") return false;
+  return tags.split(/\s+/).some((token) => token === tag);
+}
+function parseShortDirection(raw) {
+  const value = typeof raw === "string" ? raw.trim() : "";
+  if (value === "" || value === ">") return ">";
+  if (value === "<") return "<";
+  if (value === "<>") return "<>";
+  return null;
+}
+function isShortAnswer(q) {
+  return q.kind === "short" && !isImageQuestion(q);
+}
+function isSelfAssessed(q) {
+  return isImageQuestion(q) || isShortAnswer(q);
+}
+function metaKeyFor(q) {
+  if (q.kind === "short" && typeof q.baseId === "string" && q.baseId !== "") {
+    return q.baseId;
+  }
+  return q.id;
+}
+function tokenizeTags(tags) {
+  if (typeof tags !== "string") return [];
+  return tags.split(/\s+/).filter((token) => token !== "");
+}
+function dedupeTokens(tokens) {
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  for (const token of tokens) {
+    if (seen.has(token)) continue;
+    seen.add(token);
+    out.push(token);
+  }
+  return out;
+}
+function ensureShortAnswerTag(tags) {
+  const tokens = dedupeTokens(tokenizeTags(tags));
+  if (!tokens.includes(SHORT_ANSWER_TAG)) tokens.push(SHORT_ANSWER_TAG);
+  return tokens.join(" ");
+}
+function stripShortAnswerTag(tags) {
+  return dedupeTokens(tokenizeTags(tags)).filter((token) => token !== SHORT_ANSWER_TAG).join(" ");
+}
+function rowLabel(q) {
+  const parts = [];
+  if (q.sourcePath) parts.push(q.sourcePath);
+  if (typeof q.rowNumber === "number") parts.push(`\u7B2C ${q.rowNumber} \u884C`);
+  return parts.join(" ");
+}
+function pushError(errors, q, message) {
+  const label = rowLabel(q);
+  errors.push({
+    file: q.sourcePath,
+    rowNumber: q.rowNumber,
+    id: q.id,
+    message: label === "" ? message : `${label}: ${message}`
+  });
+}
+function rawDirectionOf(q) {
+  var _a;
+  if (typeof q.rawDirection === "string") return q.rawDirection;
+  return (_a = q.direction) != null ? _a : "";
+}
+function validateQuestionRows(rows) {
+  var _a, _b;
+  const errors = [];
+  const seenIds = /* @__PURE__ */ new Map();
+  for (const q of rows) {
+    const rawId = typeof q.id === "string" ? q.id.trim() : "";
+    if (rawId === "") {
+      pushError(errors, q, `\u9898\u53F7\u4E3A\u7A7A\uFF08\u300C\u5E8F\u53F7\u300D\u5217\u4E0D\u80FD\u4E3A\u7A7A\uFF09`);
+    } else if (seenIds.has(rawId)) {
+      seenIds.set(rawId, ((_a = seenIds.get(rawId)) != null ? _a : 0) + 1);
+      pushError(errors, q, `\u9898\u53F7\u91CD\u590D\uFF1A${rawId}\uFF08\u9898\u5E93\u5185\u9898\u53F7\u5FC5\u987B\u552F\u4E00\uFF09`);
+    } else {
+      seenIds.set(rawId, 1);
+    }
+    if (typeof q.rawColumnCount === "number" && q.rawColumnCount > 16) {
+      pushError(
+        errors,
+        q,
+        `\u5217\u6570\u8D85\u8FC7 16\uFF08\u5B9E\u9645 ${q.rawColumnCount} \u5217\uFF09\uFF0C\u8BF7\u68C0\u67E5\u7B2C 16 \u5217\u4E4B\u540E\u662F\u5426\u6709\u591A\u4F59\u5185\u5BB9`
+      );
+    }
+    if (q.id.includes("::")) {
+      pushError(errors, q, `\u9898\u53F7\u4E0D\u80FD\u5305\u542B "::"\uFF08\u8BE5\u540E\u7F00\u4FDD\u7559\u7ED9\u7B80\u7B54\u9898\u53CD\u5411\u5361\uFF09`);
+    }
+    if (q.kind === "short") {
+      const nonEmptyOptions = [
+        ["A", q.optionA],
+        ["B", q.optionB],
+        ["C", q.optionC],
+        ["D", q.optionD]
+      ].filter(([, value]) => (value != null ? value : "").trim() !== "");
+      if (nonEmptyOptions.length > 0) {
+        const names = nonEmptyOptions.map(([name]) => name).join("/");
+        pushError(
+          errors,
+          q,
+          `\u7B80\u7B54\u9898\u7684\u9009\u9879 ${names} \u5FC5\u987B\u4E3A\u7A7A\uFF08\u7B80\u7B54\u9898\u7B54\u6848\u5199\u5728\u300C\u6B63\u786E\u9009\u9879\u300D\u5217\uFF09`
+        );
+      }
+      if (((_b = q.answer) != null ? _b : "").trim() === "") {
+        pushError(errors, q, `\u7B80\u7B54\u9898\u7684\u7B54\u6848\uFF08\u300C\u6B63\u786E\u9009\u9879\u300D\u5217\uFF09\u4E0D\u80FD\u4E3A\u7A7A`);
+      }
+      const rawDirection = rawDirectionOf(q);
+      if (parseShortDirection(rawDirection) === null) {
+        pushError(
+          errors,
+          q,
+          `\u7B80\u7B54\u9898\u65B9\u5411\u975E\u6CD5\uFF1A${JSON.stringify(rawDirection)}\uFF08\u53EA\u652F\u6301 >\u3001<\u3001<> \u6216\u7559\u7A7A\uFF09`
+        );
+      }
+    } else if (typeof q.rawDirection === "string" && q.rawDirection.trim() !== "") {
+      pushError(
+        errors,
+        q,
+        `\u9009\u62E9\u9898\u7B2C 16 \u5217\uFF08\u7B80\u7B54\u9898\u65B9\u5411\uFF09\u5FC5\u987B\u4E3A\u7A7A\uFF0C\u5F53\u524D\u4E3A ${JSON.stringify(q.rawDirection)}`
+      );
+    }
+  }
+  return errors;
+}
+function shortAnswerCard(q, base, baseId, direction, side) {
+  const common = {
+    ...q,
+    kind: "short",
+    baseId,
+    side,
+    direction
+  };
+  if (side === "fwd") {
+    return { ...common, id: base };
+  }
+  return {
+    ...common,
+    id: base + REVERSE_SUFFIX,
+    stem: q.answer,
+    answer: q.stem
+  };
+}
+function expandShortAnswerRows(rows) {
+  var _a, _b;
+  const out = [];
+  for (const q of rows) {
+    if (!isShortAnswer(q)) {
+      out.push({ ...q, kind: (_a = q.kind) != null ? _a : "choice" });
+      continue;
+    }
+    const base = q.id;
+    const baseId = typeof q.baseId === "string" && q.baseId !== "" ? q.baseId : base;
+    const direction = (_b = parseShortDirection(rawDirectionOf(q))) != null ? _b : ">";
+    if (direction === ">" || direction === "<>") {
+      out.push(shortAnswerCard(q, base, baseId, direction, "fwd"));
+    }
+    if (direction === "<" || direction === "<>") {
+      out.push(shortAnswerCard(q, base, baseId, direction, "rev"));
+    }
+  }
+  return out;
+}
+
+// src/csvHandler.ts
 var import_obsidian4 = require("obsidian");
-function parseCSV(content) {
-  const result = import_papaparse.default.parse(content, { header: false, skipEmptyLines: true });
-  const rows = result.data;
+function parseCSV(content, opts) {
+  const result = import_papaparse.default.parse(content, { header: false, skipEmptyLines: false });
+  const rawRows = result.data;
   if (result.errors.length > 0) {
     console.warn("CSV \u89E3\u6790\u8B66\u544A: \u68C0\u6D4B\u5230\u89E3\u6790\u9519\u8BEF", result.errors.slice(0, 3));
     new import_obsidian4.Notice(
       `CSV \u89E3\u6790\u8B66\u544A: ${result.errors.length} \u5904\u95EE\u9898\uFF08\u5982\u672A\u95ED\u5408\u5F15\u53F7\uFF09\uFF0C\u6570\u636E\u53EF\u80FD\u9519\u4F4D`
     );
   }
-  if (rows.length > 0 && rows[0].length > 0) {
-    rows[0][0] = rows[0][0].replace(/^\uFEFF/, "");
+  const isBlankRecord = (row) => row.every((cell) => String(cell != null ? cell : "").trim() === "");
+  const records = rawRows.map((row, index) => ({ row, index })).filter(({ row }) => !isBlankRecord(row));
+  if (records.length > 0 && records[0].row.length > 0) {
+    records[0].row[0] = records[0].row[0].replace(/^\uFEFF/, "");
   }
-  const dataRows = rows.slice(1);
-  return dataRows.map((row) => ({
-    id: String(row[0] || "").trim(),
-    stem: row[1] || "",
-    optionA: row[2] || "",
-    optionB: row[3] || "",
-    optionC: row[4] || "",
-    optionD: row[5] || "",
-    answer: (row[6] || "").toUpperCase().trim(),
-    tags: row[7] || "",
-    category1: row[8] || "",
-    category2: row[9] || "",
-    category3: row[10] || "",
-    favorite: row[11] || "",
-    mastered: row[12] || "",
-    repeat: row[13] || "",
-    wrong: row[14] || ""
-  }));
+  const dataRows = records.slice(1);
+  return dataRows.map(({ row, index }) => {
+    var _a, _b, _c;
+    const tags = row[7] || "";
+    const isShort = hasExactTagToken(tags, SHORT_ANSWER_TAG);
+    const rawDirection = String((_a = row[15]) != null ? _a : "");
+    const answer = isShort ? (_b = row[6]) != null ? _b : "" : (row[6] || "").toUpperCase().trim();
+    const direction = isShort ? (_c = parseShortDirection(rawDirection)) != null ? _c : void 0 : void 0;
+    return {
+      id: String(row[0] || "").trim(),
+      stem: row[1] || "",
+      optionA: row[2] || "",
+      optionB: row[3] || "",
+      optionC: row[4] || "",
+      optionD: row[5] || "",
+      answer,
+      tags,
+      category1: row[8] || "",
+      category2: row[9] || "",
+      category3: row[10] || "",
+      favorite: row[11] || "",
+      mastered: row[12] || "",
+      repeat: row[13] || "",
+      wrong: row[14] || "",
+      // 即使 ABCD 非空也先标 short，交由 validateQuestionRows 拒绝。
+      kind: isShort ? "short" : "choice",
+      direction,
+      sourcePath: opts == null ? void 0 : opts.sourcePath,
+      // 1 基真实文件行号：表头是第 1 行，首个数据行是第 2 行；空行也占行号。
+      rowNumber: index + 1,
+      rawColumnCount: row.length,
+      rawDirection
+    };
+  });
 }
 function checkIdQuality(questions) {
   var _a;
@@ -2626,28 +2916,46 @@ var CSVWriteQueue = class {
 // src/cqvHandler.ts
 var CQV_MAGIC = "CQV1";
 var FIXED_HEADER_BYTES = 20;
-var FIELDS_PER_QUESTION = 12;
+var FIELDS_PER_QUESTION_V1 = 12;
+var FIELDS_PER_QUESTION_V2 = 14;
 var encoder = new TextEncoder();
 var decoder = new TextDecoder("utf-8");
 function encodeCqv(questions, opts) {
-  var _a;
-  const sourceCsvBytes = encoder.encode(opts.sourceCsv);
+  var _a, _b;
+  const formatVersion = (_a = opts.formatVersion) != null ? _a : 1;
   const noteBytes = encoder.encode(opts.note);
-  const headerLen = FIXED_HEADER_BYTES + 4 + sourceCsvBytes.length + 4 + noteBytes.length;
-  const fieldValues = questions.map((q) => [
-    encoder.encode(q.id),
-    encoder.encode(q.stem),
-    encoder.encode(q.optionA),
-    encoder.encode(q.optionB),
-    encoder.encode(q.optionC),
-    encoder.encode(q.optionD),
-    encoder.encode(q.answer),
-    encoder.encode(q.tags),
-    encoder.encode(q.category1),
-    encoder.encode(q.category2),
-    encoder.encode(q.category3),
-    encoder.encode(q.repeat)
-  ]);
+  const sourceCsvBytes = encoder.encode(opts.sourceCsv);
+  const sourceFileBytes = formatVersion === 2 ? (opts.sourceFiles && opts.sourceFiles.length > 0 ? opts.sourceFiles : [opts.sourceCsv]).map((f) => encoder.encode(f)) : [];
+  let headerLen = FIXED_HEADER_BYTES;
+  if (formatVersion === 1) {
+    headerLen += 4 + sourceCsvBytes.length;
+  } else {
+    headerLen += 4;
+    for (const f of sourceFileBytes) headerLen += 4 + f.length;
+  }
+  headerLen += 4 + noteBytes.length;
+  const fieldValues = questions.map((q) => {
+    var _a2, _b2;
+    const fields = [
+      encoder.encode(q.id),
+      encoder.encode(q.stem),
+      encoder.encode(q.optionA),
+      encoder.encode(q.optionB),
+      encoder.encode(q.optionC),
+      encoder.encode(q.optionD),
+      encoder.encode(q.answer),
+      encoder.encode(q.tags),
+      encoder.encode(q.category1),
+      encoder.encode(q.category2),
+      encoder.encode(q.category3),
+      encoder.encode(q.repeat)
+    ];
+    if (formatVersion === 2) {
+      fields.push(encoder.encode((_a2 = q.kind) != null ? _a2 : "choice"));
+      fields.push(encoder.encode((_b2 = q.direction) != null ? _b2 : ""));
+    }
+    return fields;
+  });
   let dataBytes = 0;
   for (const fields of fieldValues) {
     for (const f of fields) {
@@ -2663,16 +2971,27 @@ function encodeCqv(questions, opts) {
   let offset = 4;
   view.setUint32(offset, headerLen, true);
   offset += 4;
-  view.setUint32(offset, 1, true);
+  view.setUint32(offset, formatVersion, true);
   offset += 4;
   view.setUint32(offset, questions.length, true);
   offset += 4;
-  view.setUint32(offset, (_a = opts.generatedAt) != null ? _a : Math.floor(Date.now() / 1e3), true);
+  view.setUint32(offset, (_b = opts.generatedAt) != null ? _b : Math.floor(Date.now() / 1e3), true);
   offset += 4;
-  view.setUint32(offset, sourceCsvBytes.length, true);
-  offset += 4;
-  u8.set(sourceCsvBytes, offset);
-  offset += sourceCsvBytes.length;
+  if (formatVersion === 1) {
+    view.setUint32(offset, sourceCsvBytes.length, true);
+    offset += 4;
+    u8.set(sourceCsvBytes, offset);
+    offset += sourceCsvBytes.length;
+  } else {
+    view.setUint32(offset, sourceFileBytes.length, true);
+    offset += 4;
+    for (const f of sourceFileBytes) {
+      view.setUint32(offset, f.length, true);
+      offset += 4;
+      u8.set(f, offset);
+      offset += f.length;
+    }
+  }
   view.setUint32(offset, noteBytes.length, true);
   offset += 4;
   u8.set(noteBytes, offset);
@@ -2686,6 +3005,18 @@ function encodeCqv(questions, opts) {
     }
   }
   return buffer;
+}
+function readField(view, u8, offset, byteLength) {
+  if (offset + 4 > byteLength) {
+    throw new Error("\u4EA7\u7269\u6570\u636E\u622A\u65AD\u6216\u635F\u574F");
+  }
+  const len = view.getUint32(offset, true);
+  offset += 4;
+  if (offset + len > byteLength) {
+    throw new Error("\u4EA7\u7269\u6570\u636E\u622A\u65AD\u6216\u635F\u574F");
+  }
+  const value = decoder.decode(u8.subarray(offset, offset + len));
+  return { value, offset: offset + len };
 }
 function decodeCqv(buffer) {
   if (buffer.byteLength < FIXED_HEADER_BYTES) {
@@ -2707,46 +3038,52 @@ function decodeCqv(buffer) {
   offset += 4;
   const generatedAt = view.getUint32(offset, true);
   offset += 4;
-  if (formatVersion !== 1) {
+  if (formatVersion !== 1 && formatVersion !== 2) {
     throw new Error("\u4E0D\u652F\u6301\u7684\u4EA7\u7269\u7248\u672C");
   }
-  if (offset + 4 > buffer.byteLength) {
-    throw new Error("\u6587\u4EF6\u8FC7\u77ED\uFF0C\u4E0D\u662F\u6709\u6548\u7684\u9898\u5E93\u4EA7\u7269");
+  let sourceFiles;
+  let sourceCsv;
+  let fieldsPerQuestion;
+  if (formatVersion === 1) {
+    const src = readField(view, u8, offset, buffer.byteLength);
+    sourceCsv = src.value;
+    offset = src.offset;
+    sourceFiles = [sourceCsv];
+    fieldsPerQuestion = FIELDS_PER_QUESTION_V1;
+  } else {
+    if (offset + 4 > buffer.byteLength) {
+      throw new Error("\u4EA7\u7269\u6570\u636E\u622A\u65AD\u6216\u635F\u574F");
+    }
+    const sourceFileCount = view.getUint32(offset, true);
+    offset += 4;
+    if (sourceFileCount * 4 > buffer.byteLength - offset) {
+      throw new Error("\u4EA7\u7269\u6570\u636E\u622A\u65AD\u6216\u635F\u574F");
+    }
+    sourceFiles = [];
+    for (let i = 0; i < sourceFileCount; i++) {
+      const f = readField(view, u8, offset, buffer.byteLength);
+      sourceFiles.push(f.value);
+      offset = f.offset;
+    }
+    sourceCsv = sourceFiles.length > 0 ? sourceFiles[0] : "";
+    fieldsPerQuestion = FIELDS_PER_QUESTION_V2;
   }
-  const sourceCsvLen = view.getUint32(offset, true);
-  offset += 4;
-  if (offset + sourceCsvLen + 4 > buffer.byteLength) {
-    throw new Error("\u4EA7\u7269\u6570\u636E\u622A\u65AD\u6216\u635F\u574F");
-  }
-  const sourceCsv = decoder.decode(u8.subarray(offset, offset + sourceCsvLen));
-  offset += sourceCsvLen;
-  const noteLen = view.getUint32(offset, true);
-  offset += 4;
-  if (offset + noteLen > buffer.byteLength) {
-    throw new Error("\u4EA7\u7269\u6570\u636E\u622A\u65AD\u6216\u635F\u574F");
-  }
-  const note = decoder.decode(u8.subarray(offset, offset + noteLen));
-  offset += noteLen;
-  if (headerLen !== FIXED_HEADER_BYTES + 4 + sourceCsvLen + 4 + noteLen) {
+  const noteField = readField(view, u8, offset, buffer.byteLength);
+  const note = noteField.value;
+  offset = noteField.offset;
+  if (headerLen !== offset) {
     throw new Error("\u4EA7\u7269\u5934\u90E8\u7ED3\u6784\u5F02\u5E38");
   }
-  if (questionCount > 0 && questionCount * FIELDS_PER_QUESTION * 4 > buffer.byteLength - offset) {
+  if (questionCount > 0 && questionCount * fieldsPerQuestion * 4 > buffer.byteLength - offset) {
     throw new Error("\u4EA7\u7269\u6570\u636E\u622A\u65AD\u6216\u635F\u574F");
   }
   const questions = [];
   for (let i = 0; i < questionCount; i++) {
     const fields = [];
-    for (let f = 0; f < FIELDS_PER_QUESTION; f++) {
-      if (offset + 4 > buffer.byteLength) {
-        throw new Error("\u4EA7\u7269\u6570\u636E\u622A\u65AD\u6216\u635F\u574F");
-      }
-      const len = view.getUint32(offset, true);
-      offset += 4;
-      if (offset + len > buffer.byteLength) {
-        throw new Error("\u4EA7\u7269\u6570\u636E\u622A\u65AD\u6216\u635F\u574F");
-      }
-      fields.push(decoder.decode(u8.subarray(offset, offset + len)));
-      offset += len;
+    for (let f = 0; f < fieldsPerQuestion; f++) {
+      const field = readField(view, u8, offset, buffer.byteLength);
+      fields.push(field.value);
+      offset = field.offset;
     }
     const [
       id,
@@ -2762,6 +3099,27 @@ function decodeCqv(buffer) {
       category3,
       repeat
     ] = fields;
+    let kind = "choice";
+    let direction = ">";
+    if (formatVersion === 2) {
+      const rawKind = fields[12];
+      if (rawKind !== "choice" && rawKind !== "short") {
+        throw new Error(`\u4EA7\u7269\u9898\u578B\u975E\u6CD5\uFF1A${JSON.stringify(rawKind)}\uFF08\u53EA\u652F\u6301 choice\u3001short\uFF09`);
+      }
+      kind = rawKind;
+      const rawDirection = fields[13].trim();
+      if (rawDirection === "" || rawDirection === ">") {
+        direction = ">";
+      } else if (rawDirection === "<") {
+        direction = "<";
+      } else if (rawDirection === "<>") {
+        direction = "<>";
+      } else {
+        throw new Error(
+          `\u4EA7\u7269\u7B80\u7B54\u9898\u65B9\u5411\u975E\u6CD5\uFF1A${JSON.stringify(fields[13])}\uFF08\u53EA\u652F\u6301 >\u3001<\u3001<> \u6216\u7559\u7A7A\uFF09`
+        );
+      }
+    }
     questions.push({
       id,
       stem,
@@ -2775,6 +3133,8 @@ function decodeCqv(buffer) {
       category2,
       category3,
       repeat,
+      kind,
+      direction,
       // C 类字段（favorite/mastered/wrong）不入产物，默认空串，由 sidecar meta 覆盖
       favorite: "",
       mastered: "",
@@ -2787,6 +3147,7 @@ function decodeCqv(buffer) {
       questionCount,
       generatedAt,
       sourceCsv,
+      sourceFiles,
       note
     },
     questions
@@ -2795,110 +3156,79 @@ function decodeCqv(buffer) {
 
 // src/progressModal.ts
 var import_obsidian5 = require("obsidian");
-
-// src/imageBank.ts
-var IMAGE_EXTENSIONS = /* @__PURE__ */ new Set([
-  "png",
-  "jpg",
-  "jpeg",
-  "webp",
-  "gif",
-  "bmp"
-]);
-var IMAGE_RATING_LABELS = {
-  again: "\u91CD\u6765",
-  hard: "\u56F0\u96BE",
-  good: "\u826F\u597D",
-  easy: "\u7B80\u5355"
-};
-var IMAGE_CATEGORY = "\u8BC6\u56FE";
-var FALLBACK_CATEGORY = "\u5176\u5B83";
-var IMAGE_TAG = "#\u56FE\u7247\u9898";
-function isImageQuestion(q) {
-  return typeof q.imagePath === "string" && q.imagePath.trim() !== "";
-}
-function isImageRatingKey(value) {
-  return value === "again" || value === "hard" || value === "good" || value === "easy";
-}
-function imageRatingLabel(value) {
-  return isImageRatingKey(value) ? IMAGE_RATING_LABELS[value] : null;
-}
-function imageAnswerFromPath(path) {
-  const normalized = path.replace(/\\/g, "/");
-  const base = normalized.slice(normalized.lastIndexOf("/") + 1);
-  const dot = base.lastIndexOf(".");
-  return dot > 0 ? base.slice(0, dot) : base;
-}
-function normalizeFolder(folder) {
-  return folder.trim().replace(/\\/g, "/").replace(/\/{2,}/g, "/").replace(/^\/+/, "").replace(/\/+$/, "");
-}
-function basename(path) {
-  return path.slice(path.lastIndexOf("/") + 1);
-}
-function extensionOf(path) {
-  const base = basename(path);
-  const dot = base.lastIndexOf(".");
-  return dot >= 0 ? base.slice(dot + 1).toLowerCase() : "";
-}
-function hasHiddenSegment(relativePath) {
-  return relativePath.split("/").some((segment) => segment.startsWith("."));
-}
-function pathCompare(a, b) {
-  return a.localeCompare(b, void 0, { numeric: true, sensitivity: "base" });
-}
-function buildImageQuestions(folder, filePaths) {
-  const trimmed = folder.trim().replace(/\\/g, "/");
-  const root = normalizeFolder(folder);
-  const isVaultRoot = (root === "" || root === ".") && trimmed !== "";
-  if (root === "" && !isVaultRoot) return [];
-  const prefix = isVaultRoot ? "" : `${root}/`;
-  const seen = /* @__PURE__ */ new Set();
-  const entries = [];
-  for (const rawPath of filePaths) {
-    if (typeof rawPath !== "string" || rawPath === "") continue;
-    const path = rawPath.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
-    if (isVaultRoot ? path.replace(/^\/+/, "") === "" : !path.startsWith(prefix)) {
+function computeProgressStats(questions, answeredQuestions, maskCorrectness) {
+  const normCache = /* @__PURE__ */ new Map();
+  const stats = {
+    answered: 0,
+    textAnswered: 0,
+    correct: 0,
+    imageTotal: 0,
+    imageRated: 0,
+    shortTotal: 0,
+    shortRated: 0
+  };
+  for (const q of questions) {
+    const a = answeredQuestions[q.id];
+    if (isImageQuestion(q)) {
+      stats.imageTotal++;
+      if (a !== void 0) {
+        stats.answered++;
+        if (isImageRatingKey(a)) stats.imageRated++;
+      }
       continue;
     }
-    const relativePath = isVaultRoot ? path.replace(/^\/+/, "") : path.slice(prefix.length);
-    if (relativePath === "") continue;
-    if (hasHiddenSegment(relativePath)) continue;
-    if (relativePath.endsWith("/")) continue;
-    if (!IMAGE_EXTENSIONS.has(extensionOf(relativePath))) continue;
-    if (seen.has(relativePath)) continue;
-    seen.add(relativePath);
-    entries.push({ relativePath, basename: basename(relativePath) });
+    if (isShortAnswer(q)) {
+      stats.shortTotal++;
+      if (a !== void 0) {
+        stats.answered++;
+        if (isImageRatingKey(a)) stats.shortRated++;
+      }
+      continue;
+    }
+    if (a !== void 0) {
+      stats.answered++;
+      stats.textAnswered++;
+      if (maskCorrectness) continue;
+      const normA = normalizeAnswerValue(a);
+      const normAns = normalizeAnswerValue(q.answer);
+      normCache.set(`u:${q.id}`, normA);
+      normCache.set(`c:${q.id}`, normAns);
+      if (normA === normAns) {
+        stats.correct++;
+      }
+    }
   }
-  entries.sort((a, b) => {
-    const byBasename = pathCompare(a.basename, b.basename);
-    return byBasename !== 0 ? byBasename : pathCompare(a.relativePath, b.relativePath);
-  });
-  return entries.map((entry, index) => {
-    const answer = imageAnswerFromPath(entry.basename);
-    const segments = entry.relativePath.split("/");
-    return {
-      id: `img:${entry.relativePath}`,
-      stem: answer,
-      optionA: "",
-      optionB: "",
-      optionC: "",
-      optionD: "",
-      answer,
-      tags: IMAGE_TAG,
-      category1: IMAGE_CATEGORY,
-      category2: segments.length >= 2 ? segments[0] : FALLBACK_CATEGORY,
-      category3: segments.length >= 3 ? segments[1] : FALLBACK_CATEGORY,
-      favorite: "",
-      mastered: "",
-      repeat: "",
-      wrong: "",
-      imagePath: isVaultRoot ? entry.relativePath : `${root}/${entry.relativePath}`,
-      imageNumber: index + 1
-    };
-  });
+  return { stats, normCache };
 }
-
-// src/progressModal.ts
+function formatProgressSummary(total, stats, maskCorrectness) {
+  const imagePart = stats.imageTotal > 0 ? ` \xB7 \u56FE\u7247\u9898\u5DF2\u8BC4 ${stats.imageRated}/${stats.imageTotal}` : "";
+  const shortPart = stats.shortTotal > 0 ? ` \xB7 \u7B80\u7B54\u9898\u5DF2\u8BC4 ${stats.shortRated}/${stats.shortTotal}` : "";
+  if (maskCorrectness) {
+    return `\u5171 ${total} \u9898 \xB7 \u5DF2\u7B54 ${stats.answered} \xB7 \u672A\u7B54 ${total - stats.answered}` + imagePart + shortPart;
+  }
+  return `\u5171 ${total} \u9898 \xB7 \u5DF2\u7B54 ${stats.answered} \xB7 \u672A\u7B54 ${total - stats.answered} \xB7 \u7B54\u5BF9 ${stats.correct} \xB7 \u7B54\u9519 ${stats.textAnswered - stats.correct}` + (stats.textAnswered > 0 ? ` \xB7 \u6B63\u786E\u7387 ${(stats.correct / stats.textAnswered * 100).toFixed(1)}%` : "") + imagePart + shortPart;
+}
+function progressStemPreview(stem) {
+  const text = stem.replace(/[#*`_~[\]()>!-]/g, "").trim();
+  return text.length > 30 ? text.slice(0, 30) + "\u2026" : text;
+}
+function shortAnswerBadge(q) {
+  return q.side === "rev" ? "\u7B80\u7B54\u9898\uFF08\u53CD\u5411\uFF09" : "\u7B80\u7B54\u9898";
+}
+function shortAnswerStatus(answer, maskCorrectness) {
+  const neutral = "csv-quiz-progress-status";
+  if (answer === void 0) {
+    return { text: "\u672A\u7B54", cls: `${neutral} csv-quiz-progress-unanswered` };
+  }
+  if (maskCorrectness) {
+    return { text: "\u5DF2\u7B54", cls: `${neutral} csv-quiz-progress-masked` };
+  }
+  const ratingLabel = imageRatingLabel(answer);
+  if (ratingLabel !== null) {
+    return { text: `\u5DF2\u8BC4 \xB7 ${ratingLabel}`, cls: neutral };
+  }
+  return { text: "\u5DF2\u770B\u7B54\u6848", cls: `${neutral} csv-quiz-progress-unanswered` };
+}
 var _ProgressModal = class _ProgressModal extends import_obsidian5.Modal {
   constructor(app, opts) {
     super(app);
@@ -2918,39 +3248,12 @@ var _ProgressModal = class _ProgressModal extends import_obsidian5.Modal {
       2: "\u590D\u4E60",
       3: "\u518D\u5B66\u4E60"
     };
-    const normCache = /* @__PURE__ */ new Map();
-    let answered = 0;
-    let textAnswered = 0;
-    let correct = 0;
-    let imageTotal = 0;
-    let imageRated = 0;
-    for (const q of questions) {
-      const a = answeredQuestions[q.id];
-      if (isImageQuestion(q)) {
-        imageTotal++;
-        if (a !== void 0) {
-          answered++;
-          if (isImageRatingKey(a)) imageRated++;
-        }
-        continue;
-      }
-      if (a !== void 0) {
-        answered++;
-        textAnswered++;
-        if (maskCorrectness) continue;
-        const normA = normalizeAnswerValue(a);
-        const normAns = normalizeAnswerValue(q.answer);
-        normCache.set(`u:${q.id}`, normA);
-        normCache.set(`c:${q.id}`, normAns);
-        if (normA === normAns) {
-          correct++;
-        }
-      }
-    }
-    const imagePart = imageTotal > 0 ? ` \xB7 \u56FE\u7247\u9898\u5DF2\u8BC4 ${imageRated}/${imageTotal}` : "";
-    summary.setText(
-      maskCorrectness ? `\u5171 ${questions.length} \u9898 \xB7 \u5DF2\u7B54 ${answered} \xB7 \u672A\u7B54 ${questions.length - answered}` + imagePart : `\u5171 ${questions.length} \u9898 \xB7 \u5DF2\u7B54 ${answered} \xB7 \u672A\u7B54 ${questions.length - answered} \xB7 \u7B54\u5BF9 ${correct} \xB7 \u7B54\u9519 ${textAnswered - correct}` + (textAnswered > 0 ? ` \xB7 \u6B63\u786E\u7387 ${(correct / textAnswered * 100).toFixed(1)}%` : "") + imagePart
+    const { stats, normCache } = computeProgressStats(
+      questions,
+      answeredQuestions,
+      maskCorrectness
     );
+    summary.setText(formatProgressSummary(questions.length, stats, maskCorrectness));
     if (questions.length === 0) {
       list.createEl("p", { text: "\u5F53\u524D\u5217\u8868\u6CA1\u6709\u9898\u76EE", cls: "csv-quiz-empty" });
       return;
@@ -2995,11 +3298,21 @@ var _ProgressModal = class _ProgressModal extends import_obsidian5.Modal {
             cls: "csv-quiz-progress-status csv-quiz-progress-unanswered"
           });
         }
+      } else if (isShortAnswer(q)) {
+        row.createEl("span", {
+          text: shortAnswerBadge(q),
+          cls: "csv-quiz-progress-image-label csv-quiz-progress-short-label"
+        });
+        row.createEl("span", {
+          text: progressStemPreview(q.stem),
+          cls: "csv-quiz-progress-stem"
+        });
+        const status = shortAnswerStatus(a, maskCorrectness);
+        row.createEl("span", { text: status.text, cls: status.cls });
       } else {
         row.createEl("span", { text: q.id, cls: "csv-quiz-progress-id" });
-        const stem = q.stem.replace(/[#*`_~[\]()>!-]/g, "").trim();
         row.createEl("span", {
-          text: stem.length > 30 ? stem.slice(0, 30) + "\u2026" : stem,
+          text: progressStemPreview(q.stem),
           cls: "csv-quiz-progress-stem"
         });
         if (a === void 0) {
@@ -5449,6 +5762,73 @@ function renderImageQuestionUi(opts) {
   }
 }
 
+// src/shortAnswerQuestionUi.ts
+var RATING_ORDER2 = ["again", "hard", "good", "easy"];
+var RATING_COLOR_CLASS2 = {
+  again: "csv-quiz-short-rate-again",
+  hard: "csv-quiz-short-rate-hard",
+  good: "csv-quiz-short-rate-good",
+  easy: "csv-quiz-short-rate-easy"
+};
+var EMPTY_ANSWER_TEXT2 = "\uFF08\u65E0\u7B54\u6848\uFF09";
+function renderShortAnswerQuestionUi(opts) {
+  const container = opts.container;
+  container.empty();
+  const answerShown = opts.answerShown === true;
+  const reverse = opts.reverse === true;
+  const badgeText = reverse ? "\u7B80\u7B54\u9898\uFF08\u53CD\u5411\uFF09" : "\u7B80\u7B54\u9898";
+  const root = container.createDiv("csv-quiz-short-question");
+  root.createDiv({ text: badgeText, cls: "csv-quiz-short-badge" });
+  const stemEl = root.createDiv(
+    "csv-quiz-short-stem markdown-rendered"
+  );
+  opts.renderMarkdown(stemEl, opts.stem);
+  if (!answerShown) {
+    const revealBtn = root.createEl("button", {
+      text: "\u5C55\u793A\u7B54\u6848",
+      cls: "csv-quiz-btn csv-quiz-btn-primary csv-quiz-short-reveal-btn",
+      attr: { type: "button" }
+    });
+    revealBtn.addEventListener("click", () => opts.onReveal());
+    return;
+  }
+  const answerBox = root.createDiv("csv-quiz-short-answer-box");
+  answerBox.createDiv({ text: "\u7B54\u6848", cls: "csv-quiz-short-answer-label" });
+  const answerEl = answerBox.createDiv(
+    "csv-quiz-short-answer markdown-rendered"
+  );
+  if (typeof opts.answer === "string" && opts.answer.trim() !== "") {
+    opts.renderMarkdown(answerEl, opts.answer);
+  } else {
+    answerEl.setText(EMPTY_ANSWER_TEXT2);
+  }
+  if (opts.memoryEnabled !== true) {
+    root.createDiv({
+      text: "\u8BB0\u5FC6\u66F2\u7EBF\u5173\u95ED\uFF0C\u4E0D\u8BB0\u5F55 FSRS",
+      cls: "csv-quiz-short-memory-off"
+    });
+    return;
+  }
+  const ratedLabel = opts.rating ? IMAGE_RATING_LABELS[opts.rating] : void 0;
+  if (ratedLabel) {
+    root.createDiv({
+      text: `\u5DF2\u8BC4\u5206\uFF1A${ratedLabel}`,
+      cls: "csv-quiz-short-rated"
+    });
+    return;
+  }
+  const rateRow = root.createDiv("csv-quiz-short-rate");
+  for (const key of RATING_ORDER2) {
+    const btn = rateRow.createEl("button", {
+      text: IMAGE_RATING_LABELS[key],
+      cls: `csv-quiz-btn csv-quiz-short-rate-btn ${RATING_COLOR_CLASS2[key]}`,
+      attr: { type: "button" }
+    });
+    btn.dataset.rating = key;
+    btn.addEventListener("click", () => opts.onRate(key));
+  }
+}
+
 // src/bankResolver.ts
 var MANIFEST_FILENAME = "manifest.json";
 var MANIFEST_TYPE = "csvquiz-bank";
@@ -5538,11 +5918,10 @@ function parseBankManifest(text, bankFolder) {
     };
   }
   const contentRaw = record.content;
-  const imageRaw = record.imageFolder;
-  if (typeof contentRaw !== "string" || contentRaw.trim() === "" || typeof imageRaw !== "string" || imageRaw.trim() === "") {
+  if (typeof contentRaw !== "string" || contentRaw.trim() === "") {
     return {
       status: "error",
-      message: "manifest.json \u7684 content \u4E0E imageFolder \u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32\u3002"
+      message: "manifest.json \u7684 content \u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32\u3002"
     };
   }
   const contentRel = normalizeManifestRelative(contentRaw, false);
@@ -5558,24 +5937,88 @@ function parseBankManifest(text, bankFolder) {
       message: "manifest.json \u7684 content \u5FC5\u987B\u662F .csv \u6216 .cqv \u6587\u4EF6\u3002"
     };
   }
-  const imageRel = normalizeManifestRelative(imageRaw, true);
-  if (!imageRel.ok) {
-    return {
-      status: "error",
-      message: "manifest.json \u7684 imageFolder \u5FC5\u987B\u662F\u76F8\u5BF9 manifest \u6240\u5728\u76EE\u5F55\u7684\u6587\u4EF6\u5939\u8DEF\u5F84\uFF08\u7981\u6B62\u7EDD\u5BF9\u8DEF\u5F84\u4E0E ..\uFF09\u3002"
-    };
+  const contentsRaw = record.contents;
+  const contentsRels = [];
+  let contentsValues;
+  if (contentsRaw !== void 0) {
+    if (!Array.isArray(contentsRaw)) {
+      return {
+        status: "error",
+        message: "manifest.json \u7684 contents \u5FC5\u987B\u662F\u5B57\u7B26\u4E32\u6570\u7EC4\uFF08\u53EF\u7701\u7565\uFF09\u3002"
+      };
+    }
+    const seen = /* @__PURE__ */ new Set([contentRel.path]);
+    for (let i = 0; i < contentsRaw.length; i += 1) {
+      const item = contentsRaw[i];
+      if (typeof item !== "string" || item.trim() === "") {
+        return {
+          status: "error",
+          message: `manifest.json \u7684 contents[${i}] \u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32\u3002`
+        };
+      }
+      const rel = normalizeManifestRelative(item, false);
+      if (!rel.ok || rel.path === "") {
+        return {
+          status: "error",
+          message: `manifest.json \u7684 contents[${i}] \u5FC5\u987B\u662F\u76F8\u5BF9 manifest \u6240\u5728\u76EE\u5F55\u7684\u6587\u4EF6\u8DEF\u5F84\uFF08\u7981\u6B62\u7EDD\u5BF9\u8DEF\u5F84\u3001.. \u4E0E\u53CD\u659C\u6760\uFF09\uFF1A${item}`
+        };
+      }
+      if (!CSV_EXTENSIONS.has(extensionOf2(rel.path))) {
+        return {
+          status: "error",
+          message: `manifest.json \u7684 contents[${i}] \u5FC5\u987B\u662F .csv \u6216 .cqv \u6587\u4EF6\uFF1A${item}`
+        };
+      }
+      if (seen.has(rel.path)) {
+        return {
+          status: "error",
+          message: `manifest.json \u7684\u5185\u5BB9\u6587\u4EF6\u91CD\u590D\uFF08content \u4E0E contents \u4E4B\u95F4\u6216 contents \u5185\u90E8\uFF09\uFF1A${rel.path}`
+        };
+      }
+      seen.add(rel.path);
+      contentsRels.push(rel.path);
+    }
+    contentsValues = contentsRaw.map((item) => item.trim());
+  }
+  const imageRaw = record.imageFolder;
+  let imageRelPath = null;
+  let imageValue;
+  if (imageRaw !== void 0) {
+    if (typeof imageRaw !== "string" || imageRaw.trim() === "") {
+      return {
+        status: "error",
+        message: "manifest.json \u7684 imageFolder \u82E5\u5B58\u5728\u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32\uFF08\u7701\u7565\u8868\u793A\u65E0\u56FE\u7247\uFF09\u3002"
+      };
+    }
+    const imageRel = normalizeManifestRelative(imageRaw, true);
+    if (!imageRel.ok) {
+      return {
+        status: "error",
+        message: "manifest.json \u7684 imageFolder \u5FC5\u987B\u662F\u76F8\u5BF9 manifest \u6240\u5728\u76EE\u5F55\u7684\u6587\u4EF6\u5939\u8DEF\u5F84\uFF08\u7981\u6B62\u7EDD\u5BF9\u8DEF\u5F84\u4E0E ..\uFF09\u3002"
+      };
+    }
+    imageRelPath = imageRel.path;
+    imageValue = imageRaw.trim();
   }
   const folder = normalizeBankFolder(bankFolder);
-  const imageFolder = imageRel.path === "" ? folder : joinVaultPath(folder, imageRel.path);
+  const imageFolder = imageRelPath === null ? "" : imageRelPath === "" ? folder : joinVaultPath(folder, imageRelPath);
+  const contentPath = joinVaultPath(folder, contentRel.path);
+  const contentPaths = [
+    contentPath,
+    ...contentsRels.map((rel) => joinVaultPath(folder, rel))
+  ];
+  const manifest = {
+    type: MANIFEST_TYPE,
+    version: 1,
+    content: contentRaw.trim()
+  };
+  if (contentsValues !== void 0) manifest.contents = contentsValues;
+  if (imageValue !== void 0) manifest.imageFolder = imageValue;
   return {
     status: "ok",
-    manifest: {
-      type: MANIFEST_TYPE,
-      version: 1,
-      content: contentRaw.trim(),
-      imageFolder: imageRaw.trim()
-    },
-    contentPath: joinVaultPath(folder, contentRel.path),
+    manifest,
+    contentPath,
+    contentPaths,
     imageFolder
   };
 }
@@ -5701,11 +6144,28 @@ function csvSource(folder, contentPath) {
       mode: "csv",
       bankFolder: folder,
       contentPath,
+      contentPaths: [contentPath],
       imageFolder: "",
       anchor: contentPath,
       manifest: null
     }
   };
+}
+async function missingVaultPaths(vault, paths) {
+  const missing = [];
+  for (const path of paths) {
+    let exists = false;
+    try {
+      exists = await vault.adapter.exists(path);
+    } catch (e) {
+      exists = false;
+    }
+    if (!exists) missing.push(path);
+  }
+  return missing;
+}
+function contentMissingMessage(missing) {
+  return missing.length === 1 ? `manifest.json \u6307\u5B9A\u7684\u5185\u5BB9\u6587\u4EF6\u4E0D\u5B58\u5728\uFF1A${missing[0]}` : `manifest.json \u6307\u5B9A\u7684\u5185\u5BB9\u6587\u4EF6\u4E0D\u5B58\u5728\uFF1A${missing.join("\u3001")}`;
 }
 function normalizeVaultFilePath(raw) {
   return raw.trim().replace(/\\/g, "/").replace(/\/{2,}/g, "/").replace(/^\/+/, "");
@@ -5760,8 +6220,8 @@ async function resolveConfiguredSource(vault, settings) {
         `\u56FE\u7247\u6765\u6E90\u5FC5\u987B\u662F\u6587\u4EF6\u5939\uFF0C\u800C\u4E0D\u662F\u56FE\u7247\u6587\u4EF6\uFF1A${folder2}`
       );
     }
-    const files2 = await listVaultFiles(vault);
-    if (imagePathsUnder(files2, vaultFolderPath(folder2)).length === 0) {
+    const files = await listVaultFiles(vault);
+    if (imagePathsUnder(files, vaultFolderPath(folder2)).length === 0) {
       return configuredError(
         "image-folder-empty",
         folder2 === ROOT_BANK_FOLDER ? "vault \u6839\u76EE\u5F55\u4E0B\u6CA1\u6709\u53D7\u652F\u6301\u7684\u56FE\u7247\u3002" : `\u56FE\u7247\u6587\u4EF6\u5939\u4E0D\u5B58\u5728\u6216\u6CA1\u6709\u53D7\u652F\u6301\u7684\u56FE\u7247\uFF1A${folder2}`
@@ -5773,6 +6233,7 @@ async function resolveConfiguredSource(vault, settings) {
         mode: "image",
         bankFolder: folder2,
         contentPath: "",
+        contentPaths: [],
         imageFolder: folder2,
         anchor: folder2 === ROOT_BANK_FOLDER ? ROOT_IMAGE_ANCHOR : folder2,
         manifest: null
@@ -5812,24 +6273,18 @@ async function resolveConfiguredSource(vault, settings) {
   if (parsed.status === "error") {
     return configuredError("manifest-invalid", parsed.message);
   }
-  let contentExists = false;
-  try {
-    contentExists = await vault.adapter.exists(parsed.contentPath);
-  } catch (e) {
-    contentExists = false;
+  const missingContent = await missingVaultPaths(vault, parsed.contentPaths);
+  if (missingContent.length > 0) {
+    return configuredError("content-missing", contentMissingMessage(missingContent));
   }
-  if (!contentExists) {
-    return configuredError(
-      "content-missing",
-      `manifest.json \u6307\u5B9A\u7684\u5185\u5BB9\u6587\u4EF6\u4E0D\u5B58\u5728\uFF1A${parsed.contentPath}`
-    );
-  }
-  const files = await listVaultFiles(vault);
-  if (imagePathsUnder(files, parsed.imageFolder).length === 0) {
-    return configuredError(
-      "image-folder-empty",
-      `manifest.json \u6307\u5B9A\u7684\u56FE\u7247\u6587\u4EF6\u5939\u4E0D\u5B58\u5728\u6216\u6CA1\u6709\u53D7\u652F\u6301\u7684\u56FE\u7247\uFF1A${parsed.imageFolder === "" ? ROOT_BANK_FOLDER : parsed.imageFolder}`
-    );
+  if (parsed.imageFolder !== "") {
+    const files = await listVaultFiles(vault);
+    if (imagePathsUnder(files, parsed.imageFolder).length === 0) {
+      return configuredError(
+        "image-folder-empty",
+        `manifest.json \u6307\u5B9A\u7684\u56FE\u7247\u6587\u4EF6\u5939\u4E0D\u5B58\u5728\u6216\u6CA1\u6709\u53D7\u652F\u6301\u7684\u56FE\u7247\uFF1A${parsed.imageFolder}`
+      );
+    }
   }
   return {
     status: "ok",
@@ -5837,6 +6292,7 @@ async function resolveConfiguredSource(vault, settings) {
       mode: "manifest",
       bankFolder: folder,
       contentPath: parsed.contentPath,
+      contentPaths: parsed.contentPaths,
       imageFolder: parsed.imageFolder,
       anchor: manifestAnchorForBank(folder),
       manifest: parsed.manifest
@@ -6010,24 +6466,19 @@ async function resolveBankSource(vault, settings) {
     if (parsed.status === "ignored") {
       hadIgnoredManifest = true;
     } else {
-      let contentExists = false;
-      try {
-        contentExists = await vault.adapter.exists(parsed.contentPath);
-      } catch (e) {
-        contentExists = false;
-      }
-      if (!contentExists) {
+      const missingContent = await missingVaultPaths(vault, parsed.contentPaths);
+      if (missingContent.length > 0) {
         return {
           status: "error",
           reason: "content-missing",
-          message: `manifest.json \u6307\u5B9A\u7684\u5185\u5BB9\u6587\u4EF6\u4E0D\u5B58\u5728\uFF1A${parsed.contentPath}`
+          message: contentMissingMessage(missingContent)
         };
       }
-      if (imagePathsUnder(allFiles, parsed.imageFolder).length === 0) {
+      if (parsed.imageFolder !== "" && imagePathsUnder(allFiles, parsed.imageFolder).length === 0) {
         return {
           status: "error",
           reason: "image-folder-empty",
-          message: `manifest.json \u6307\u5B9A\u7684\u56FE\u7247\u6587\u4EF6\u5939\u4E0D\u5B58\u5728\u6216\u6CA1\u6709\u53D7\u652F\u6301\u7684\u56FE\u7247\uFF1A${parsed.imageFolder === "" ? ROOT_BANK_FOLDER : parsed.imageFolder}`
+          message: `manifest.json \u6307\u5B9A\u7684\u56FE\u7247\u6587\u4EF6\u5939\u4E0D\u5B58\u5728\u6216\u6CA1\u6709\u53D7\u652F\u6301\u7684\u56FE\u7247\uFF1A${parsed.imageFolder}`
         };
       }
       return {
@@ -6036,6 +6487,7 @@ async function resolveBankSource(vault, settings) {
           mode: "manifest",
           bankFolder: folder,
           contentPath: parsed.contentPath,
+          contentPaths: parsed.contentPaths,
           imageFolder: parsed.imageFolder,
           anchor: manifestAnchorForBank(folder),
           manifest: parsed.manifest
@@ -6078,6 +6530,7 @@ async function resolveBankSource(vault, settings) {
         mode: "image",
         bankFolder: folder,
         contentPath: "",
+        contentPaths: [],
         imageFolder: vaultFolderPath(folder),
         anchor: vaultFolderPath(folder),
         manifest: null
@@ -6107,6 +6560,16 @@ function sameIdSet(a, b) {
   }
   return true;
 }
+function formatBankRowError(e) {
+  const loc = [];
+  if (e.file) loc.push(e.file);
+  if (typeof e.rowNumber === "number") loc.push(`\u7B2C ${e.rowNumber} \u884C`);
+  if (e.id) loc.push(`[${e.id}]`);
+  return loc.length > 0 ? `${loc.join(" ")}\uFF1A${e.message}` : e.message;
+}
+function summarizeBankRowErrors(errors, limit = 5) {
+  return errors.slice(0, limit).map((e) => `\u2022 ${formatBankRowError(e)}`).join("\n");
+}
 var _QuizView = class _QuizView extends import_obsidian6.ItemView {
   constructor(leaf, plugin, stateManager, vault, csvWriteQueue) {
     super(leaf);
@@ -6129,6 +6592,8 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     this.filterWrong = "";
     this.filterUnanswered = "";
     this.csvPath = "";
+    /** 当前题库全部内容文件（manifest 复合题库可多 CSV/CQV；顺序同 manifest）。 */
+    this.csvPaths = [];
     /** 图片题文件夹（vault 相对路径；空串=不启用）。 */
     this.imageFolder = "";
     /** 当前题库的 sidecar 锚点（复合题库为 <folder>/manifest）。 */
@@ -6474,7 +6939,6 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
   }
   /** Read and parse the content source. Returns "ok", "empty" (no questions), or "error". */
   async loadQuestions() {
-    var _a;
     try {
       const questions = await this.readQuestionsFromSource();
       if (!questions) {
@@ -6501,16 +6965,11 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         return "empty";
       }
       this.canPersistState = true;
-      if (this.csvPath) {
-        const stat = await this.vault.adapter.stat(this.csvPath);
-        const newMtime = (_a = stat == null ? void 0 : stat.mtime) != null ? _a : null;
-        if (this.contentMtimeMs !== null && newMtime !== null && newMtime !== this.contentMtimeMs) {
-          new import_obsidian6.Notice("\u9898\u5E93\u6587\u4EF6\u5DF2\u66F4\u65B0\uFF0C\u72B6\u6001\u5DF2\u6309\u9898\u76EE\u5BF9\u9F50");
-        }
-        this.contentMtimeMs = newMtime;
-      } else {
-        this.contentMtimeMs = null;
+      const newMtime = await this.getContentMtimeMs();
+      if (this.contentMtimeMs !== null && newMtime !== null && newMtime !== this.contentMtimeMs) {
+        new import_obsidian6.Notice("\u9898\u5E93\u6587\u4EF6\u5DF2\u66F4\u65B0\uFF0C\u72B6\u6001\u5DF2\u6309\u9898\u76EE\u5BF9\u9F50");
       }
+      this.contentMtimeMs = newMtime;
       return "ok";
     } catch (e) {
       this.canPersistState = false;
@@ -6520,48 +6979,65 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     }
   }
   /**
-   * 读取全部题目：CSV/CQV（若有）+ 图片文件夹（若有），CSV 在前、图片按文件名排序。
-   * 任一来源失败但另一来源可用时，提示后降级加载；两者都失败返回 null。
+   * 读取全部题目：按 csvPaths 顺序合并 CSV/CQV 原始行（若有）+ 图片文件夹（若有）。
+   * 任一内容文件读取/校验失败或图片读取失败即整库失败（返回 null）——manifest 多 CSV
+   * 是同一题库的组成部分，部分加载会让题号/进度错位，不做降级。
    */
   async readQuestionsFromSource() {
-    const csvPath = this.csvPath.trim();
+    const contentPaths = this.csvPaths.map((p) => p.trim()).filter((p) => p !== "");
     const imageFolder = this.imageFolder.trim();
-    if (!csvPath && !imageFolder) {
+    if (contentPaths.length === 0 && !imageFolder) {
       new import_obsidian6.Notice("\u8BF7\u8BBE\u7F6E\u9898\u5E93\u6587\u4EF6\u6216\u56FE\u7247\u9898\u6587\u4EF6\u5939");
       this.showError("\u8BF7\u8BBE\u7F6E\u9898\u5E93\u6587\u4EF6\u6216\u56FE\u7247\u9898\u6587\u4EF6\u5939");
       return null;
     }
-    let csvQuestions = [];
-    if (csvPath) {
+    const rows = [];
+    for (const path of contentPaths) {
       try {
-        if (csvPath.toLowerCase().endsWith(".cqv")) {
-          const buf = await this.vault.adapter.readBinary(csvPath);
-          csvQuestions = decodeCqv(buf).questions;
+        if (path.toLowerCase().endsWith(".cqv")) {
+          const buf = await this.vault.adapter.readBinary(path);
+          const decoded = decodeCqv(buf).questions;
+          for (const q of decoded) q.sourcePath = path;
+          rows.push(...decoded);
         } else {
-          const csvContent = await readCSVFile(this.vault, csvPath);
-          csvQuestions = parseCSV(csvContent);
+          const content = await readCSVFile(this.vault, path);
+          rows.push(...parseCSV(content, { sourcePath: path }));
         }
       } catch (e) {
-        console.error("CSV Quiz: Failed to load CSV/CQV", e);
-        new import_obsidian6.Notice(
-          `\u9898\u5E93\u6587\u4EF6\u52A0\u8F7D\u5931\u8D25\uFF0C\u5DF2\u5C1D\u8BD5\u4EC5\u52A0\u8F7D\u56FE\u7247\u9898: ${e instanceof Error ? e.message : String(e)}`
-        );
-        csvQuestions = null;
+        const message = e instanceof Error ? e.message : String(e);
+        console.error("CSV Quiz: Failed to load CSV/CQV", path, e);
+        new import_obsidian6.Notice(`\u9898\u5E93\u6587\u4EF6\u52A0\u8F7D\u5931\u8D25\uFF1A${path}\uFF1A${message}`);
+        this.showError(`\u9898\u5E93\u6587\u4EF6\u52A0\u8F7D\u5931\u8D25\uFF1A${path}
+${message}`);
+        return null;
       }
     }
+    const rowErrors = validateQuestionRows(rows);
+    if (rowErrors.length > 0) {
+      const summary = summarizeBankRowErrors(rowErrors);
+      console.error("CSV Quiz: \u9898\u5E93\u884C\u6821\u9A8C\u5931\u8D25", rowErrors.slice(0, 5));
+      new import_obsidian6.Notice(`\u9898\u5E93\u6821\u9A8C\u5931\u8D25\uFF08${rowErrors.length} \u5904\uFF09`);
+      this.showError(
+        `\u9898\u5E93\u6821\u9A8C\u5931\u8D25\uFF08\u5171 ${rowErrors.length} \u5904\uFF0C\u663E\u793A\u524D ${Math.min(5, rowErrors.length)} \u5904\uFF09\uFF1A
+${summary}`
+      );
+      return null;
+    }
+    const expanded = expandShortAnswerRows(rows);
     let imageQuestions = [];
     if (imageFolder) {
       try {
         imageQuestions = await this.readImageQuestions(imageFolder);
       } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
         console.error("CSV Quiz: Failed to load image folder", e);
-        new import_obsidian6.Notice(
-          `\u56FE\u7247\u9898\u6587\u4EF6\u5939\u52A0\u8F7D\u5931\u8D25: ${e instanceof Error ? e.message : String(e)}`
-        );
+        new import_obsidian6.Notice(`\u56FE\u7247\u9898\u6587\u4EF6\u5939\u52A0\u8F7D\u5931\u8D25\uFF1A${message}`);
+        this.showError(`\u56FE\u7247\u9898\u6587\u4EF6\u5939\u52A0\u8F7D\u5931\u8D25\uFF1A${imageFolder}
+${message}`);
+        return null;
       }
     }
-    if (csvQuestions === null && imageQuestions.length === 0) return null;
-    return [...csvQuestions != null ? csvQuestions : [], ...imageQuestions];
+    return [...expanded, ...imageQuestions];
   }
   /** 递归列出图片文件夹内的文件并构建图片题（隐藏文件/目录由 buildImageQuestions 过滤）。 */
   async readImageQuestions(folder) {
@@ -6589,10 +7065,11 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
   }
   /**
    * 清理 sidecar meta 中已不存在于题库的僵尸条目（替换产物/CSV 后 id 变化时）。
-   * getMeta() 返回内部引用，delete 后调度保存落盘。
+   * 存活键用 metaKeyFor（简答题正反向卡共享 base id）：`<` 方向只有 base::rev 卡，
+   * 不能把合法的 meta[base] 当僵尸删掉。getMeta() 返回内部引用，delete 后调度保存落盘。
    */
   pruneMetaEntries() {
-    const ids = new Set(this.allQuestions.map((q) => q.id));
+    const ids = new Set(this.allQuestions.map((q) => metaKeyFor(q)));
     const meta = this.stateManager.getMeta();
     let changed = false;
     for (const k of Object.keys(meta)) {
@@ -6660,7 +7137,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     const byId = new Map(this.allQuestions.map((q) => [q.id, q]));
     for (const id of ids) {
       const q = byId.get(id);
-      if (!q || isImageQuestion(q)) continue;
+      if (!q || isSelfAssessed(q)) continue;
       const answerNorm = normalizeAnswerValue(q.answer);
       if (answerNorm === "") continue;
       const isCorrect = normalizeAnswerValue((_a = st.answeredQuestions[id]) != null ? _a : "") === answerNorm;
@@ -6675,14 +7152,16 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
   applyMetaToQuestions() {
     const meta = this.stateManager.getMeta();
     for (const q of this.allQuestions) {
-      const m = meta[q.id];
+      const m = meta[metaKeyFor(q)];
       if (!m) continue;
       if (m.favorite !== void 0) q.favorite = m.favorite;
       if (m.mastered !== void 0) q.mastered = m.mastered;
       if (m.wrong !== void 0) q.wrong = m.wrong;
       if (m.repeat !== void 0) q.repeat = m.repeat;
       if (!isImageQuestion(q)) {
-        if (m.tags !== void 0) q.tags = m.tags;
+        if (m.tags !== void 0) {
+          q.tags = isShortAnswer(q) ? ensureShortAnswerTag(m.tags) : stripShortAnswerTag(m.tags);
+        }
         if (m.category1 !== void 0) q.category1 = m.category1;
         if (m.category2 !== void 0) q.category2 = m.category2;
         if (m.category3 !== void 0) q.category3 = m.category3;
@@ -6692,10 +7171,25 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
   /**
    * 把题目的指定 B/C 类状态字段写入 sidecar meta（不再写 CSV）。无失败路径（内存操作 + 调度保存）。
    * 只写调用方明确修改过的字段，避免内容源默认值被烘焙进覆盖层（永久遮蔽误触发 + 导出反向覆盖作者更新）。
+   * - meta 键统一用 metaKeyFor（简答题正反向卡共享 base id）；
+   * - tags 写入前归一化（简答题补 #简答题 / 普通题剥掉该 token）；
+   * - 简答题的共享字段变更同步到 allQuestions 中同 base 的兄弟卡，避免筛选/导出读到陈旧值。
    */
   saveQuestionMeta(question, fields) {
+    const key = metaKeyFor(question);
     for (const f of fields) {
-      this.stateManager.setMetaField(question.id, f, question[f]);
+      if (f === "tags") {
+        question.tags = isShortAnswer(question) ? ensureShortAnswerTag(question.tags) : stripShortAnswerTag(question.tags);
+      }
+      this.stateManager.setMetaField(key, f, question[f]);
+    }
+    if (!isShortAnswer(question) || fields.length === 0) return;
+    for (const sibling of this.allQuestions) {
+      if (sibling === question) continue;
+      if (metaKeyFor(sibling) !== key) continue;
+      for (const f of fields) {
+        sibling[f] = question[f];
+      }
     }
   }
   /**
@@ -7218,10 +7712,10 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     if (this.memoryActive) this.exitMemoryPractice();
     if (this.filterPracticeActive) this.exitFilterPractice();
     const pool = this.applyFiltersTo(this.orderedQuestions).filter(
-      (q) => !isImageQuestion(q)
+      (q) => !isSelfAssessed(q)
     );
     if (pool.length === 0) {
-      new import_obsidian6.Notice("\u5F53\u524D\u7B5B\u9009\u6761\u4EF6\u4E0B\u6CA1\u6709\u6587\u5B57\u9898\uFF0C\u65E0\u6CD5\u5F00\u59CB\u968F\u673A\u8003\u8BD5");
+      new import_obsidian6.Notice("\u6CA1\u6709\u53EF\u7528\u4E8E\u968F\u673A\u8003\u8BD5\u7684\u9009\u62E9\u9898");
       return;
     }
     const picked = shuffle(pool).slice(0, this.getSettings().randomExamCount);
@@ -7804,7 +8298,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
   }
   /** 正确答案列包含多个字母（如 ABCD）时视为多选题。 */
   isMultiChoice(question) {
-    return !isImageQuestion(question) && question.answer.length > 1;
+    return !isSelfAssessed(question) && question.answer.length > 1;
   }
   /** 忽略字母顺序与重复，归一化答案字符串用于比较。 */
   normalizeAnswer(value) {
@@ -7868,10 +8362,47 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         rating: prevAnswer !== void 0 && isImageRatingKey(prevAnswer) ? prevAnswer : null,
         memoryEnabled: this.getSettings().memoryEnabled,
         onReveal: () => {
-          void this.revealImageAnswer(question);
+          void this.revealSelfAssessedAnswer(question);
         },
         onRate: (rating) => {
-          void this.handleImageRating(question, rating);
+          void this.handleSelfAssessedRating(question, rating);
+        }
+      });
+      this.renderCardPanel(question);
+      this.renderQuestionMetaAndNavigation(question);
+      return;
+    }
+    if (isShortAnswer(question)) {
+      this.selectedOption = null;
+      this.selectedOptions = [];
+      this.currentDisplayOptions = [];
+      this.renderPracticeSourceBadge(question);
+      const shortHost = this.questionArea.createDiv("csv-quiz-short-host");
+      renderShortAnswerQuestionUi({
+        container: shortHost,
+        stem: question.stem,
+        answer: question.answer,
+        answerShown: prevAnswer !== void 0,
+        rating: prevAnswer !== void 0 && isImageRatingKey(prevAnswer) ? prevAnswer : null,
+        memoryEnabled: this.getSettings().memoryEnabled,
+        reverse: question.side === "rev",
+        onReveal: () => {
+          void this.revealSelfAssessedAnswer(question);
+        },
+        onRate: (rating) => {
+          void this.handleSelfAssessedRating(question, rating);
+        },
+        renderMarkdown: (el, markdown) => {
+          var _a2;
+          import_obsidian6.MarkdownRenderer.render(
+            this.app,
+            markdown,
+            el,
+            (_a2 = question.sourcePath) != null ? _a2 : "",
+            this
+          ).catch(
+            (e) => console.error("CSV Quiz: markdown render failed", e)
+          );
         }
       });
       this.renderCardPanel(question);
@@ -8188,9 +8719,9 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       }
     }
   }
-  /** 图片题：展示答案并记为已答（不参与文字题对错统计）。 */
-  async revealImageAnswer(question) {
-    if (!isImageQuestion(question) || this.showingAnswer) return;
+  /** 自评题型（图片题/简答题）：展示答案并记为已答（不参与文字题对错统计）。 */
+  async revealSelfAssessedAnswer(question) {
+    if (!isSelfAssessed(question) || this.showingAnswer) return;
     const id = question.id;
     this.showingAnswer = true;
     this.answering = true;
@@ -8221,10 +8752,10 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         return Rating.Easy;
     }
   }
-  /** 图片题：记录用户选择的 FSRS 四级评分，并自动下一题。 */
-  async handleImageRating(question, ratingKey) {
+  /** 自评题型（图片题/简答题）：记录用户选择的 FSRS 四级评分，并自动下一题。 */
+  async handleSelfAssessedRating(question, ratingKey) {
     var _a;
-    if (!isImageQuestion(question) || !this.getSettings().memoryEnabled) return;
+    if (!isSelfAssessed(question) || !this.getSettings().memoryEnabled) return;
     if (!this.showingAnswer || this.imageRatingInProgress) return;
     const current = (_a = this.answeredQuestions[question.id]) != null ? _a : "";
     if (isImageRatingKey(current)) return;
@@ -8552,13 +9083,24 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
   async openTagPicker(question) {
     var _a, _b;
     await this.saveCurrentEdit();
-    const allTags = getUniqueTags(this.allQuestions);
+    const short = isShortAnswer(question);
+    const allTags = getUniqueTags(this.allQuestions).filter(
+      (tag) => short || tag !== SHORT_ANSWER_TAG
+    );
     const currentTags = question.tags || "";
     const modal = new TagPickerModal(this.app, allTags, currentTags);
     modal.open();
     const result = await modal.promise;
     if (result !== null) {
-      question.tags = result;
+      if (short && !hasExactTagToken(result)) {
+        new import_obsidian6.Notice("\u7B80\u7B54\u9898\u5FC5\u987B\u4FDD\u7559 #\u7B80\u7B54\u9898 \u6807\u7B7E\uFF0C\u6807\u7B7E\u672A\u4FDD\u5B58");
+        return;
+      }
+      if (!short && hasExactTagToken(result)) {
+        new import_obsidian6.Notice("\u666E\u901A\u9898\u4E0D\u80FD\u4F7F\u7528 #\u7B80\u7B54\u9898 \u6807\u7B7E\uFF0C\u6807\u7B7E\u672A\u4FDD\u5B58");
+        return;
+      }
+      question.tags = short ? ensureShortAnswerTag(result) : stripShortAnswerTag(result);
       this.saveQuestionMeta(question, ["tags"]);
       const currentDisplayedId = (_b = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id) != null ? _b : question.id;
       this.reFilterAndLocate(currentDisplayedId);
@@ -8578,6 +9120,12 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     const toggleIcon = toggleHeader.createSpan("csv-quiz-filter-icon");
     toggleHeader.createEl("span", { text: "\u6807\u7B7E / \u5206\u7C7B (\u7F16\u8F91\u540E\u81EA\u52A8\u4FDD\u5B58)" });
     const editBody = this.editArea.createDiv("csv-quiz-edit-grid");
+    if (isShortAnswer(question)) {
+      editBody.createDiv({
+        text: "\u7B80\u7B54\u9898\u7B54\u6848\u4E0E\u65B9\u5411\u8BF7\u5728\u6E90 CSV \u4E2D\u7F16\u8F91",
+        cls: "csv-quiz-edit-hint"
+      });
+    }
     const panelOpen = settings.editPanelOpen;
     editBody.classList.toggle("csv-quiz-edit-grid-hidden", !panelOpen);
     toggleIcon.textContent = panelOpen ? "\u25BC" : "\u25B6";
@@ -9123,11 +9671,27 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       if (!field) continue;
       const value = input.value;
       if (q[field] !== value) {
-        changedFields.push({ field, oldValue: q[field] });
-        q[field] = value;
+        changedFields.push({ field, oldValue: q[field], newValue: value });
       }
     }
     if (changedFields.length === 0) return;
+    const tagsChange = changedFields.find((c) => c.field === "tags");
+    if (tagsChange) {
+      const short = isShortAnswer(question);
+      const hasToken = hasExactTagToken(tagsChange.newValue);
+      if (short && !hasToken) {
+        new import_obsidian6.Notice("\u7B80\u7B54\u9898\u5FC5\u987B\u4FDD\u7559 #\u7B80\u7B54\u9898 \u6807\u7B7E\uFF0C\u4FEE\u6539\u672A\u4FDD\u5B58");
+        return;
+      }
+      if (!short && hasToken) {
+        new import_obsidian6.Notice("\u666E\u901A\u9898\u4E0D\u80FD\u4F7F\u7528 #\u7B80\u7B54\u9898 \u6807\u7B7E\uFF0C\u4FEE\u6539\u672A\u4FDD\u5B58");
+        return;
+      }
+      tagsChange.newValue = short ? ensureShortAnswerTag(tagsChange.newValue) : stripShortAnswerTag(tagsChange.newValue);
+    }
+    for (const c of changedFields) {
+      q[c.field] = c.newValue;
+    }
     this.saveQuestionMeta(
       question,
       changedFields.map((c) => c.field)
@@ -9137,83 +9701,130 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     new import_obsidian6.Notice("\u4FEE\u6539\u5DF2\u4FDD\u5B58");
   }
   /**
-   * 导出合并：把 sidecar meta 中 B 类覆盖（repeat/tags/category1-3）下沉写回 CSV 列，
-   * 写成功后清除对应 sidecar 的 B 类覆盖（合并即同步）。C 类（favorite/mastered/wrong）
-   * 永不导出（无 CSV 落点，只存 sidecar）。仅 CSV 模式可用。返回成功与否。
+   * 导出合并（支持 manifest 多 CSV）：把 sidecar meta 中 B 类覆盖（repeat/tags/category1-3）
+   * 按题目 sourcePath 分组下沉写回各 CSV 列；仅写成功的文件才清除该组 B 类覆盖（合并即同步）。
+   * C 类（favorite/mastered/wrong）永不导出（无 CSV 落点，只存 sidecar）。
+   * 无 sourcePath 的题与 .cqv 源（只读产物）跳过并计数提示。返回是否全部成功。
    */
   async exportMetaToCsv() {
-    if (!this.csvPath) {
-      new import_obsidian6.Notice("\u4EC5\u56FE\u7247\u9898\u6A21\u5F0F\u4E0D\u652F\u6301\u5BFC\u51FA\u5230 CSV");
-      return false;
-    }
-    if (this.csvPath.toLowerCase().endsWith(".cqv")) {
-      new import_obsidian6.Notice("\u7F16\u8BD1\u4EA7\u7269\u6A21\u5F0F\u4E0D\u652F\u6301\u5BFC\u51FA\u5408\u5E76");
-      return false;
-    }
+    var _a, _b;
     const meta = this.stateManager.getMeta();
-    const exported = [];
+    const groups = /* @__PURE__ */ new Map();
+    let skippedCqv = 0;
+    let skippedNoSource = 0;
+    let skippedImage = 0;
     for (const [id, entry] of Object.entries(meta)) {
       if (!entry) continue;
       const hasB = entry.repeat !== void 0 || entry.tags !== void 0 || entry.category1 !== void 0 || entry.category2 !== void 0 || entry.category3 !== void 0;
       if (!hasB) continue;
-      const q = this.allQuestions.find((x) => x.id === id);
-      if (!q || isImageQuestion(q)) continue;
-      exported.push({ id, question: q });
+      const q = this.allQuestions.find((x) => metaKeyFor(x) === id);
+      if (!q) continue;
+      if (isImageQuestion(q)) {
+        skippedImage++;
+        continue;
+      }
+      const source = ((_a = q.sourcePath) != null ? _a : "").trim();
+      if (source === "") {
+        skippedNoSource++;
+        continue;
+      }
+      if (source.toLowerCase().endsWith(".cqv")) {
+        skippedCqv++;
+        continue;
+      }
+      const list = (_b = groups.get(source)) != null ? _b : [];
+      if (!list.some((item) => item.id === id)) {
+        list.push({ id, question: q });
+      }
+      groups.set(source, list);
     }
-    if (exported.length === 0) {
-      new import_obsidian6.Notice("\u6CA1\u6709\u9700\u8981\u5BFC\u51FA\u7684\u4FEE\u6539");
+    const skipNote = this.exportSkipNote(skippedCqv, skippedNoSource, skippedImage);
+    if (groups.size === 0) {
+      new import_obsidian6.Notice(`\u6CA1\u6709\u53EF\u5BFC\u51FA\u7684\u4FEE\u6539${skipNote}`);
       return true;
     }
-    try {
-      await this.csvWriteQueue.enqueue(this.csvPath, (csvContent) => {
-        const result = import_papaparse2.default.parse(csvContent, {
-          header: false,
-          skipEmptyLines: true
+    const exported = [];
+    for (const [source, items] of groups) {
+      try {
+        await this.csvWriteQueue.enqueue(source, (csvContent) => {
+          const result = import_papaparse2.default.parse(csvContent, {
+            header: false,
+            skipEmptyLines: true
+          });
+          if (result.errors.length > 0) {
+            console.warn(
+              "CSV \u89E3\u6790\u8B66\u544A: \u68C0\u6D4B\u5230\u89E3\u6790\u9519\u8BEF",
+              result.errors.slice(0, 3)
+            );
+          }
+          const rows = result.data;
+          if (rows.length < 2) throw new Error("CSV \u4E2D\u672A\u627E\u5230\u5BF9\u5E94\u9898\u53F7");
+          const header = rows[0];
+          if (header.length > 0) {
+            header[0] = header[0].replace(/^\uFEFF/, "");
+          }
+          const dataRows = rows.slice(1);
+          const rowById = /* @__PURE__ */ new Map();
+          for (let i = 0; i < dataRows.length; i++) {
+            const id = String(dataRows[i][0] || "").trim();
+            if (id === "") continue;
+            if (rowById.has(id)) {
+              throw new Error("CSV \u4E2D\u9898\u53F7\u91CD\u590D\uFF0C\u5DF2\u62D2\u7EDD\u5199\u5165\uFF0C\u8BF7\u68C0\u67E5\u9898\u5E93");
+            }
+            rowById.set(id, i);
+          }
+          for (const { id, question } of items) {
+            const idx = rowById.get(id);
+            if (idx === void 0) {
+              throw new Error(`CSV \u4E2D\u672A\u627E\u5230\u5BF9\u5E94\u9898\u53F7: ${id}`);
+            }
+            const row = dataRows[idx];
+            const width = Math.max(15, header.length, row.length);
+            while (row.length < width) row.push("");
+            row[7] = isShortAnswer(question) ? ensureShortAnswerTag(question.tags) : stripShortAnswerTag(question.tags);
+            row[8] = question.category1;
+            row[9] = question.category2;
+            row[10] = question.category3;
+            row[13] = question.repeat;
+          }
+          return import_papaparse2.default.unparse([header, ...dataRows], {
+            // 沿用源文件的分隔符与换行，避免分号/Tab 题库被静默改成逗号
+            delimiter: result.meta.delimiter || ",",
+            newline: result.meta.linebreak || "\n"
+          });
         });
-        if (result.errors.length > 0) {
-          console.warn(
-            "CSV \u89E3\u6790\u8B66\u544A: \u68C0\u6D4B\u5230\u89E3\u6790\u9519\u8BEF",
-            result.errors.slice(0, 3)
-          );
+      } catch (e) {
+        const cleared2 = this.clearExportedMeta(meta, exported);
+        if (cleared2 > 0) {
+          this.stateManager.scheduleSave(this.buildCurrentState(), 0);
         }
-        const rows = result.data;
-        if (rows.length < 2) throw new Error("CSV \u4E2D\u672A\u627E\u5230\u5BF9\u5E94\u9898\u53F7");
-        const header = rows[0];
-        if (header.length > 0) {
-          header[0] = header[0].replace(/^\uFEFF/, "");
-        }
-        const dataRows = rows.slice(1);
-        const rowById = /* @__PURE__ */ new Map();
-        for (let i = 0; i < dataRows.length; i++) {
-          const id = String(dataRows[i][0] || "").trim();
-          if (id === "") continue;
-          if (rowById.has(id)) {
-            throw new Error("CSV \u4E2D\u9898\u53F7\u91CD\u590D\uFF0C\u5DF2\u62D2\u7EDD\u5199\u5165\uFF0C\u8BF7\u68C0\u67E5\u9898\u5E93");
-          }
-          rowById.set(id, i);
-        }
-        for (const { id, question } of exported) {
-          const idx = rowById.get(id);
-          if (idx === void 0) {
-            throw new Error(`CSV \u4E2D\u672A\u627E\u5230\u5BF9\u5E94\u9898\u53F7: ${id}`);
-          }
-          const row = dataRows[idx];
-          while (row.length < 15) row.push("");
-          row[7] = question.tags;
-          row[8] = question.category1;
-          row[9] = question.category2;
-          row[10] = question.category3;
-          row[13] = question.repeat;
-        }
-        return import_papaparse2.default.unparse([header, ...dataRows], { delimiter: "," });
-      });
-    } catch (e) {
-      console.error("CSV Quiz: Failed to export meta to CSV", e);
-      new import_obsidian6.Notice(`\u5BFC\u51FA\u5931\u8D25: ${e instanceof Error ? e.message : String(e)}`);
-      return false;
+        console.error("CSV Quiz: Failed to export meta to CSV", source, e);
+        new import_obsidian6.Notice(
+          `\u5BFC\u51FA\u5931\u8D25\uFF08${source}\uFF09: ${e instanceof Error ? e.message : String(e)}`
+        );
+        return false;
+      }
+      exported.push(...items);
     }
+    const cleared = this.clearExportedMeta(meta, exported);
+    this.stateManager.scheduleSave(this.buildCurrentState(), 0);
+    new import_obsidian6.Notice(
+      `\u5DF2\u5BFC\u51FA ${cleared} \u9898\u7684\u4FEE\u6539\u5230 ${groups.size} \u4E2A CSV \u6587\u4EF6${skipNote}`
+    );
+    return true;
+  }
+  /** 跳过项提示（CQV 只读源 / 无来源题 / 图片题）。 */
+  exportSkipNote(cqv, noSource, image = 0) {
+    const parts = [];
+    if (cqv > 0) parts.push(`\u8DF3\u8FC7 CQV ${cqv} \u9898`);
+    if (noSource > 0) parts.push(`\u8DF3\u8FC7\u65E0\u6765\u6E90 ${noSource} \u9898`);
+    if (image > 0) parts.push(`\u8DF3\u8FC7\u56FE\u7247\u9898 ${image} \u9898`);
+    return parts.length > 0 ? `\uFF08${parts.join("\u3001")}\uFF09` : "";
+  }
+  /** 清除已成功导出条目的 B 类 meta（保留 C 类；除 ts 外无字段则删除整条），返回清理条数。 */
+  clearExportedMeta(meta, items) {
     let cleared = 0;
-    for (const { id } of exported) {
+    for (const { id } of items) {
       const entry = meta[id];
       if (!entry) continue;
       delete entry.repeat;
@@ -9221,38 +9832,50 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       delete entry.category1;
       delete entry.category2;
       delete entry.category3;
-      if (Object.keys(entry).length === 0) {
+      const remaining = Object.keys(entry).filter((key) => key !== "ts");
+      if (remaining.length === 0) {
         delete meta[id];
       }
       cleared++;
     }
-    this.stateManager.scheduleSave(this.buildCurrentState(), 0);
-    new import_obsidian6.Notice(`\u5DF2\u5BFC\u51FA ${cleared} \u9898\u7684\u4FEE\u6539\u5230 CSV`);
-    return true;
+    return cleared;
   }
   /**
-   * 编译当前 CSV 题库为 .cqv 分发产物（编辑者工具）。校验失败拒编。
+   * 编译当前题库（多 CSV 按 manifest 顺序拼接）为 .cqv 分发产物（编辑者工具）。
+   * 逐行严格校验 + 展开后 id 质量校验失败即拒编；含简答或多源写 v2，纯普通单 CSV 仍写 v1。
    * 需先输入备注（随产物头部分发，可为空）。返回成功与否。
    */
   async compileToCqv() {
-    if (!this.csvPath) {
+    const sourcePaths = this.csvPaths.map((p) => p.trim()).filter((p) => p !== "");
+    if (sourcePaths.length === 0) {
       new import_obsidian6.Notice("\u4EC5\u56FE\u7247\u9898\u6A21\u5F0F\u4E0D\u652F\u6301\u7F16\u8BD1 .cqv");
       return false;
     }
-    if (this.csvPath.toLowerCase().endsWith(".cqv")) {
-      new import_obsidian6.Notice("\u4EC5 CSV \u9898\u5E93\u53EF\u7F16\u8BD1\u4E3A\u4EA7\u7269");
+    if (sourcePaths.some((p) => p.toLowerCase().endsWith(".cqv"))) {
+      new import_obsidian6.Notice("\u7F16\u8BD1\u9700\u8981 CSV \u6E90\uFF08.cqv \u4EA7\u7269\u53EA\u8BFB\uFF0C\u4E0D\u80FD\u518D\u6B21\u7F16\u8BD1\uFF09");
       return false;
     }
-    let questions;
+    const rows = [];
     try {
-      const csvContent = await readCSVFile(this.vault, this.csvPath);
-      questions = parseCSV(csvContent);
+      for (const path of sourcePaths) {
+        const csvContent = await readCSVFile(this.vault, path);
+        rows.push(...parseCSV(csvContent, { sourcePath: path }));
+      }
     } catch (e) {
       console.error("CSV Quiz: Failed to read CSV for compile", e);
       new import_obsidian6.Notice(`\u8BFB\u53D6\u9898\u5E93\u5931\u8D25: ${e instanceof Error ? e.message : String(e)}`);
       return false;
     }
-    const { emptyIds, duplicateIds } = checkIdQuality(questions);
+    const rowErrors = validateQuestionRows(rows);
+    if (rowErrors.length > 0) {
+      new import_obsidian6.Notice(
+        `\u7F16\u8BD1\u5DF2\u62D2\u7EDD\uFF1A${rowErrors.length} \u884C\u6821\u9A8C\u5931\u8D25\uFF08\u663E\u793A\u524D ${Math.min(5, rowErrors.length)} \u6761\uFF09
+${summarizeBankRowErrors(rowErrors)}`
+      );
+      return false;
+    }
+    const expanded = expandShortAnswerRows(rows);
+    const { emptyIds, duplicateIds } = checkIdQuality(expanded);
     if (emptyIds.length > 0 || duplicateIds.length > 0) {
       const parts = [];
       if (emptyIds.length > 0) parts.push(`\u7A7A\u9898\u53F7 ${emptyIds.length} \u4E2A`);
@@ -9264,7 +9887,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       new import_obsidian6.Notice(`\u7F16\u8BD1\u5DF2\u62D2\u7EDD\uFF1A\u9898\u5E93\u5B58\u5728${parts.join("\u3001")}\uFF0C\u8BF7\u4FEE\u6539 CSV \u540E\u91CD\u8BD5`);
       return false;
     }
-    if (questions.length === 0) {
+    if (rows.length === 0) {
       new import_obsidian6.Notice("\u9898\u5E93\u4E3A\u7A7A\uFF0C\u65E0\u6CD5\u7F16\u8BD1");
       return false;
     }
@@ -9274,12 +9897,16 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       placeholder: "\u4F8B\u5982\uFF1Av2 \u4FEE\u8BA2\u90E8\u5206\u7B54\u6848"
     });
     if (note === null) return false;
-    const lower = this.csvPath.toLowerCase();
-    const cqvPath = lower.endsWith(".csv") ? this.csvPath.slice(0, this.csvPath.length - 4) + ".cqv" : this.csvPath + ".cqv";
+    const firstSource = sourcePaths[0];
+    const lower = firstSource.toLowerCase();
+    const cqvPath = lower.endsWith(".csv") ? firstSource.slice(0, firstSource.length - 4) + ".cqv" : firstSource + ".cqv";
+    const formatVersion = rows.some(isShortAnswer) || sourcePaths.length > 1 ? 2 : 1;
     try {
-      const buffer = encodeCqv(questions, {
-        sourceCsv: this.csvPath,
-        note
+      const buffer = encodeCqv(rows, {
+        sourceCsv: firstSource,
+        sourceFiles: sourcePaths,
+        note,
+        formatVersion
       });
       const tmpPath = cqvPath + ".tmp";
       await this.vault.adapter.writeBinary(tmpPath, buffer);
@@ -9293,12 +9920,12 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       return false;
     }
     new import_obsidian6.Notice(
-      `\u5DF2\u751F\u6210 ${cqvPath}\uFF08${questions.length} \u9898\uFF09\uFF0C\u53EF\u5728\u8BBE\u7F6E\u4E2D\u9009\u62E9\u8BE5\u6587\u4EF6\u5207\u6362\u4E3A\u9898\u5E93\u6765\u6E90`
+      `\u5DF2\u751F\u6210 ${cqvPath}\uFF08${rows.length} \u9898\uFF09\uFF0C\u53EF\u5728\u8BBE\u7F6E\u4E2D\u9009\u62E9\u8BE5\u6587\u4EF6\u5207\u6362\u4E3A\u9898\u5E93\u6765\u6E90`
     );
     return true;
   }
   async refresh(preserveState = false) {
-    var _a, _b, _c;
+    var _a, _b;
     const epoch = ++this.loadEpoch;
     const hadPersistableState = this.canPersistState && this.stateManager.getState() !== null;
     this.canPersistState = false;
@@ -9376,16 +10003,11 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         return;
       }
       this.canPersistState = true;
-      if (this.csvPath) {
-        const stat = await this.vault.adapter.stat(this.csvPath);
-        const newMtime = (_a = stat == null ? void 0 : stat.mtime) != null ? _a : null;
-        if (this.contentMtimeMs !== null && newMtime !== null && newMtime !== this.contentMtimeMs) {
-          new import_obsidian6.Notice("\u9898\u5E93\u6587\u4EF6\u5DF2\u66F4\u65B0\uFF0C\u72B6\u6001\u5DF2\u6309\u9898\u76EE\u5BF9\u9F50");
-        }
-        this.contentMtimeMs = newMtime;
-      } else {
-        this.contentMtimeMs = null;
+      const newMtime = await this.getContentMtimeMs();
+      if (this.contentMtimeMs !== null && newMtime !== null && newMtime !== this.contentMtimeMs) {
+        new import_obsidian6.Notice("\u9898\u5E93\u6587\u4EF6\u5DF2\u66F4\u65B0\uFF0C\u72B6\u6001\u5DF2\u6309\u9898\u76EE\u5BF9\u9F50");
       }
+      this.contentMtimeMs = newMtime;
       if (epoch !== this.loadEpoch) return;
       if (!preserveState && !wasSwitching && this.stateManager.getContentPath() === contentPath) {
         await this.stateManager.clearState();
@@ -9433,7 +10055,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       if (epoch !== this.loadEpoch) return;
       this.saveState();
       this.startAutoSave();
-      (_c = (_b = this.plugin).refreshMemoryReminder) == null ? void 0 : _c.call(_b);
+      (_b = (_a = this.plugin).refreshMemoryReminder) == null ? void 0 : _b.call(_a);
       new import_obsidian6.Notice(
         wasSwitching ? "\u5DF2\u5207\u6362\u9898\u5E93" : preserveState ? "\u56FE\u7247\u9898\u5E93\u5DF2\u5237\u65B0" : "\u5DF2\u5237\u65B0\uFF0C\u91CD\u65B0\u5F00\u59CB"
       );
@@ -9460,9 +10082,32 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
   }
   /** 应用解析结果到视图的读取路径。 */
   applyResolvedSource(source) {
-    this.csvPath = source.contentPath;
+    var _a;
+    const paths = source.contentPaths.length > 0 ? source.contentPaths : source.contentPath ? [source.contentPath] : [];
+    this.csvPaths = [...paths];
+    this.csvPath = (_a = this.csvPaths[0]) != null ? _a : "";
     this.imageFolder = source.imageFolder;
     this.sourceAnchor = source.anchor;
+  }
+  /**
+   * 内容源 mtime：对 csvPaths 逐个 stat，取最大 mtime（题库任一文件更新都算更新）。
+   * 无内容文件或全部 stat 失败返回 null。
+   */
+  async getContentMtimeMs() {
+    let max = null;
+    for (const raw of this.csvPaths) {
+      const path = raw.trim();
+      if (path === "") continue;
+      try {
+        const stat = await this.vault.adapter.stat(path);
+        const mtime = stat == null ? void 0 : stat.mtime;
+        if (typeof mtime === "number" && Number.isFinite(mtime)) {
+          max = max === null ? mtime : Math.max(max, mtime);
+        }
+      } catch (e) {
+      }
+    }
+    return max;
   }
   /**
    * 按设置中的显式来源（csv 文件 / image 文件夹 / manifest 复合题库）解析。
@@ -10012,8 +10657,12 @@ var StateManager = class {
         return { status: "rejected", reason: "csv-missing" };
       }
       const csvContent = await this.vault.adapter.read(contentPath);
-      const { emptyIds, duplicateIds } = checkIdQuality(parseCSV(csvContent));
-      if (emptyIds.length > 0 || duplicateIds.length > 0) {
+      const rows = parseCSV(csvContent);
+      const rowErrors = validateQuestionRows(rows);
+      const { emptyIds, duplicateIds } = checkIdQuality(
+        expandShortAnswerRows(rows)
+      );
+      if (rowErrors.length > 0 || emptyIds.length > 0 || duplicateIds.length > 0) {
         return { status: "rejected", reason: "bad-id" };
       }
     } catch (e) {

@@ -24,6 +24,7 @@ import {
   SIDECAR_SAVE_DEBOUNCE_MS,
 } from "./sidecar";
 import { checkIdQuality, parseCSV } from "./csvHandler";
+import { expandShortAnswerRows, validateQuestionRows } from "./shortAnswer";
 import { normalizeVaultFolder } from "./contentSource";
 
 interface DataPatch {
@@ -659,14 +660,24 @@ export class StateManager {
     this.currentState = null;
     this.currentMeta = {};
 
-    // 脏拒迁：源 CSV 必须存在且 id 干净（空/重复题号拒绝迁移）
+    // 脏拒迁：源 CSV 必须存在且通过统一题库管线（逐行校验 + 展开后的 id 质量）。
+    // 与视图加载同口径：简答题选项/答案/方向非法、id 含 "::"、空/重复题号（含派生
+    // `::rev`）一律拒迁，避免把旧进度错位搬到与视图不一致的题库。
     try {
       if (!(await this.vault.adapter.exists(contentPath))) {
         return { status: "rejected", reason: "csv-missing" };
       }
       const csvContent = await this.vault.adapter.read(contentPath);
-      const { emptyIds, duplicateIds } = checkIdQuality(parseCSV(csvContent));
-      if (emptyIds.length > 0 || duplicateIds.length > 0) {
+      const rows = parseCSV(csvContent);
+      const rowErrors = validateQuestionRows(rows);
+      const { emptyIds, duplicateIds } = checkIdQuality(
+        expandShortAnswerRows(rows)
+      );
+      if (
+        rowErrors.length > 0 ||
+        emptyIds.length > 0 ||
+        duplicateIds.length > 0
+      ) {
         return { status: "rejected", reason: "bad-id" };
       }
     } catch {

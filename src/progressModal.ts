@@ -6,6 +6,7 @@ import {
   isImageQuestion,
   isImageRatingKey,
 } from "./imageBank";
+import { isShortAnswer } from "./shortAnswer";
 
 export interface ProgressModalOptions {
   questions: Question[]; // 视图当前列表(filteredQuestions,顺序/筛选与视图一致)
@@ -15,6 +16,145 @@ export interface ProgressModalOptions {
   onJump: (id: string) => void; // 点击跳转回调
   /** 随机考试进行中（尚未交卷）：隐藏对错、正确率、错题标记与记忆状态，避免泄露答案。 */
   maskCorrectness?: boolean;
+}
+
+/** 进度汇总的计数结果（纯数据，便于单测）。 */
+export interface ProgressStats {
+  /** 全部已答（含图片题、简答题） */
+  answered: number;
+  /** 普通选择题已答数（对错/正确率的分母） */
+  textAnswered: number;
+  correct: number;
+  imageTotal: number;
+  imageRated: number;
+  shortTotal: number;
+  shortRated: number;
+}
+
+/** 统计与行渲染共用的归一化缓存（统计时填充、行渲染时读取）。 */
+export interface ProgressStatsResult {
+  stats: ProgressStats;
+  normCache: Map<string, string>;
+}
+
+/**
+ * 全量遍历题目累计进度计数。纯函数，不依赖 Obsidian，便于单元测试。
+ * - `answered` 统计全部已答（图片题/简答题只要有记录即算）；
+ * - `textAnswered`（对错/正确率分母）只含既非图片、也非简答的普通选择题；
+ * - 简答题：`shortRated` 只认四级 rating key，revealed 视为已答未评；
+ * - `maskCorrectness` 为真时不计算对错，避免通过汇总泄露成绩。
+ */
+export function computeProgressStats(
+  questions: Question[],
+  answeredQuestions: Record<string, string>,
+  maskCorrectness: boolean
+): ProgressStatsResult {
+  const normCache = new Map<string, string>();
+  const stats: ProgressStats = {
+    answered: 0,
+    textAnswered: 0,
+    correct: 0,
+    imageTotal: 0,
+    imageRated: 0,
+    shortTotal: 0,
+    shortRated: 0,
+  };
+
+  for (const q of questions) {
+    const a = answeredQuestions[q.id];
+    if (isImageQuestion(q)) {
+      stats.imageTotal++;
+      if (a !== undefined) {
+        stats.answered++;
+        if (isImageRatingKey(a)) stats.imageRated++;
+      }
+      continue;
+    }
+    if (isShortAnswer(q)) {
+      stats.shortTotal++;
+      if (a !== undefined) {
+        stats.answered++;
+        if (isImageRatingKey(a)) stats.shortRated++;
+      }
+      continue;
+    }
+    if (a !== undefined) {
+      stats.answered++;
+      stats.textAnswered++;
+      // 随机考试进行中不计算/展示对错，避免通过汇总泄露成绩
+      if (maskCorrectness) continue;
+      const normA = normalizeAnswerValue(a);
+      const normAns = normalizeAnswerValue(q.answer);
+      normCache.set(`u:${q.id}`, normA);
+      normCache.set(`c:${q.id}`, normAns);
+      if (normA === normAns) {
+        stats.correct++;
+      }
+    }
+  }
+
+  return { stats, normCache };
+}
+
+/** 汇总行文本：图片题/简答题进展各自只在存在该类题时追加，两者可同时出现。 */
+export function formatProgressSummary(
+  total: number,
+  stats: ProgressStats,
+  maskCorrectness: boolean
+): string {
+  // 图片题进展只在存在图片题时追加（已评数是中性信息，不受 maskCorrectness 影响）
+  const imagePart =
+    stats.imageTotal > 0 ? ` · 图片题已评 ${stats.imageRated}/${stats.imageTotal}` : "";
+  // 简答题与图片题口径一致，但单独展示
+  const shortPart =
+    stats.shortTotal > 0 ? ` · 简答题已评 ${stats.shortRated}/${stats.shortTotal}` : "";
+
+  if (maskCorrectness) {
+    return (
+      `共 ${total} 题 · 已答 ${stats.answered} · 未答 ${total - stats.answered}` +
+      imagePart +
+      shortPart
+    );
+  }
+  return (
+    `共 ${total} 题 · 已答 ${stats.answered} · 未答 ${total - stats.answered} · 答对 ${stats.correct} · 答错 ${stats.textAnswered - stats.correct}` +
+    (stats.textAnswered > 0
+      ? ` · 正确率 ${((stats.correct / stats.textAnswered) * 100).toFixed(1)}%`
+      : "") +
+    imagePart +
+    shortPart
+  );
+}
+
+/** 题干预览：去掉常见 Markdown 符号后按 30 字截断（加省略号）。 */
+export function progressStemPreview(stem: string): string {
+  const text = stem.replace(/[#*`_~[\]()>!-]/g, "").trim();
+  return text.length > 30 ? text.slice(0, 30) + "…" : text;
+}
+
+/** 简答题左侧徽标文案；反向卡标注方向。 */
+export function shortAnswerBadge(q: Question): string {
+  return q.side === "rev" ? "简答题（反向）" : "简答题";
+}
+
+/** 简答题状态文案与样式类；简答与图片一样不区分对错（无红绿）。 */
+export function shortAnswerStatus(
+  answer: string | undefined,
+  maskCorrectness: boolean
+): { text: string; cls: string } {
+  const neutral = "csv-quiz-progress-status";
+  if (answer === undefined) {
+    return { text: "未答", cls: `${neutral} csv-quiz-progress-unanswered` };
+  }
+  if (maskCorrectness) {
+    return { text: "已答", cls: `${neutral} csv-quiz-progress-masked` };
+  }
+  const ratingLabel = imageRatingLabel(answer);
+  if (ratingLabel !== null) {
+    return { text: `已评 · ${ratingLabel}`, cls: neutral };
+  }
+  // revealed：已看答案但未评分
+  return { text: "已看答案", cls: `${neutral} csv-quiz-progress-unanswered` };
 }
 
 /** 刷题进度弹窗：展示当前列表每道题的答题/记忆状态，点击行跳转。
@@ -53,54 +193,14 @@ export class ProgressModal extends Modal {
 
     // 统计与渲染解耦——单独全量遍历所有题目累计 answered/correct（基数与列表长度一致），
     // 同时把每题的用户答案与标准答案的归一化结果存入 Map（统计时填充、行渲染时读取，避免重复 normalizeAnswerValue）
-    const normCache = new Map<string, string>();
-    let answered = 0;
-    // 文字题已答数（对错/正确率的分母）；图片题不参与对错统计
-    let textAnswered = 0;
-    let correct = 0;
-    // 图片题：总数与“已评分”（answered 值为 rating key）数量，revealed/未答不计入已评
-    let imageTotal = 0;
-    let imageRated = 0;
-    for (const q of questions) {
-      const a = answeredQuestions[q.id];
-      if (isImageQuestion(q)) {
-        imageTotal++;
-        if (a !== undefined) {
-          answered++;
-          if (isImageRatingKey(a)) imageRated++;
-        }
-        continue;
-      }
-      if (a !== undefined) {
-        answered++;
-        textAnswered++;
-        // 随机考试进行中不计算/展示对错，避免通过汇总泄露成绩
-        if (maskCorrectness) continue;
-        const normA = normalizeAnswerValue(a);
-        const normAns = normalizeAnswerValue(q.answer);
-        normCache.set(`u:${q.id}`, normA);
-        normCache.set(`c:${q.id}`, normAns);
-        if (normA === normAns) {
-          correct++;
-        }
-      }
-    }
-
-    // 图片题进展只在存在图片题时追加（已评数是中性信息，不受 maskCorrectness 影响）
-    const imagePart =
-      imageTotal > 0 ? ` · 图片题已评 ${imageRated}/${imageTotal}` : "";
+    const { stats, normCache } = computeProgressStats(
+      questions,
+      answeredQuestions,
+      maskCorrectness
+    );
 
     // 最后设置汇总统计文本（基于当前列表全部题目；空列表分支同样适用）
-    summary.setText(
-      maskCorrectness
-        ? `共 ${questions.length} 题 · 已答 ${answered} · 未答 ${questions.length - answered}` +
-            imagePart
-        : `共 ${questions.length} 题 · 已答 ${answered} · 未答 ${questions.length - answered} · 答对 ${correct} · 答错 ${textAnswered - correct}` +
-            (textAnswered > 0
-              ? ` · 正确率 ${((correct / textAnswered) * 100).toFixed(1)}%`
-              : "") +
-            imagePart
-    );
+    summary.setText(formatProgressSummary(questions.length, stats, maskCorrectness));
 
     if (questions.length === 0) {
       list.createEl("p", { text: "当前列表没有题目", cls: "csv-quiz-empty" });
@@ -158,12 +258,24 @@ export class ProgressModal extends Modal {
             cls: "csv-quiz-progress-status csv-quiz-progress-unanswered",
           });
         }
+      } else if (isShortAnswer(q)) {
+        // 简答题：自评题型，与图片题同样不显示对错红绿；stem 是卡面题干
+        // （反向卡的 stem 是原答案文本，同属可预览内容），绝不展示 q.answer
+        row.createEl("span", {
+          text: shortAnswerBadge(q),
+          cls: "csv-quiz-progress-image-label csv-quiz-progress-short-label",
+        });
+        row.createEl("span", {
+          text: progressStemPreview(q.stem),
+          cls: "csv-quiz-progress-stem",
+        });
+        const status = shortAnswerStatus(a, maskCorrectness);
+        row.createEl("span", { text: status.text, cls: status.cls });
       } else {
         row.createEl("span", { text: q.id, cls: "csv-quiz-progress-id" });
         // 题干(去 Markdown 符号截断 30 字)
-        const stem = q.stem.replace(/[#*`_~[\]()>!-]/g, "").trim();
         row.createEl("span", {
-          text: stem.length > 30 ? stem.slice(0, 30) + "…" : stem,
+          text: progressStemPreview(q.stem),
           cls: "csv-quiz-progress-stem",
         });
         // 答题状态

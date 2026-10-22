@@ -37,7 +37,7 @@ interface PluginHandle {
 
 /** 「题库来源」说明文案（声明式与命令式共用）。 */
 const SOURCE_DESC =
-  "显式选择题库来源：CSV/CQV 文件、图片文件夹，或包含 manifest.json 的复合题库文件夹。图片/复合题库文件夹允许 vault 根（用 / 表示）。";
+  "显式选择题库来源：CSV/CQV 文件、图片文件夹，或包含 manifest.json 的复合题库文件夹。复合题库用 content 指定主文件、contents 追加额外 CSV/CQV，imageFolder 可省略（无图片）。图片/复合题库文件夹允许 vault 根（用 / 表示）。";
 
 /** 把任意值收敛为合法的显式来源类型（未知值视为未设置）。 */
 function normalizeSourceType(value: unknown): SourceType | "" {
@@ -674,12 +674,17 @@ export class CSVQuizSettingTab extends PluginSettingTab {
     const status = this.plugin.bankStatus;
     const source = status?.status === "ok" ? status.source : null;
     const settings = this.plugin.settings;
+    const contentFiles = source
+      ? source.contentPaths.length > 0
+        ? source.contentPaths.join("、")
+        : source.contentPath || "—"
+      : "—";
     const lines: Array<[string, string]> = [
       ["来源类型", this.sourceTypeLabel(settings.sourceType)],
       ["来源路径", settings.sourcePath || "—"],
       ["模式", this.bankModeLabel(status)],
-      ["内容文件", source ? source.contentPath || "—" : "—"],
-      ["图片文件夹", source ? source.imageFolder || "—" : "—"],
+      ["内容文件", contentFiles],
+      ["图片文件夹", source ? source.imageFolder || "—（无图片）" : "—"],
     ];
     if (source) lines.push(["状态文件", sidecarPathFor(source.anchor)]);
     for (const [label, value] of lines) {

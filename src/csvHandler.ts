@@ -1,14 +1,18 @@
 import Papa from "papaparse";
 import { Question } from "./types";
+import { hasExactTagToken, parseShortDirection, SHORT_ANSWER_TAG } from "./shortAnswer";
 
 import { App, Editor, MarkdownView, Notice, Vault } from "obsidian";
 
 // 不变式：本函数为纯解析，不弹窗、不生成 id、不校验 id 质量。
 // 调用方（quizView 等）必须自行用 checkIdQuality 校验：若 row[0] 为空，
 // id 为空串是合法解析结果，由校验方拒绝加载。
-export function parseCSV(content: string): Question[] {
-  const result = Papa.parse(content, { header: false, skipEmptyLines: true });
-  const rows = result.data as string[][];
+// 简答题（标签含精确 #简答题）的严格校验由调用方用 validateQuestionRows 聚合，本函数不抛错。
+export function parseCSV(content: string, opts?: { sourcePath?: string }): Question[] {
+  // skipEmptyLines:false 保留原始记录下标，空行过滤自己做（否则中部空行会让
+  // rowNumber 偏小，错误提示指向错误的文件行）。
+  const result = Papa.parse(content, { header: false, skipEmptyLines: false });
+  const rawRows = result.data as string[][];
 
   // 修复1: 解析错误可见化——未闭合引号等会导致列错位，提示用户数据可能错位
   if (result.errors.length > 0) {
@@ -18,31 +22,56 @@ export function parseCSV(content: string): Question[] {
     );
   }
 
-  // Remove BOM from first cell if present
-  if (rows.length > 0 && rows[0].length > 0) {
-    rows[0][0] = rows[0][0].replace(/^\uFEFF/, "");
+  // 过滤“所有单元格 trim 后为空”的记录，但保留其原始下标用于计算真实行号
+  const isBlankRecord = (row: string[]): boolean =>
+    row.every((cell) => String(cell ?? "").trim() === "");
+  const records = rawRows
+    .map((row, index) => ({ row, index }))
+    .filter(({ row }) => !isBlankRecord(row));
+
+  // Remove BOM from first non-empty cell if present
+  if (records.length > 0 && records[0].row.length > 0) {
+    records[0].row[0] = records[0].row[0].replace(/^\uFEFF/, "");
   }
 
-  // Skip header row
-  const dataRows = rows.slice(1);
+  // Skip header row（第一个非空记录）
+  const dataRows = records.slice(1);
 
-  return dataRows.map((row: string[]) => ({
-    id: String(row[0] || "").trim(),
-    stem: row[1] || "",
-    optionA: row[2] || "",
-    optionB: row[3] || "",
-    optionC: row[4] || "",
-    optionD: row[5] || "",
-    answer: (row[6] || "").toUpperCase().trim(),
-    tags: row[7] || "",
-    category1: row[8] || "",
-    category2: row[9] || "",
-    category3: row[10] || "",
-    favorite: row[11] || "",
-    mastered: row[12] || "",
-    repeat: row[13] || "",
-    wrong: row[14] || "",
-  }));
+  return dataRows.map(({ row, index }) => {
+    const tags = row[7] || "";
+    const isShort = hasExactTagToken(tags, SHORT_ANSWER_TAG);
+    const rawDirection = String(row[15] ?? "");
+    // 简答题答案保留原文（大小写/空白/换行/高亮/HTML 均不改）；
+    // 选择题沿用旧行为，大写并 trim 成 A-D。
+    const answer = isShort ? row[6] ?? "" : (row[6] || "").toUpperCase().trim();
+    const direction = isShort ? parseShortDirection(rawDirection) ?? undefined : undefined;
+
+    return {
+      id: String(row[0] || "").trim(),
+      stem: row[1] || "",
+      optionA: row[2] || "",
+      optionB: row[3] || "",
+      optionC: row[4] || "",
+      optionD: row[5] || "",
+      answer,
+      tags,
+      category1: row[8] || "",
+      category2: row[9] || "",
+      category3: row[10] || "",
+      favorite: row[11] || "",
+      mastered: row[12] || "",
+      repeat: row[13] || "",
+      wrong: row[14] || "",
+      // 即使 ABCD 非空也先标 short，交由 validateQuestionRows 拒绝。
+      kind: isShort ? "short" : "choice",
+      direction,
+      sourcePath: opts?.sourcePath,
+      // 1 基真实文件行号：表头是第 1 行，首个数据行是第 2 行；空行也占行号。
+      rowNumber: index + 1,
+      rawColumnCount: row.length,
+      rawDirection,
+    } satisfies Question;
+  });
 }
 
 /** 校验题目 id 质量：返回空 id 与重复 id 列表。两者皆空表示通过。 */

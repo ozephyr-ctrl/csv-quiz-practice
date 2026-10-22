@@ -64,6 +64,19 @@ import {
 } from "./imageBank";
 import { renderImageQuestionUi } from "./imageQuestionUi";
 import {
+  ensureShortAnswerTag,
+  expandShortAnswerRows,
+  hasExactTagToken,
+  isSelfAssessed,
+  isShortAnswer,
+  metaKeyFor,
+  SHORT_ANSWER_TAG,
+  stripShortAnswerTag,
+  validateQuestionRows,
+  type BankRowError,
+} from "./shortAnswer";
+import { renderShortAnswerQuestionUi } from "./shortAnswerQuestionUi";
+import {
   resolveConfiguredSource,
   type BankResolution,
   type ResolvedBankSource,
@@ -79,6 +92,23 @@ function sameIdSet(a: Set<string>, b: Set<string> | null): boolean {
     if (!b.has(id)) return false;
   }
   return true;
+}
+
+/** 行级校验错误的单行展示（file/行号/id + message），用于 Notice/错误区。 */
+function formatBankRowError(e: BankRowError): string {
+  const loc: string[] = [];
+  if (e.file) loc.push(e.file);
+  if (typeof e.rowNumber === "number") loc.push(`第 ${e.rowNumber} 行`);
+  if (e.id) loc.push(`[${e.id}]`);
+  return loc.length > 0 ? `${loc.join(" ")}：${e.message}` : e.message;
+}
+
+/** 前 limit 条行级错误的多行摘要（供 Notice/错误区展示）。 */
+function summarizeBankRowErrors(errors: BankRowError[], limit = 5): string {
+  return errors
+    .slice(0, limit)
+    .map((e) => `• ${formatBankRowError(e)}`)
+    .join("\n");
 }
 
 export class QuizView extends ItemView {
@@ -108,6 +138,8 @@ export class QuizView extends ItemView {
   private filterUnanswered: string = "";
 
   private csvPath: string = "";
+  /** 当前题库全部内容文件（manifest 复合题库可多 CSV/CQV；顺序同 manifest）。 */
+  private csvPaths: string[] = [];
   /** 图片题文件夹（vault 相对路径；空串=不启用）。 */
   private imageFolder: string = "";
   /** 当前题库的 sidecar 锚点（复合题库为 <folder>/manifest）。 */
@@ -566,22 +598,17 @@ export class QuizView extends ItemView {
         return "empty";
       }
       this.canPersistState = true;
-      // 3B: 内容源 mtime 变更检测——仅 CSV/CQV 文件有意义的 mtime；
+      // 3B: 内容源 mtime 变更检测——仅 CSV/CQV 文件有意义的 mtime（manifest 多文件取最大）；
       // 图片文件夹的增删改在下次刷新/重开时重新扫描即可，不做目录 mtime 提示。
-      if (this.csvPath) {
-        const stat = await this.vault.adapter.stat(this.csvPath);
-        const newMtime = stat?.mtime ?? null;
-        if (
-          this.contentMtimeMs !== null &&
-          newMtime !== null &&
-          newMtime !== this.contentMtimeMs
-        ) {
-          new Notice("题库文件已更新，状态已按题目对齐");
-        }
-        this.contentMtimeMs = newMtime;
-      } else {
-        this.contentMtimeMs = null;
+      const newMtime = await this.getContentMtimeMs();
+      if (
+        this.contentMtimeMs !== null &&
+        newMtime !== null &&
+        newMtime !== this.contentMtimeMs
+      ) {
+        new Notice("题库文件已更新，状态已按题目对齐");
       }
+      this.contentMtimeMs = newMtime;
       return "ok";
     } catch (e: unknown) {
       this.canPersistState = false;
@@ -592,51 +619,71 @@ export class QuizView extends ItemView {
   }
 
   /**
-   * 读取全部题目：CSV/CQV（若有）+ 图片文件夹（若有），CSV 在前、图片按文件名排序。
-   * 任一来源失败但另一来源可用时，提示后降级加载；两者都失败返回 null。
+   * 读取全部题目：按 csvPaths 顺序合并 CSV/CQV 原始行（若有）+ 图片文件夹（若有）。
+   * 任一内容文件读取/校验失败或图片读取失败即整库失败（返回 null）——manifest 多 CSV
+   * 是同一题库的组成部分，部分加载会让题号/进度错位，不做降级。
    */
   private async readQuestionsFromSource(): Promise<Question[] | null> {
-    const csvPath = this.csvPath.trim();
+    const contentPaths = this.csvPaths.map((p) => p.trim()).filter((p) => p !== "");
     const imageFolder = this.imageFolder.trim();
-    if (!csvPath && !imageFolder) {
+    if (contentPaths.length === 0 && !imageFolder) {
       new Notice("请设置题库文件或图片题文件夹");
       this.showError("请设置题库文件或图片题文件夹");
       return null;
     }
 
-    let csvQuestions: Question[] | null = [];
-    if (csvPath) {
+    // 1. 逐个内容文件读取原始行（CQV v2 解码结果同样是原始行，需统一展开）
+    const rows: Question[] = [];
+    for (const path of contentPaths) {
       try {
-        if (csvPath.toLowerCase().endsWith(".cqv")) {
-          const buf = await this.vault.adapter.readBinary(csvPath);
-          csvQuestions = decodeCqv(buf).questions;
+        if (path.toLowerCase().endsWith(".cqv")) {
+          const buf = await this.vault.adapter.readBinary(path);
+          const decoded = decodeCqv(buf).questions;
+          for (const q of decoded) q.sourcePath = path;
+          rows.push(...decoded);
         } else {
-          const csvContent = await readCSVFile(this.vault, csvPath);
-          csvQuestions = parseCSV(csvContent);
+          const content = await readCSVFile(this.vault, path);
+          rows.push(...parseCSV(content, { sourcePath: path }));
         }
       } catch (e: unknown) {
-        console.error("CSV Quiz: Failed to load CSV/CQV", e);
-        new Notice(
-          `题库文件加载失败，已尝试仅加载图片题: ${e instanceof Error ? e.message : String(e)}`
-        );
-        csvQuestions = null;
+        const message = e instanceof Error ? e.message : String(e);
+        console.error("CSV Quiz: Failed to load CSV/CQV", path, e);
+        new Notice(`题库文件加载失败：${path}：${message}`);
+        this.showError(`题库文件加载失败：${path}\n${message}`);
+        return null;
       }
     }
 
+    // 2. 统一严格校验（简答题选项/答案/方向、id 含 "::"、列数超限等）
+    const rowErrors = validateQuestionRows(rows);
+    if (rowErrors.length > 0) {
+      const summary = summarizeBankRowErrors(rowErrors);
+      console.error("CSV Quiz: 题库行校验失败", rowErrors.slice(0, 5));
+      new Notice(`题库校验失败（${rowErrors.length} 处）`);
+      this.showError(
+        `题库校验失败（共 ${rowErrors.length} 处，显示前 ${Math.min(5, rowErrors.length)} 处）：\n${summary}`
+      );
+      return null;
+    }
+
+    // 3. 简答题展开（唯一展开点：<> 正向后紧跟反向；< 仅反向）
+    const expanded = expandShortAnswerRows(rows);
+
+    // 4. 图片题（读取失败同样整库失败）
     let imageQuestions: Question[] = [];
     if (imageFolder) {
       try {
         imageQuestions = await this.readImageQuestions(imageFolder);
       } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : String(e);
         console.error("CSV Quiz: Failed to load image folder", e);
-        new Notice(
-          `图片题文件夹加载失败: ${e instanceof Error ? e.message : String(e)}`
-        );
+        new Notice(`图片题文件夹加载失败：${message}`);
+        this.showError(`图片题文件夹加载失败：${imageFolder}\n${message}`);
+        return null;
       }
     }
 
-    if (csvQuestions === null && imageQuestions.length === 0) return null;
-    return [...(csvQuestions ?? []), ...imageQuestions];
+    return [...expanded, ...imageQuestions];
   }
 
   /** 递归列出图片文件夹内的文件并构建图片题（隐藏文件/目录由 buildImageQuestions 过滤）。 */
@@ -668,10 +715,11 @@ export class QuizView extends ItemView {
 
   /**
    * 清理 sidecar meta 中已不存在于题库的僵尸条目（替换产物/CSV 后 id 变化时）。
-   * getMeta() 返回内部引用，delete 后调度保存落盘。
+   * 存活键用 metaKeyFor（简答题正反向卡共享 base id）：`<` 方向只有 base::rev 卡，
+   * 不能把合法的 meta[base] 当僵尸删掉。getMeta() 返回内部引用，delete 后调度保存落盘。
    */
   private pruneMetaEntries(): void {
-    const ids = new Set(this.allQuestions.map((q) => q.id));
+    const ids = new Set(this.allQuestions.map((q) => metaKeyFor(q)));
     const meta = this.stateManager.getMeta();
     let changed = false;
     for (const k of Object.keys(meta)) {
@@ -749,7 +797,8 @@ export class QuizView extends ItemView {
     const byId = new Map(this.allQuestions.map((q) => [q.id, q]));
     for (const id of ids) {
       const q = byId.get(id);
-      if (!q || isImageQuestion(q)) continue; // 图片题不参与文字题对错统计
+      // 图片题/简答题为自评题型，不参与文字题对错统计
+      if (!q || isSelfAssessed(q)) continue;
       const answerNorm = normalizeAnswerValue(q.answer);
       if (answerNorm === "") continue; // 脏答案题从不判分（空选不判分口径）
       const isCorrect =
@@ -766,7 +815,7 @@ export class QuizView extends ItemView {
   private applyMetaToQuestions(): void {
     const meta = this.stateManager.getMeta();
     for (const q of this.allQuestions) {
-      const m = meta[q.id];
+      const m = meta[metaKeyFor(q)];
       if (!m) continue;
       if (m.favorite !== undefined) q.favorite = m.favorite;
       if (m.mastered !== undefined) q.mastered = m.mastered;
@@ -774,7 +823,12 @@ export class QuizView extends ItemView {
       if (m.repeat !== undefined) q.repeat = m.repeat;
       // 图片题标签/分类固定，不允许 sidecar 覆盖（标记仍可覆盖）
       if (!isImageQuestion(q)) {
-        if (m.tags !== undefined) q.tags = m.tags;
+        if (m.tags !== undefined) {
+          // 简答题必须保留 #简答题 token；普通题防御旧脏数据里的该 token
+          q.tags = isShortAnswer(q)
+            ? ensureShortAnswerTag(m.tags)
+            : stripShortAnswerTag(m.tags);
+        }
         if (m.category1 !== undefined) q.category1 = m.category1;
         if (m.category2 !== undefined) q.category2 = m.category2;
         if (m.category3 !== undefined) q.category3 = m.category3;
@@ -785,6 +839,9 @@ export class QuizView extends ItemView {
   /**
    * 把题目的指定 B/C 类状态字段写入 sidecar meta（不再写 CSV）。无失败路径（内存操作 + 调度保存）。
    * 只写调用方明确修改过的字段，避免内容源默认值被烘焙进覆盖层（永久遮蔽误触发 + 导出反向覆盖作者更新）。
+   * - meta 键统一用 metaKeyFor（简答题正反向卡共享 base id）；
+   * - tags 写入前归一化（简答题补 #简答题 / 普通题剥掉该 token）；
+   * - 简答题的共享字段变更同步到 allQuestions 中同 base 的兄弟卡，避免筛选/导出读到陈旧值。
    */
   private saveQuestionMeta(
     question: Question,
@@ -799,8 +856,25 @@ export class QuizView extends ItemView {
       | "wrong"
     >
   ): void {
+    const key = metaKeyFor(question);
     for (const f of fields) {
-      this.stateManager.setMetaField(question.id, f, question[f]);
+      if (f === "tags") {
+        question.tags = isShortAnswer(question)
+          ? ensureShortAnswerTag(question.tags)
+          : stripShortAnswerTag(question.tags);
+      }
+      this.stateManager.setMetaField(key, f, question[f]);
+    }
+
+    // 简答题共享元数据：同 base（metaKeyFor 相同）的其它卡对象同步更新。
+    // `<` 方向只有一张反向卡，无兄弟；`<>` 有正/反两张。
+    if (!isShortAnswer(question) || fields.length === 0) return;
+    for (const sibling of this.allQuestions) {
+      if (sibling === question) continue;
+      if (metaKeyFor(sibling) !== key) continue;
+      for (const f of fields) {
+        sibling[f] = question[f];
+      }
     }
   }
 
@@ -1524,10 +1598,10 @@ export class QuizView extends ItemView {
     if (this.filterPracticeActive) this.exitFilterPractice();
 
     const pool = this.applyFiltersTo(this.orderedQuestions).filter(
-      (q) => !isImageQuestion(q)
+      (q) => !isSelfAssessed(q)
     );
     if (pool.length === 0) {
-      new Notice("当前筛选条件下没有文字题，无法开始随机考试");
+      new Notice("没有可用于随机考试的选择题");
       return;
     }
 
@@ -2244,8 +2318,9 @@ export class QuizView extends ItemView {
 
   /** 正确答案列包含多个字母（如 ABCD）时视为多选题。 */
   private isMultiChoice(question: Question): boolean {
-    // 图片题没有选项/A-D 答案，不能按 answer.length 误判为多选
-    return !isImageQuestion(question) && question.answer.length > 1;
+    // 图片题/简答题没有 A-D 选项判分，不能按 answer.length 误判为多选
+    // （简答题答案是长文本，length > 1 恒成立）
+    return !isSelfAssessed(question) && question.answer.length > 1;
   }
 
   /** 忽略字母顺序与重复，归一化答案字符串用于比较。 */
@@ -2335,10 +2410,51 @@ export class QuizView extends ItemView {
             : null,
         memoryEnabled: this.getSettings().memoryEnabled,
         onReveal: () => {
-          void this.revealImageAnswer(question);
+          void this.revealSelfAssessedAnswer(question);
         },
         onRate: (rating) => {
-          void this.handleImageRating(question, rating);
+          void this.handleSelfAssessedRating(question, rating);
+        },
+      });
+      this.renderCardPanel(question);
+      this.renderQuestionMetaAndNavigation(question);
+      return;
+    }
+
+    // 简答题：题干/答案由 Markdown 渲染，展示前不把答案写入 DOM（由 UI 模块保证）
+    if (isShortAnswer(question)) {
+      this.selectedOption = null;
+      this.selectedOptions = [];
+      this.currentDisplayOptions = [];
+      this.renderPracticeSourceBadge(question);
+      const shortHost = this.questionArea.createDiv("csv-quiz-short-host");
+      renderShortAnswerQuestionUi({
+        container: shortHost,
+        stem: question.stem,
+        answer: question.answer,
+        answerShown: prevAnswer !== undefined,
+        rating:
+          prevAnswer !== undefined && isImageRatingKey(prevAnswer)
+            ? prevAnswer
+            : null,
+        memoryEnabled: this.getSettings().memoryEnabled,
+        reverse: question.side === "rev",
+        onReveal: () => {
+          void this.revealSelfAssessedAnswer(question);
+        },
+        onRate: (rating) => {
+          void this.handleSelfAssessedRating(question, rating);
+        },
+        renderMarkdown: (el, markdown) => {
+          MarkdownRenderer.render(
+            this.app,
+            markdown,
+            el,
+            question.sourcePath ?? "",
+            this
+          ).catch((e: unknown) =>
+            console.error("CSV Quiz: markdown render failed", e)
+          );
         },
       });
       this.renderCardPanel(question);
@@ -2762,9 +2878,9 @@ export class QuizView extends ItemView {
     }
   }
 
-  /** 图片题：展示答案并记为已答（不参与文字题对错统计）。 */
-  private async revealImageAnswer(question: Question): Promise<void> {
-    if (!isImageQuestion(question) || this.showingAnswer) return;
+  /** 自评题型（图片题/简答题）：展示答案并记为已答（不参与文字题对错统计）。 */
+  private async revealSelfAssessedAnswer(question: Question): Promise<void> {
+    if (!isSelfAssessed(question) || this.showingAnswer) return;
     const id = question.id;
     this.showingAnswer = true;
     this.answering = true;
@@ -2798,12 +2914,12 @@ export class QuizView extends ItemView {
     }
   }
 
-  /** 图片题：记录用户选择的 FSRS 四级评分，并自动下一题。 */
-  private async handleImageRating(
+  /** 自评题型（图片题/简答题）：记录用户选择的 FSRS 四级评分，并自动下一题。 */
+  private async handleSelfAssessedRating(
     question: Question,
     ratingKey: ImageRatingKey
   ): Promise<void> {
-    if (!isImageQuestion(question) || !this.getSettings().memoryEnabled) return;
+    if (!isSelfAssessed(question) || !this.getSettings().memoryEnabled) return;
     if (!this.showingAnswer || this.imageRatingInProgress) return;
     const current = this.answeredQuestions[question.id] ?? "";
     // 已评分不重复写入 FSRS；revealed 状态允许首次评分
@@ -3220,8 +3336,11 @@ export class QuizView extends ItemView {
     // M6: 先把编辑区未提交的内容保存，避免被弹窗覆盖丢失
     await this.saveCurrentEdit();
 
-    // Collect all unique tags from all questions
-    const allTags = getUniqueTags(this.allQuestions);
+    const short = isShortAnswer(question);
+    // Collect all unique tags from all questions（普通题不提供 #简答题，避免误加）
+    const allTags = getUniqueTags(this.allQuestions).filter(
+      (tag) => short || tag !== SHORT_ANSWER_TAG
+    );
     // Parse current question tags into a space-separated string
     const currentTags = question.tags || "";
 
@@ -3230,8 +3349,19 @@ export class QuizView extends ItemView {
     const result = await modal.promise;
 
     if (result !== null) {
+      // 题型不变量：简答题必须保留 #简答题；普通题不得带 #简答题
+      if (short && !hasExactTagToken(result)) {
+        new Notice("简答题必须保留 #简答题 标签，标签未保存");
+        return;
+      }
+      if (!short && hasExactTagToken(result)) {
+        new Notice("普通题不能使用 #简答题 标签，标签未保存");
+        return;
+      }
       // Save selected tags to the question (always the original question, even if user navigated away)
-      question.tags = result;
+      question.tags = short
+        ? ensureShortAnswerTag(result)
+        : stripShortAnswerTag(result);
       this.saveQuestionMeta(question, ["tags"]);
 
       // Remember which question is currently displayed before re-filtering
@@ -3271,6 +3401,14 @@ export class QuizView extends ItemView {
     toggleHeader.createEl("span", { text: "标签 / 分类 (编辑后自动保存)" });
 
     const editBody = this.editArea.createDiv("csv-quiz-edit-grid");
+
+    // 简答题：答案与方向只读（在源 CSV 中编辑），标签/分类仍可编辑
+    if (isShortAnswer(question)) {
+      editBody.createDiv({
+        text: "简答题答案与方向请在源 CSV 中编辑",
+        cls: "csv-quiz-edit-hint",
+      });
+    }
 
     const panelOpen = settings.editPanelOpen;
     editBody.classList.toggle("csv-quiz-edit-grid-hidden", !panelOpen);
@@ -3935,7 +4073,11 @@ export class QuizView extends ItemView {
     );
 
     const q = question as unknown as Record<string, string>;
-    const changedFields: Array<{ field: string; oldValue: string }> = [];
+    const changedFields: Array<{
+      field: string;
+      oldValue: string;
+      newValue: string;
+    }> = [];
 
     for (const input of editInputs) {
       const field = input.dataset.field;
@@ -3943,15 +4085,35 @@ export class QuizView extends ItemView {
 
       const value = input.value;
       if (q[field] !== value) {
-        changedFields.push({ field, oldValue: q[field] });
-        q[field] = value;
+        changedFields.push({ field, oldValue: q[field], newValue: value });
       }
     }
 
     if (changedFields.length === 0) return;
 
-    // 写入 sidecar meta（内存操作 + 调度保存，无失败路径）；只写实际变更的字段
-    // （编辑区字段均为 tags/category1-3，属于合法 meta 字段名）
+    // 题型不变量校验（在任何字段写入前完成）：简答题必须保留 #简答题；
+    // 普通题不得带 #简答题。失败时整个保存取消，不写任何字段。
+    const tagsChange = changedFields.find((c) => c.field === "tags");
+    if (tagsChange) {
+      const short = isShortAnswer(question);
+      const hasToken = hasExactTagToken(tagsChange.newValue);
+      if (short && !hasToken) {
+        new Notice("简答题必须保留 #简答题 标签，修改未保存");
+        return;
+      }
+      if (!short && hasToken) {
+        new Notice("普通题不能使用 #简答题 标签，修改未保存");
+        return;
+      }
+      tagsChange.newValue = short
+        ? ensureShortAnswerTag(tagsChange.newValue)
+        : stripShortAnswerTag(tagsChange.newValue);
+    }
+
+    // 校验通过后再落地到题目对象，并写入 sidecar meta（只写实际变更的字段）
+    for (const c of changedFields) {
+      q[c.field] = c.newValue;
+    }
     this.saveQuestionMeta(
       question,
       changedFields.map((c) => c.field) as Array<
@@ -3974,24 +4136,18 @@ export class QuizView extends ItemView {
   }
 
   /**
-   * 导出合并：把 sidecar meta 中 B 类覆盖（repeat/tags/category1-3）下沉写回 CSV 列，
-   * 写成功后清除对应 sidecar 的 B 类覆盖（合并即同步）。C 类（favorite/mastered/wrong）
-   * 永不导出（无 CSV 落点，只存 sidecar）。仅 CSV 模式可用。返回成功与否。
+   * 导出合并（支持 manifest 多 CSV）：把 sidecar meta 中 B 类覆盖（repeat/tags/category1-3）
+   * 按题目 sourcePath 分组下沉写回各 CSV 列；仅写成功的文件才清除该组 B 类覆盖（合并即同步）。
+   * C 类（favorite/mastered/wrong）永不导出（无 CSV 落点，只存 sidecar）。
+   * 无 sourcePath 的题与 .cqv 源（只读产物）跳过并计数提示。返回是否全部成功。
    */
   async exportMetaToCsv(): Promise<boolean> {
-    // 1. 仅 CSV 模式
-    if (!this.csvPath) {
-      new Notice("仅图片题模式不支持导出到 CSV");
-      return false;
-    }
-    if (this.csvPath.toLowerCase().endsWith(".cqv")) {
-      new Notice("编译产物模式不支持导出合并");
-      return false;
-    }
-
-    // 2. 收集含 B 类覆盖（repeat/tags/category1-3 任一存在）且存在于当前题库的题
+    // 1. 收集含 B 类覆盖（repeat/tags/category1-3 任一存在）且存在于当前题库的题，按来源分组
     const meta = this.stateManager.getMeta();
-    const exported: Array<{ id: string; question: Question }> = [];
+    const groups = new Map<string, Array<{ id: string; question: Question }>>();
+    let skippedCqv = 0;
+    let skippedNoSource = 0;
+    let skippedImage = 0;
     for (const [id, entry] of Object.entries(meta)) {
       if (!entry) continue;
       const hasB =
@@ -4001,71 +4157,134 @@ export class QuizView extends ItemView {
         entry.category2 !== undefined ||
         entry.category3 !== undefined;
       if (!hasB) continue;
-      const q = this.allQuestions.find((x) => x.id === id);
-      if (!q || isImageQuestion(q)) continue; // 当前题库不存在的题/图片题跳过
-      exported.push({ id, question: q });
+      // 简答题正反向卡共享 base 键：用 metaKeyFor 反查任意一张卡即可代表该 meta 条目
+      const q = this.allQuestions.find((x) => metaKeyFor(x) === id);
+      if (!q) continue; // 当前题库中不存在的题
+      // 图片题在 CSV 里没有对应数据行（内容来自图片题库），静默跳过会让人以为已导出
+      if (isImageQuestion(q)) {
+        skippedImage++;
+        continue;
+      }
+      const source = (q.sourcePath ?? "").trim();
+      if (source === "") {
+        skippedNoSource++;
+        continue;
+      }
+      if (source.toLowerCase().endsWith(".cqv")) {
+        skippedCqv++;
+        continue;
+      }
+      const list = groups.get(source) ?? [];
+      if (!list.some((item) => item.id === id)) {
+        list.push({ id, question: q });
+      }
+      groups.set(source, list);
     }
-    if (exported.length === 0) {
-      new Notice("没有需要导出的修改");
+
+    const skipNote = this.exportSkipNote(skippedCqv, skippedNoSource, skippedImage);
+    if (groups.size === 0) {
+      new Notice(`没有可导出的修改${skipNote}`);
       return true;
     }
 
-    // 3. 单次入队：解析当前 CSV，仅下沉 B 类列（tags=7/cat1=8/cat2=9/cat3=10/repeat=13），
+    // 2. 每个来源文件单独入队：仅下沉 B 类列（tags=7/cat1=8/cat2=9/cat3=10/repeat=13），
     //    C 类列（favorite=11/mastered=12/wrong=14）保持原样，不写入。
-    try {
-      await this.csvWriteQueue.enqueue(this.csvPath, (csvContent: string) => {
-        const result = Papa.parse(csvContent, {
-          header: false,
-          skipEmptyLines: true,
+    const exported: Array<{ id: string }> = [];
+    for (const [source, items] of groups) {
+      try {
+        await this.csvWriteQueue.enqueue(source, (csvContent: string) => {
+          const result = Papa.parse(csvContent, {
+            header: false,
+            skipEmptyLines: true,
+          });
+          if (result.errors.length > 0) {
+            console.warn(
+              "CSV 解析警告: 检测到解析错误",
+              result.errors.slice(0, 3)
+            );
+          }
+          const rows = result.data as string[][];
+          if (rows.length < 2) throw new Error("CSV 中未找到对应题号");
+          const header = rows[0];
+          if (header.length > 0) {
+            header[0] = header[0].replace(/^\uFEFF/, "");
+          }
+          const dataRows = rows.slice(1);
+          const rowById = new Map<string, number>();
+          for (let i = 0; i < dataRows.length; i++) {
+            const id = String(dataRows[i][0] || "").trim();
+            if (id === "") continue;
+            if (rowById.has(id)) {
+              throw new Error("CSV 中题号重复，已拒绝写入，请检查题库");
+            }
+            rowById.set(id, i);
+          }
+          for (const { id, question } of items) {
+            const idx = rowById.get(id);
+            if (idx === undefined) {
+              throw new Error(`CSV 中未找到对应题号: ${id}`);
+            }
+            const row = dataRows[idx];
+            // 显式补齐到 max(15, 表头列数, 本行列数)：稀疏数组（row.length = N）会产生空洞，
+            // 且不能截断第 16 列（简答题方向），否则导出会丢方向。
+            const width = Math.max(15, header.length, row.length);
+            while (row.length < width) row.push("");
+            row[7] = isShortAnswer(question)
+              ? ensureShortAnswerTag(question.tags)
+              : stripShortAnswerTag(question.tags);
+            row[8] = question.category1;
+            row[9] = question.category2;
+            row[10] = question.category3;
+            row[13] = question.repeat;
+          }
+          return Papa.unparse([header, ...dataRows], {
+            // 沿用源文件的分隔符与换行，避免分号/Tab 题库被静默改成逗号
+            delimiter: result.meta.delimiter || ",",
+            newline: result.meta.linebreak || "\n",
+          });
         });
-        if (result.errors.length > 0) {
-          console.warn(
-            "CSV 解析警告: 检测到解析错误",
-            result.errors.slice(0, 3)
-          );
+      } catch (e: unknown) {
+        // 部分文件已写成功：仍需清理这些条目的 B 类 meta，避免下次重复导出
+        const cleared = this.clearExportedMeta(meta, exported);
+        if (cleared > 0) {
+          this.stateManager.scheduleSave(this.buildCurrentState(), 0);
         }
-        const rows = result.data as string[][];
-        if (rows.length < 2) throw new Error("CSV 中未找到对应题号");
-        const header = rows[0];
-        if (header.length > 0) {
-          header[0] = header[0].replace(/^\uFEFF/, "");
-        }
-        const dataRows = rows.slice(1);
-        const rowById = new Map<string, number>();
-        for (let i = 0; i < dataRows.length; i++) {
-          const id = String(dataRows[i][0] || "").trim();
-          if (id === "") continue;
-          if (rowById.has(id)) {
-            throw new Error("CSV 中题号重复，已拒绝写入，请检查题库");
-          }
-          rowById.set(id, i);
-        }
-        for (const { id, question } of exported) {
-          const idx = rowById.get(id);
-          if (idx === undefined) {
-            throw new Error(`CSV 中未找到对应题号: ${id}`);
-          }
-          const row = dataRows[idx];
-          // 显式补齐到 15 列（含错题列）：稀疏数组（row.length = N）会产生空洞，
-          // 补齐行输出 14 列而正常行 15 列，产生参差不齐的 CSV
-          while (row.length < 15) row.push("");
-          row[7] = question.tags;
-          row[8] = question.category1;
-          row[9] = question.category2;
-          row[10] = question.category3;
-          row[13] = question.repeat;
-        }
-        return Papa.unparse([header, ...dataRows], { delimiter: "," });
-      });
-    } catch (e: unknown) {
-      console.error("CSV Quiz: Failed to export meta to CSV", e);
-      new Notice(`导出失败: ${e instanceof Error ? e.message : String(e)}`);
-      return false;
+        console.error("CSV Quiz: Failed to export meta to CSV", source, e);
+        new Notice(
+          `导出失败（${source}）: ${e instanceof Error ? e.message : String(e)}`
+        );
+        return false;
+      }
+      exported.push(...items);
     }
 
-    // 4. 成功后清除 B 类覆盖（保留 C 类）；条目为空则删除整条。直接改 meta 内部引用。
+    // 3. 全部文件写成功后清除对应 B 类覆盖（保留 C 类）；条目为空则删除整条
+    const cleared = this.clearExportedMeta(meta, exported);
+    // 落盘（绕过视图守卫，确保 meta 清理持久化）
+    this.stateManager.scheduleSave(this.buildCurrentState(), 0);
+
+    new Notice(
+      `已导出 ${cleared} 题的修改到 ${groups.size} 个 CSV 文件${skipNote}`
+    );
+    return true;
+  }
+
+  /** 跳过项提示（CQV 只读源 / 无来源题 / 图片题）。 */
+  private exportSkipNote(cqv: number, noSource: number, image = 0): string {
+    const parts: string[] = [];
+    if (cqv > 0) parts.push(`跳过 CQV ${cqv} 题`);
+    if (noSource > 0) parts.push(`跳过无来源 ${noSource} 题`);
+    if (image > 0) parts.push(`跳过图片题 ${image} 题`);
+    return parts.length > 0 ? `（${parts.join("、")}）` : "";
+  }
+
+  /** 清除已成功导出条目的 B 类 meta（保留 C 类；除 ts 外无字段则删除整条），返回清理条数。 */
+  private clearExportedMeta(
+    meta: Record<string, SidecarMeta>,
+    items: Array<{ id: string }>
+  ): number {
     let cleared = 0;
-    for (const { id } of exported) {
+    for (const { id } of items) {
       const entry = meta[id];
       if (!entry) continue;
       delete entry.repeat;
@@ -4073,46 +4292,58 @@ export class QuizView extends ItemView {
       delete entry.category1;
       delete entry.category2;
       delete entry.category3;
-      if (Object.keys(entry).length === 0) {
+      // ts 是每次写入都会补的时间戳，恒存在，不能算作“还有数据”
+      const remaining = Object.keys(entry).filter((key) => key !== "ts");
+      if (remaining.length === 0) {
         delete meta[id];
       }
       cleared++;
     }
-    // 落盘（绕过视图守卫，确保 meta 清理持久化）
-    this.stateManager.scheduleSave(this.buildCurrentState(), 0);
-
-    new Notice(`已导出 ${cleared} 题的修改到 CSV`);
-    return true;
+    return cleared;
   }
 
   /**
-   * 编译当前 CSV 题库为 .cqv 分发产物（编辑者工具）。校验失败拒编。
+   * 编译当前题库（多 CSV 按 manifest 顺序拼接）为 .cqv 分发产物（编辑者工具）。
+   * 逐行严格校验 + 展开后 id 质量校验失败即拒编；含简答或多源写 v2，纯普通单 CSV 仍写 v1。
    * 需先输入备注（随产物头部分发，可为空）。返回成功与否。
    */
   async compileToCqv(): Promise<boolean> {
-    // 1. 仅 CSV 模式
-    if (!this.csvPath) {
+    // 1. 来源必须是非空 CSV 集合（CQV 只读产物，不能再编译）
+    const sourcePaths = this.csvPaths.map((p) => p.trim()).filter((p) => p !== "");
+    if (sourcePaths.length === 0) {
       new Notice("仅图片题模式不支持编译 .cqv");
       return false;
     }
-    if (this.csvPath.toLowerCase().endsWith(".cqv")) {
-      new Notice("仅 CSV 题库可编译为产物");
+    if (sourcePaths.some((p) => p.toLowerCase().endsWith(".cqv"))) {
+      new Notice("编译需要 CSV 源（.cqv 产物只读，不能再次编译）");
       return false;
     }
 
-    // 2. 读当前 CSV（直接读文件，不做 meta 合并——产物含 A + B 类默认值）
-    let questions: Question[];
+    // 2. 逐个读 CSV 并按顺序拼接原始行（直接读文件，不做 meta 合并——产物含 A + B 类默认值）
+    const rows: Question[] = [];
     try {
-      const csvContent = await readCSVFile(this.vault, this.csvPath);
-      questions = parseCSV(csvContent);
+      for (const path of sourcePaths) {
+        const csvContent = await readCSVFile(this.vault, path);
+        rows.push(...parseCSV(csvContent, { sourcePath: path }));
+      }
     } catch (e: unknown) {
       console.error("CSV Quiz: Failed to read CSV for compile", e);
       new Notice(`读取题库失败: ${e instanceof Error ? e.message : String(e)}`);
       return false;
     }
 
-    // 3. 校验 id 质量：空/重复题号拒编
-    const { emptyIds, duplicateIds } = checkIdQuality(questions);
+    // 3. 统一严格校验（简答题选项/答案/方向、id 含 "::"、列数超限等）
+    const rowErrors = validateQuestionRows(rows);
+    if (rowErrors.length > 0) {
+      new Notice(
+        `编译已拒绝：${rowErrors.length} 行校验失败（显示前 ${Math.min(5, rowErrors.length)} 条）\n${summarizeBankRowErrors(rowErrors)}`
+      );
+      return false;
+    }
+
+    // 4. 展开简答题后校验 id 质量：空/重复（含派生 ::rev）拒编
+    const expanded = expandShortAnswerRows(rows);
+    const { emptyIds, duplicateIds } = checkIdQuality(expanded);
     if (emptyIds.length > 0 || duplicateIds.length > 0) {
       const parts: string[] = [];
       if (emptyIds.length > 0) parts.push(`空题号 ${emptyIds.length} 个`);
@@ -4124,12 +4355,12 @@ export class QuizView extends ItemView {
       new Notice(`编译已拒绝：题库存在${parts.join("、")}，请修改 CSV 后重试`);
       return false;
     }
-    if (questions.length === 0) {
+    if (rows.length === 0) {
       new Notice("题库为空，无法编译");
       return false;
     }
 
-    // 4. 请求备注（可为空；取消则中止）
+    // 5. 请求备注（可为空；取消则中止）
     const note = await askPrompt(this.app, {
       title: "优化题库",
       message: "为编译产物添加一句备注（随产物分发，可为空）：",
@@ -4137,18 +4368,24 @@ export class QuizView extends ItemView {
     });
     if (note === null) return false;
 
-    // 5. 产物路径：扩展名 .csv（大小写不敏感，如 .CSV/.Csv）替换为 .cqv；
+    // 6. 产物路径（基于首个源文件）：扩展名 .csv（大小写不敏感）替换为 .cqv；
     //    无扩展名路径直接拼接（"题库" → "题库.cqv"）
-    const lower = this.csvPath.toLowerCase();
+    const firstSource = sourcePaths[0];
+    const lower = firstSource.toLowerCase();
     const cqvPath = lower.endsWith(".csv")
-      ? this.csvPath.slice(0, this.csvPath.length - 4) + ".cqv"
-      : this.csvPath + ".cqv";
+      ? firstSource.slice(0, firstSource.length - 4) + ".cqv"
+      : firstSource + ".cqv";
+    // 含简答（需 kind/direction）或多源（需 sourceFiles）时写 v2，纯普通单 CSV 保持 v1
+    const formatVersion: 1 | 2 =
+      rows.some(isShortAnswer) || sourcePaths.length > 1 ? 2 : 1;
 
-    // 6. 编码 + 7. 写入（原子写：先写 tmp，rename 覆盖；Obsidian rename 不覆盖目标，需先删旧文件）
+    // 7. 编码 + 写入（原子写：先写 tmp，rename 覆盖；Obsidian rename 不覆盖目标，需先删旧文件）
     try {
-      const buffer = encodeCqv(questions, {
-        sourceCsv: this.csvPath,
+      const buffer = encodeCqv(rows, {
+        sourceCsv: firstSource,
+        sourceFiles: sourcePaths,
         note,
+        formatVersion,
       });
       const tmpPath = cqvPath + ".tmp";
       await this.vault.adapter.writeBinary(tmpPath, buffer);
@@ -4165,7 +4402,7 @@ export class QuizView extends ItemView {
     }
 
     new Notice(
-      `已生成 ${cqvPath}（${questions.length} 题），可在设置中选择该文件切换为题库来源`
+      `已生成 ${cqvPath}（${rows.length} 题），可在设置中选择该文件切换为题库来源`
     );
     return true;
   }
@@ -4273,21 +4510,16 @@ export class QuizView extends ItemView {
       }
       this.canPersistState = true;
 
-      // 3B: 内容源 mtime 变更检测（仅有 CSV/CQV 文件时；图片文件夹不做目录 mtime 提示）
-      if (this.csvPath) {
-        const stat = await this.vault.adapter.stat(this.csvPath);
-        const newMtime = stat?.mtime ?? null;
-        if (
-          this.contentMtimeMs !== null &&
-          newMtime !== null &&
-          newMtime !== this.contentMtimeMs
-        ) {
-          new Notice("题库文件已更新，状态已按题目对齐");
-        }
-        this.contentMtimeMs = newMtime;
-      } else {
-        this.contentMtimeMs = null;
+      // 3B: 内容源 mtime 变更检测（仅有 CSV/CQV 文件时；manifest 多取最大 mtime）
+      const newMtime = await this.getContentMtimeMs();
+      if (
+        this.contentMtimeMs !== null &&
+        newMtime !== null &&
+        newMtime !== this.contentMtimeMs
+      ) {
+        new Notice("题库文件已更新，状态已按题目对齐");
       }
+      this.contentMtimeMs = newMtime;
       // M2: stat 期间已切换 → 本流程过期
       if (epoch !== this.loadEpoch) return;
 
@@ -4404,9 +4636,38 @@ export class QuizView extends ItemView {
 
   /** 应用解析结果到视图的读取路径。 */
   private applyResolvedSource(source: ResolvedBankSource): void {
-    this.csvPath = source.contentPath;
+    const paths =
+      source.contentPaths.length > 0
+        ? source.contentPaths
+        : source.contentPath
+          ? [source.contentPath]
+          : [];
+    this.csvPaths = [...paths];
+    this.csvPath = this.csvPaths[0] ?? "";
     this.imageFolder = source.imageFolder;
     this.sourceAnchor = source.anchor;
+  }
+
+  /**
+   * 内容源 mtime：对 csvPaths 逐个 stat，取最大 mtime（题库任一文件更新都算更新）。
+   * 无内容文件或全部 stat 失败返回 null。
+   */
+  private async getContentMtimeMs(): Promise<number | null> {
+    let max: number | null = null;
+    for (const raw of this.csvPaths) {
+      const path = raw.trim();
+      if (path === "") continue;
+      try {
+        const stat = await this.vault.adapter.stat(path);
+        const mtime = stat?.mtime;
+        if (typeof mtime === "number" && Number.isFinite(mtime)) {
+          max = max === null ? mtime : Math.max(max, mtime);
+        }
+      } catch {
+        // 单个文件 stat 失败不影响其余文件
+      }
+    }
+    return max;
   }
 
   /**

@@ -18,6 +18,28 @@ export interface Question {
   imagePath?: string;
   /** 图片题在全部图片题中的稳定序号（按文件名排序后分配），未评分时用于脱敏显示。 */
   imageNumber?: number;
+  /**
+   * 题型。缺省（undefined）视为 "choice"，与旧题库兼容。
+   * - "choice"：选择题，`answer` 为 A-D 之一。
+   * - "short"：简答题，`answer` 为答案原文（不 trim、不改大小写）；选项 A-D 必须为空。
+   */
+  kind?: "choice" | "short";
+  /**
+   * 简答题方向：">" 仅正向、"<" 仅反向、"<>" 双向。
+   * 仅简答题使用；选择题不设置（第 16 列非空即为校验错误）。
+   */
+  direction?: ">" | "<" | "<>";
+  /** 简答题的共享元数据键（正向/反向卡共用同一 base id，用于统计与进度合并）。 */
+  baseId?: string;
+  /** 简答题展开后的卡面方向："fwd" 正向（stem → answer）、"rev" 反向（answer → stem）。 */
+  side?: "fwd" | "rev";
+  /** 题目来源文件路径（vault 相对或绝对，视调用方传入）。 */
+  sourcePath?: string;
+  /** 题目在来源文件中的行号（1 基，表头计为第 1 行）。 */
+  rowNumber?: number;
+  /** 解析期临时字段：原始列数、原始方向文本（供严格校验；运行期/编码可忽略）。 */
+  rawColumnCount?: number;
+  rawDirection?: string;
 }
 
 /**

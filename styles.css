@@ -1440,3 +1440,334 @@
     font-size: 15px;
   }
 }
+
+/* ===================== 简答题 ===================== */
+.csv-quiz-short-question {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 16px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* 题型小标签：与图片题编号胶囊同一套语言 */
+.csv-quiz-short-badge {
+  align-self: flex-start;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1.7;
+}
+
+/* 题干：本节焦点，字号略高于正文，长内容换行不撑破面板 */
+.csv-quiz-short-stem {
+  min-width: 0;
+  max-width: 100%;
+  padding: 12px 14px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: 1.05em;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* 答案区：左侧强调色条，与图片题答案区呼应 */
+.csv-quiz-short-answer-box {
+  min-width: 0;
+  max-width: 100%;
+  padding: 12px 14px;
+  border: 1px solid var(--background-modifier-border);
+  border-left: 3px solid var(--interactive-accent);
+  border-radius: 8px;
+  background: var(--background-secondary);
+}
+
+.csv-quiz-short-answer-label {
+  margin-bottom: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  line-height: 1.4;
+}
+
+.csv-quiz-short-answer {
+  min-width: 0;
+  max-width: 100%;
+  color: var(--text-normal);
+  font-size: 1.05em;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* 主行动按钮：与图片题 reveal 按钮同尺寸与层次 */
+.csv-quiz-short-reveal-btn {
+  align-self: center;
+  min-width: 180px;
+  min-height: 44px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+.csv-quiz-short-reveal-btn:active {
+  transform: translateY(1px);
+}
+
+/* 四级评分：4 列，窄屏 2×2 */
+.csv-quiz-short-rate {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.csv-quiz-short-rate-btn {
+  width: 100%;
+  min-height: 44px;
+  font-weight: 600;
+  /* 不支持 color-mix 的旧版本回退到主题按钮底色 */
+  background: var(--background-secondary);
+  border-color: var(--background-modifier-border);
+  color: var(--text-normal);
+  background: color-mix(
+    in srgb,
+    var(--csv-image-rate-color) 12%,
+    var(--background-primary)
+  );
+  border-color: color-mix(
+    in srgb,
+    var(--csv-image-rate-color) 45%,
+    var(--background-modifier-border)
+  );
+  color: var(--csv-image-rate-color);
+  transition:
+    background 0.15s,
+    border-color 0.15s,
+    transform 0.1s;
+}
+
+.csv-quiz-short-rate-btn:hover {
+  background: color-mix(
+    in srgb,
+    var(--csv-image-rate-color) 22%,
+    var(--background-primary)
+  );
+  border-color: var(--csv-image-rate-color);
+}
+
+.csv-quiz-short-rate-btn:active {
+  transform: translateY(1px);
+  background: color-mix(
+    in srgb,
+    var(--csv-image-rate-color) 32%,
+    var(--background-primary)
+  );
+}
+
+.csv-quiz-short-rate-btn:focus-visible {
+  outline: 2px solid var(--csv-image-rate-color);
+  outline-offset: 2px;
+}
+
+.csv-quiz-short-rate-again {
+  --csv-image-rate-color: var(--color-red, #e5534b);
+}
+
+.csv-quiz-short-rate-hard {
+  --csv-image-rate-color: var(--color-orange, #e08b2f);
+}
+
+.csv-quiz-short-rate-good {
+  --csv-image-rate-color: var(--color-green, #3f9e58);
+}
+
+.csv-quiz-short-rate-easy {
+  --csv-image-rate-color: var(--color-blue, #4a8ff0);
+}
+
+/* 已评分 / 记忆关闭：安静的说明文本 */
+.csv-quiz-short-rated {
+  align-self: flex-start;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-modifier-hover);
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.csv-quiz-short-memory-off {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* ---------- 题干 / 答案内的 Markdown 排版 ---------- */
+.csv-quiz-short-stem.markdown-rendered,
+.csv-quiz-short-answer.markdown-rendered {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.csv-quiz-short-stem.markdown-rendered > :first-child,
+.csv-quiz-short-answer.markdown-rendered > :first-child {
+  margin-top: 0;
+}
+
+.csv-quiz-short-stem.markdown-rendered > :last-child,
+.csv-quiz-short-answer.markdown-rendered > :last-child {
+  margin-bottom: 0;
+}
+
+.csv-quiz-short-stem.markdown-rendered p,
+.csv-quiz-short-answer.markdown-rendered p {
+  margin: 0 0 0.6em;
+}
+
+.csv-quiz-short-stem.markdown-rendered h1,
+.csv-quiz-short-answer.markdown-rendered h1 {
+  margin: 0.8em 0 0.4em;
+  font-size: 1.35em;
+  line-height: 1.35;
+}
+
+.csv-quiz-short-stem.markdown-rendered h2,
+.csv-quiz-short-answer.markdown-rendered h2 {
+  margin: 0.8em 0 0.4em;
+  font-size: 1.22em;
+  line-height: 1.35;
+}
+
+.csv-quiz-short-stem.markdown-rendered h3,
+.csv-quiz-short-answer.markdown-rendered h3,
+.csv-quiz-short-stem.markdown-rendered h4,
+.csv-quiz-short-answer.markdown-rendered h4 {
+  margin: 0.7em 0 0.35em;
+  font-size: 1.08em;
+  line-height: 1.4;
+}
+
+.csv-quiz-short-stem.markdown-rendered ul,
+.csv-quiz-short-answer.markdown-rendered ul,
+.csv-quiz-short-stem.markdown-rendered ol,
+.csv-quiz-short-answer.markdown-rendered ol {
+  margin: 0.4em 0 0.6em;
+  padding-inline-start: 1.4em;
+}
+
+.csv-quiz-short-stem.markdown-rendered li,
+.csv-quiz-short-answer.markdown-rendered li {
+  margin: 0.15em 0;
+}
+
+.csv-quiz-short-stem.markdown-rendered blockquote,
+.csv-quiz-short-answer.markdown-rendered blockquote {
+  margin: 0.5em 0;
+  padding-inline-start: 0.8em;
+  border-inline-start: 2px solid var(--background-modifier-border);
+  color: var(--text-muted);
+}
+
+.csv-quiz-short-stem.markdown-rendered img,
+.csv-quiz-short-answer.markdown-rendered img,
+.csv-quiz-short-stem.markdown-rendered video,
+.csv-quiz-short-answer.markdown-rendered video {
+  max-width: 100%;
+  height: auto;
+}
+
+/* 宽表格：内容更宽时在框内横向滚动，不撑破面板 */
+.csv-quiz-short-stem.markdown-rendered table,
+.csv-quiz-short-answer.markdown-rendered table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 0.95em;
+}
+
+.csv-quiz-short-stem.markdown-rendered .table-wrapper,
+.csv-quiz-short-answer.markdown-rendered .table-wrapper {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.csv-quiz-short-stem.markdown-rendered th,
+.csv-quiz-short-answer.markdown-rendered th,
+.csv-quiz-short-stem.markdown-rendered td,
+.csv-quiz-short-answer.markdown-rendered td {
+  padding: 4px 8px;
+  border: 1px solid var(--background-modifier-border);
+  text-align: start;
+  vertical-align: top;
+}
+
+/* 长代码：横向滚动，不换行撑高面板 */
+.csv-quiz-short-stem.markdown-rendered pre,
+.csv-quiz-short-answer.markdown-rendered pre {
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.csv-quiz-short-stem.markdown-rendered pre code,
+.csv-quiz-short-answer.markdown-rendered pre code {
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.csv-quiz-short-stem.markdown-rendered code,
+.csv-quiz-short-answer.markdown-rendered code {
+  overflow-wrap: anywhere;
+}
+
+/* 行内长链接 / 公式：不越界 */
+.csv-quiz-short-stem.markdown-rendered a,
+.csv-quiz-short-answer.markdown-rendered a,
+.csv-quiz-short-stem.markdown-rendered mjx-container,
+.csv-quiz-short-answer.markdown-rendered mjx-container {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.csv-quiz-short-stem.markdown-rendered mjx-container,
+.csv-quiz-short-answer.markdown-rendered mjx-container {
+  overflow-x: auto;
+}
+
+@media (max-width: 600px) {
+  .csv-quiz-short-stem,
+  .csv-quiz-short-answer-box {
+    padding: 10px 12px;
+  }
+
+  .csv-quiz-short-reveal-btn {
+    align-self: stretch;
+    min-width: 0;
+  }
+
+  .csv-quiz-short-rate {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .csv-quiz-short-rate-btn {
+    min-height: 46px;
+    font-size: 15px;
+  }
+}
