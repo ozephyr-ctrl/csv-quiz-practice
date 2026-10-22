@@ -1,19 +1,20 @@
 import {
   App,
   AbstractInputSuggest,
+  FuzzySuggestModal,
   Plugin,
   PluginSettingTab,
   Setting,
   Notice,
+  TFile,
   TFolder,
   SettingDefinitionItem,
-  TextComponent,
   ToggleComponent,
 } from "obsidian";
 import { PluginSettings, DEFAULT_SETTINGS } from "./types";
 import { askResetChoice } from "./modals";
 import { sidecarPathFor } from "./sidecar";
-import type { BankResolution } from "./bankResolver";
+import type { BankResolution, SourceType } from "./bankResolver";
 
 interface PluginHandle {
   settings: PluginSettings;
@@ -26,17 +27,24 @@ interface PluginHandle {
   reorderQuestions(): Promise<void>;
   syncSwipeNavigation(): void;
   syncRandomExamCount(): void;
+  syncSettingsUI(): void;
   resetDailyNewQuota(): Promise<void>;
-  changeBankFolder(path: string): Promise<boolean>;
-  useCsvOnly(): Promise<void>;
+  changeSource(type: SourceType | "", path: string): Promise<boolean>;
   refreshBank(): Promise<void>;
   compileQuizToCqv(): Promise<void>;
   exportQuizMetaToCsv(): Promise<void>;
 }
 
-/** 「题库文件夹」说明文案（声明式与命令式共用）。 */
-const BANK_FOLDER_DESC =
-  "vault 内的题库文件夹：文件夹内有 manifest.json 视为复合题库（CSV/CQV + 图片并用）；否则自动识别唯一的 CSV/CQV 或仅图片；vault 根用 / 表示。";
+/** 「题库来源」说明文案（声明式与命令式共用）。 */
+const SOURCE_DESC =
+  "显式选择题库来源：CSV/CQV 文件、图片文件夹，或包含 manifest.json 的复合题库文件夹。图片/复合题库文件夹允许 vault 根（用 / 表示）。";
+
+/** 把任意值收敛为合法的显式来源类型（未知值视为未设置）。 */
+function normalizeSourceType(value: unknown): SourceType | "" {
+  return value === "csv" || value === "image" || value === "manifest"
+    ? value
+    : "";
+}
 
 /** 声明式设置框架下的键位绑定键集合：写入前需归一化（见 setControlValue）。 */
 const KEY_BINDING_SETTING_KEYS = new Set([
@@ -69,30 +77,16 @@ export class CSVQuizSettingTab extends PluginSettingTab {
     return [
       { name: "刷题啊 - 设置" },
       {
-        name: "题库文件夹",
-        desc: BANK_FOLDER_DESC,
-        control: {
-          type: "folder",
-          key: "bankFolder",
-          defaultValue: DEFAULT_SETTINGS.bankFolder,
-          placeholder: "例如：题库/行测（根目录用 /）",
-          includeRoot: true,
-          filter: (folder: TFolder) =>
-            !folder.path.split("/").some((segment) => segment.startsWith(".")),
+        name: "题库来源",
+        desc: SOURCE_DESC,
+        render: (setting) => {
+          this.renderSourceSetting(setting);
         },
       },
       {
         name: "题库解析状态",
         render: (setting) => {
           this.renderBankStatus(setting.descEl);
-        },
-      },
-      {
-        name: "仅用 CSV",
-        desc: "当前题库文件夹同时包含 CSV/CQV 与图片；选择后只加载 CSV/CQV（如需两者并用请在该文件夹创建 manifest.json）。",
-        visible: () => this.isCsvChoicePrompt(),
-        action: () => {
-          void this.plugin.useCsvOnly();
         },
       },
       {
@@ -313,7 +307,7 @@ export class CSVQuizSettingTab extends PluginSettingTab {
           },
           {
             name: "刷新题库",
-            desc: "重新解析题库文件夹（manifest/CSV/图片的新增、删除或替换），保留答题记录与 FSRS 卡片；需面板已打开",
+            desc: "重新解析当前题库来源（manifest/CSV/图片的新增、删除或替换），保留答题记录与 FSRS 卡片；需面板已打开",
             action: () => {
               void this.plugin.refreshBank();
             },
@@ -351,10 +345,20 @@ export class CSVQuizSettingTab extends PluginSettingTab {
    * 从而覆盖整个 data.json 并丢失 quizState。
    */
   async setControlValue(key: string, value: unknown): Promise<void> {
-    if (key === "bankFolder") {
-      // 题库切换统一走 changeBankFolder（确认/落盘/锚点迁移/刷新）；
+    if (key === "sourceType") {
+      // 来源切换统一走 changeSource（确认/落盘/卸载旧 sidecar/重新解析/刷新）；
       // 绝不能直写 settings，否则会绕过 sidecar 切换流程。
-      await this.plugin.changeBankFolder(String(value));
+      await this.plugin.changeSource(
+        normalizeSourceType(value),
+        this.plugin.settings.sourcePath
+      );
+      return;
+    }
+    if (key === "sourcePath") {
+      await this.plugin.changeSource(
+        this.plugin.settings.sourceType,
+        String(value ?? "")
+      );
       return;
     }
     if (key === "randomOrder") {
@@ -433,7 +437,7 @@ export class CSVQuizSettingTab extends PluginSettingTab {
 
     new Setting(containerEl).setName("刷题啊 - 设置").setHeading();
 
-    this.addBankFolderSetting(containerEl);
+    this.addSourceSetting(containerEl);
     this.addBankStatusSetting(containerEl);
     this.addToggleSetting(
       containerEl,
@@ -608,7 +612,7 @@ export class CSVQuizSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("刷新题库")
       .setDesc(
-        "重新解析题库文件夹（manifest/CSV/图片的新增、删除或替换），保留答题记录与 FSRS 卡片；需面板已打开"
+        "重新解析当前题库来源（manifest/CSV/图片的新增、删除或替换），保留答题记录与 FSRS 卡片；需面板已打开"
       )
       .addButton((btn) =>
         btn.setButtonText("刷新").onClick(() => {
@@ -633,15 +637,18 @@ export class CSVQuizSettingTab extends PluginSettingTab {
       );
   }
 
-  /** 是否处于「CSV 与图片并存」的待选择状态。 */
-  private isCsvChoicePrompt(): boolean {
-    const status = this.plugin.bankStatus;
-    return (
-      status !== null &&
-      status.status === "prompt" &&
-      status.reason === "both" &&
-      !!status.csvCandidate
-    );
+  /** 来源类型标签。 */
+  private sourceTypeLabel(type: PluginSettings["sourceType"]): string {
+    switch (type) {
+      case "csv":
+        return "CSV/CQV 文件";
+      case "image":
+        return "图片文件夹";
+      case "manifest":
+        return "复合题库文件夹";
+      default:
+        return "未设置";
+    }
   }
 
   /** 解析结果的模式标签。 */
@@ -661,12 +668,15 @@ export class CSVQuizSettingTab extends PluginSettingTab {
     }
   }
 
-  /** 把当前解析结果渲染为只读状态行（模式/内容文件/图片文件夹/状态文件）。 */
+  /** 把当前解析结果渲染为只读状态行（来源/模式/内容文件/图片文件夹/状态文件）。 */
   private renderBankStatus(el: HTMLElement): void {
     el.empty();
     const status = this.plugin.bankStatus;
     const source = status?.status === "ok" ? status.source : null;
+    const settings = this.plugin.settings;
     const lines: Array<[string, string]> = [
+      ["来源类型", this.sourceTypeLabel(settings.sourceType)],
+      ["来源路径", settings.sourcePath || "—"],
       ["模式", this.bankModeLabel(status)],
       ["内容文件", source ? source.contentPath || "—" : "—"],
       ["图片文件夹", source ? source.imageFolder || "—" : "—"],
@@ -683,45 +693,104 @@ export class CSVQuizSettingTab extends PluginSettingTab {
     }
   }
 
-  private addBankFolderSetting(containerEl: HTMLElement): void {
-    let textComponent: TextComponent | null = null;
-    const apply = async (raw: string): Promise<void> => {
-      await this.plugin.changeBankFolder(raw);
-      // 取消切换 / 归一化后不同：回写当前生效值，避免输入框显示未生效路径
-      textComponent?.setValue(this.plugin.settings.bankFolder);
-    };
-    new Setting(containerEl)
-      .setName("题库文件夹")
-      .setDesc(BANK_FOLDER_DESC)
-      .addText((text) => {
-        textComponent = text;
-        text
-          .setPlaceholder("例如：题库/行测（根目录用 /）")
-          .setValue(this.plugin.settings.bankFolder);
-        // 输入框值即缓冲；失焦/回车（change 事件）时由 changeBankFolder 统一处理
-        // 写入设置 + 确认 + 卸载/迁移 + 刷新。
-        text.inputEl.addEventListener("change", () => {
-          void apply(text.inputEl.value);
+  /** 单行「题库来源」：类型下拉 + 路径输入 + 选择按钮。 */
+  private renderSourceSetting(setting: Setting): void {
+    const settings = this.plugin.settings;
+    setting.setName("题库来源").setDesc(SOURCE_DESC);
+
+    setting.addDropdown((dd) => {
+      dd.addOption("", "未设置")
+        .addOption("csv", "CSV/CQV 文件")
+        .addOption("image", "图片文件夹")
+        .addOption("manifest", "复合题库文件夹")
+        .setValue(settings.sourceType)
+        .onChange((value) => {
+          // 类型变化后旧路径通常不再适用：先清空路径，再点「选择…」指定新路径
+          void this.applySource(normalizeSourceType(value), "");
         });
+    });
+
+    setting.addText((text) => {
+      text
+        .setPlaceholder(this.sourcePathPlaceholder(settings.sourceType))
+        .setValue(settings.sourcePath);
+      // 输入框值即缓冲；失焦/回车（change）时由 changeSource 统一处理
+      text.inputEl.addEventListener("change", () => {
+        void this.applySource(
+          this.plugin.settings.sourceType,
+          text.inputEl.value
+        );
+      });
+      if (
+        settings.sourceType === "image" ||
+        settings.sourceType === "manifest"
+      ) {
+        // 文件夹来源复用路径补全；根目录哨兵为 "/"
         const suggest = new FolderSuggest(this.app, text.inputEl);
         suggest.onSelect((folder) => {
-          const next = folder.path === "" ? "/" : folder.path;
+          const next =
+            folder.path === "" || folder.path === "/" ? "/" : folder.path;
           text.setValue(next);
-          void apply(next);
+          void this.applySource(settings.sourceType, next);
         });
-      });
+      }
+    });
+
+    setting.addButton((btn) =>
+      btn.setButtonText("选择…").onClick(() => {
+        this.openSourcePicker();
+      })
+    );
+  }
+
+  private sourcePathPlaceholder(type: PluginSettings["sourceType"]): string {
+    switch (type) {
+      case "csv":
+        return "例如：题库/行测.csv 或 .cqv";
+      case "image":
+        return "例如：题库/图片（vault 根用 /）";
+      case "manifest":
+        return "例如：题库/行测（含 manifest.json；根用 /）";
+      default:
+        return "请先选择来源类型";
+    }
+  }
+
+  /** 写入来源并通过 changeSource 完成确认/落盘/卸载旧 sidecar/刷新。 */
+  private async applySource(
+    type: SourceType | "",
+    path: string
+  ): Promise<void> {
+    const ok = await this.plugin.changeSource(type, path);
+    // 取消/保存失败时设置未变，重建 UI 回写生效值
+    if (!ok) this.plugin.syncSettingsUI();
+  }
+
+  /** 按当前来源类型打开文件或文件夹选择器。 */
+  private openSourcePicker(): void {
+    const type = this.plugin.settings.sourceType;
+    if (type === "csv") {
+      new FilePickerModal(this.app, (path) => {
+        void this.applySource("csv", path);
+      }).open();
+      return;
+    }
+    if (type === "image" || type === "manifest") {
+      new FolderPickerModal(this.app, (path) => {
+        void this.applySource(type, path);
+      }).open();
+      return;
+    }
+    new Notice("请先选择来源类型");
+  }
+
+  private addSourceSetting(containerEl: HTMLElement): void {
+    this.renderSourceSetting(new Setting(containerEl));
   }
 
   private addBankStatusSetting(containerEl: HTMLElement): void {
     const setting = new Setting(containerEl).setName("题库解析状态");
     this.renderBankStatus(setting.descEl);
-    if (this.isCsvChoicePrompt()) {
-      setting.addButton((btn) =>
-        btn.setButtonText("仅用 CSV").onClick(() => {
-          void this.plugin.useCsvOnly();
-        })
-      );
-    }
   }
 
   private addToggleSetting(
@@ -850,21 +919,23 @@ class FolderSuggest extends AbstractInputSuggest<TFolder> {
     const q = query.trim().toLowerCase();
     return this.app.vault
       .getAllFolders(true)
-      .filter(
-        (folder) =>
-          !folder.path.split("/").some((segment) => segment.startsWith("."))
-      )
+      .filter((folder) => !isHiddenVaultPath(folder.path))
       .filter(
         (folder) =>
           q === "" ||
           folder.path.toLowerCase().includes(q) ||
-          (folder.path === "/" && "根目录".includes(q))
+          ((folder.path === "/" || folder.path === "") &&
+            "根目录".includes(q))
       )
       .slice(0, 100);
   }
 
   renderSuggestion(folder: TFolder, el: HTMLElement): void {
-    el.setText(folder.path === "" ? "/" : folder.path);
+    el.setText(
+      folder.path === "" || folder.path === "/"
+        ? "/（vault 根）"
+        : folder.path
+    );
   }
 
   selectSuggestion(folder: TFolder, evt: MouseEvent | KeyboardEvent): void {
@@ -873,5 +944,65 @@ class FolderSuggest extends AbstractInputSuggest<TFolder> {
     this.input.trigger("input");
     this.close();
     super.selectSuggestion(folder, evt);
+  }
+}
+
+/** 任一隐藏段（以 `.` 开头）即视为隐藏路径；根 "/" 不算隐藏。 */
+function isHiddenVaultPath(path: string): boolean {
+  return path.split("/").some((segment) => segment.startsWith("."));
+}
+
+/** CSV/CQV 文件选择器（根目录无意义，仅列文件）。 */
+class FilePickerModal extends FuzzySuggestModal<TFile> {
+  private readonly onChoose: (path: string) => void;
+
+  constructor(app: App, onChoose: (path: string) => void) {
+    super(app);
+    this.onChoose = onChoose;
+    this.setPlaceholder("选择 CSV/CQV 题库文件");
+  }
+
+  getItems(): TFile[] {
+    return this.app.vault
+      .getFiles()
+      .filter(
+        (file) =>
+          /\.(csv|cqv)$/i.test(file.path) && !isHiddenVaultPath(file.path)
+      );
+  }
+
+  getItemText(file: TFile): string {
+    return file.path;
+  }
+
+  onChooseItem(file: TFile): void {
+    this.onChoose(file.path);
+  }
+}
+
+/** 图片/复合题库文件夹选择器（允许 vault 根）。 */
+class FolderPickerModal extends FuzzySuggestModal<TFolder> {
+  private readonly onChoose: (path: string) => void;
+
+  constructor(app: App, onChoose: (path: string) => void) {
+    super(app);
+    this.onChoose = onChoose;
+    this.setPlaceholder("选择题库文件夹（vault 根用 /）");
+  }
+
+  getItems(): TFolder[] {
+    return this.app.vault
+      .getAllFolders(true)
+      .filter((folder) => !isHiddenVaultPath(folder.path));
+  }
+
+  getItemText(folder: TFolder): string {
+    return folder.path === "" || folder.path === "/"
+      ? "/（vault 根）"
+      : folder.path;
+  }
+
+  onChooseItem(folder: TFolder): void {
+    this.onChoose(folder.path === "" ? "/" : folder.path);
   }
 }

@@ -133,6 +133,47 @@ describe("buildImageQuestions", () => {
     expect(buildImageQuestions("", ["a.png"])).toEqual([]);
     expect(buildImageQuestions("   ", ["a.png"])).toEqual([]);
   });
+
+  it("根文件夹 '/'：接受全部相对路径，imagePath 为相对路径", () => {
+    const files = [
+      "a.png",
+      "A/b.jpg",
+      "A/B/c.webp",
+      "notes/d.gif",
+      "skip.txt",
+      ".hidden/e.png",
+      "sub/.hidden2.png",
+    ];
+    const questions = buildImageQuestions("/", files);
+    expect(questions.map((q) => q.imagePath)).toEqual([
+      "a.png",
+      "A/b.jpg",
+      "A/B/c.webp",
+      "notes/d.gif",
+    ]);
+    expect(questions.map((q) => q.id)).toEqual([
+      "img:a.png",
+      "img:A/b.jpg",
+      "img:A/B/c.webp",
+      "img:notes/d.gif",
+    ]);
+    expect(questions[0].category1).toBe("识图");
+    expect(questions[0].category2).toBe("其它");
+    expect(questions[0].category3).toBe("其它");
+    expect(questions[1].category2).toBe("A");
+    expect(questions[1].category3).toBe("其它");
+    expect(questions[2].category2).toBe("A");
+    expect(questions[2].category3).toBe("B");
+    expect(questions[3].category2).toBe("notes");
+    expect(questions[3].category3).toBe("其它");
+    expect(questions.map((q) => q.imageNumber)).toEqual([1, 2, 3, 4]);
+  });
+
+  it("根文件夹兼容 './' 与前导斜杠路径", () => {
+    const questions = buildImageQuestions("./", ["/a.png", "sub/b.jpg"]);
+    expect(questions.map((q) => q.imagePath)).toEqual(["a.png", "sub/b.jpg"]);
+    expect(questions.map((q) => q.id)).toEqual(["img:a.png", "img:sub/b.jpg"]);
+  });
 });
 
 describe("imageAnswerFromPath", () => {

@@ -10,11 +10,11 @@ A CSV/image-folder-based quiz practice plugin for Obsidian. Write your question 
 
 ## 快速开始 / Quick Start
 
-1. 在 vault 里准备一个**题库文件夹**：放 `题库.csv` / `题库.cqv`（文字题库），或只放图片，或创建 `manifest.json` 把 CSV/CQV 与图片组合成复合题库
-   Prepare a **bank folder** in your vault: a `题库.csv` / `题库.cqv` (text bank), images only, or a `manifest.json` combining CSV/CQV with images
+1. 准备题库来源：一个 `.csv` / `.cqv` 文件、一个图片文件夹，或含 `manifest.json` 的复合题库文件夹
+   Prepare a source: a `.csv` / `.cqv` file, an image folder, or a composite bank folder containing `manifest.json`
 
-2. 在设置页选择该**题库文件夹**（vault 根用 `/` 表示）
-   Choose that **bank folder** in settings (use `/` for the vault root)
+2. 在设置页选择「来源类型」和对应路径
+   Choose the source type and path in settings
 
 3. 点击左侧 ribbon 的图书图标，或执行命令 `打开刷题面板`
    Click the book icon in the left ribbon, or run the command `打开刷题面板`
@@ -53,16 +53,13 @@ The CSV file must be **BOM-prefixed UTF-8** with 15 columns:
 
 ---
 
-## 题库文件夹与 manifest / Bank Folder & Manifest
+## 题库来源与 manifest / Source Types & Manifest
 
-设置页只选择一个**题库文件夹**：
+设置页显式选择来源类型：
 
-- 文件夹内有有效 `manifest.json` → 复合题库（CSV/CQV + 图片）。
-- 没有 manifest：
-  - 只有唯一 CSV/CQV → 文字题库；
-  - 只有图片 → 图片题库；
-  - CSV/CQV 与图片同时存在 → 提示创建 manifest，或选择「仅用 CSV」；
-  - 多个 CSV/CQV 或空文件夹 → 提示调整文件夹。
+- `csv`：CSV/CQV 文件；sidecar 为同名文件加 `.sidecar.json`，不扫描图片。
+- `image`：图片文件夹；递归扫描 png/jpg/jpeg/webp/gif/bmp，根目录用 `/`。
+- `manifest`：含 manifest.json 的复合题库文件夹，CSV/CQV 与图片由 manifest 绑定。
 
 复合题库清单：
 
@@ -80,12 +77,11 @@ The CSV file must be **BOM-prefixed UTF-8** with 15 columns:
 - `type` 不匹配 → 当作无关 manifest 忽略；JSON 损坏、版本不是 1、字段缺失、content 不存在、imageFolder 不存在或没有图片 → 报错不加载。
 - manifest 手工创建，程序不自动生成/覆盖；编译 `.cqv` 不会自动写 manifest。
 
-Settings use a single **bank folder**:
+Choose an explicit source type in settings:
 
-- A valid `manifest.json` inside → composite bank (CSV/CQV + images).
-- No manifest: unique CSV/CQV → text bank; images only → image bank; both → prompt to create a manifest or choose "CSV only"; multiple CSV/CQV or empty → prompt.
-- `content` and `imageFolder` are relative to the manifest directory; `..` and absolute paths are rejected.
-- Type mismatch is ignored as an unrelated manifest; invalid JSON/version/fields/missing content/empty image folder is a hard error.
+- `csv`: CSV/CQV file; sidecar is the file path + `.sidecar.json`; images are not scanned.
+- `image`: image folder; recursive png/jpg/jpeg/webp/gif/bmp; `/` for vault root.
+- `manifest`: a composite bank folder containing manifest.json; CSV/CQV and images are bound by the manifest.
 
 ---
 
@@ -135,10 +131,8 @@ Each state file holds answer records, statistics, FSRS cards, filters, favorite/
 
 ### 图片题 / Image Questions
 
-- 设置页只选择一个**题库文件夹**：文件夹内有 `manifest.json` 时按 manifest 绑定 CSV/CQV 与图片；没有 manifest 时自动识别唯一 CSV/CQV 或仅图片
-  Settings use a single **bank folder**: if it contains `manifest.json`, CSV/CQV and images are bound by the manifest; otherwise a unique CSV/CQV or image-only bank is detected
-- 支持递归扫描子文件夹，格式为 png/jpg/jpeg/webp/gif/bmp
-  Recursive scan of subfolders; formats: png/jpg/jpeg/webp/gif/bmp
+- 来源类型选择 `image`（图片文件夹）或 `manifest`（复合题库）；复合题库通过 manifest.json 绑定图片文件夹。支持递归扫描子文件夹，格式为 png/jpg/jpeg/webp/gif/bmp；根图片库可用 `/`
+  Choose source type `image` (image folder) or `manifest` (composite bank); a composite bank binds its image folder via manifest.json. Recursive subfolder scan; formats png/jpg/jpeg/webp/gif/bmp; `/` for a vault-root image bank
 - **文件名（去扩展名）= 答案，图片本身 = 题干**；分类固定为 `识图/一级子文件夹/二级子文件夹`（不足或更深为 `其它`），标签固定为 `#图片题`
   **Filename without extension = answer; the image is the stem**. Categories are `识图/first-level subfolder/second-level subfolder` (missing/deeper = `其它`), tag is `#图片题`
 - 未点击「展示答案」时只显示图片；点击后显示答案并记为已答。开启记忆练习时同时显示「重来/困难/良好/简单」四级评分，评分写入 FSRS 并自动下一题；关闭记忆练习时不显示评分
@@ -223,8 +217,9 @@ Each state file holds answer records, statistics, FSRS cards, filters, favorite/
 
 | 设置 / Setting | 说明 / Description |
 |---|---|
-| 题库文件夹 / Bank Folder | vault 内题库文件夹；有 `manifest.json` 为复合题库，否则自动识别唯一 CSV/CQV 或仅图片；根目录用 `/` / Vault bank folder; manifest.json makes a composite bank, otherwise a unique CSV/CQV or image-only bank is detected; `/` = vault root |
-| 刷新题库 / Refresh Bank | 重新解析题库文件夹（manifest/CSV/图片的新增、删除或替换），保留答题与 FSRS 状态 / Re-resolve the bank folder (manifest/CSV/image changes) while keeping answers and FSRS state |
+| 来源类型 / Source Type | csv（CSV/CQV 文件）/ image（图片文件夹）/ manifest（含 manifest.json 的复合题库）/ CSV/CQV file, image folder, or composite manifest folder |
+| 来源路径 / Source Path | 文件路径或文件夹路径；根部图片/复合题库可用 / / File or folder path; / = vault root |
+| 刷新题库 / Refresh Bank | 重新解析当前来源（manifest/CSV/图片的新增、删除或替换），保留答题与 FSRS 状态 / Re-resolve the current source while keeping answers and FSRS state |
 | 随机题目顺序 / Random Order | 每次加载时随机排列题目 |
 | 随机选项顺序 / Random Options | 每题选项顺序随机 |
 | 随机考试题数 / Random Exam Count | 随机考试从当前筛选范围抽取的题数（默认 100，不足时取全部） |

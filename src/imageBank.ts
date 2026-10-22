@@ -91,24 +91,37 @@ interface ImageEntry {
 /**
  * 依据文件夹内的全部文件路径构建图片题。
  * 纯函数，不依赖 Obsidian，便于单元测试。
+ *
+ * `folder` 为 `"/"`（vault 根）时接收全部相对路径，`imagePath` 保持相对路径；
+ * 空串仍表示未设置并返回空数组。
  */
 export function buildImageQuestions(
   folder: string,
   filePaths: string[],
 ): Question[] {
+  const trimmed = folder.trim().replace(/\\/g, "/");
   const root = normalizeFolder(folder);
-  if (root === "") return [];
+  const isVaultRoot = (root === "" || root === ".") && trimmed !== "";
+  if (root === "" && !isVaultRoot) return [];
 
-  const prefix = `${root}/`;
+  const prefix = isVaultRoot ? "" : `${root}/`;
   const seen = new Set<string>();
   const entries: ImageEntry[] = [];
 
   for (const rawPath of filePaths) {
     if (typeof rawPath !== "string" || rawPath === "") continue;
     const path = rawPath.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
-    if (!path.startsWith(prefix)) continue;
+    if (
+      isVaultRoot
+        ? path.replace(/^\/+/, "") === ""
+        : !path.startsWith(prefix)
+    ) {
+      continue;
+    }
 
-    const relativePath = path.slice(prefix.length);
+    const relativePath = isVaultRoot
+      ? path.replace(/^\/+/, "")
+      : path.slice(prefix.length);
     if (relativePath === "") continue;
     if (hasHiddenSegment(relativePath)) continue;
     if (relativePath.endsWith("/")) continue;
@@ -143,7 +156,9 @@ export function buildImageQuestions(
       mastered: "",
       repeat: "",
       wrong: "",
-      imagePath: `${root}/${entry.relativePath}`,
+      imagePath: isVaultRoot
+        ? entry.relativePath
+        : `${root}/${entry.relativePath}`,
       imageNumber: index + 1,
     };
   });

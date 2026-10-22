@@ -79,6 +79,10 @@ export interface PluginSettings {
   bankFolder: string;
   /** 无 manifest 且同目录 CSV+图片时，用户为某题库选择「仅用 CSV」的文件夹集合。 */
   bankSingleSources: Record<string, "csv">;
+  /** 显式来源类型：csv 文件 / image 文件夹 / manifest 复合题库；""=未设置。 */
+  sourceType: "" | "csv" | "image" | "manifest";
+  /** 显式来源路径：csv 为文件路径，image/manifest 为文件夹路径。 */
+  sourcePath: string;
   randomOrder: boolean;
   randomOptions: boolean;
   autoNextDelay: number;
@@ -158,4 +162,6 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   imageFolder: "",
   bankFolder: "",
   bankSingleSources: {},
+  sourceType: "",
+  sourcePath: "",
 };

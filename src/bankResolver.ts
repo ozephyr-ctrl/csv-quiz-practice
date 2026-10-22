@@ -23,6 +23,22 @@ export const MANIFEST_SIDECAR_BASENAME = "manifest";
 /** vault 根目录的题库文件夹哨兵（与「未设置」的空串区分）。 */
 const ROOT_BANK_FOLDER = "/";
 
+/** 显式来源类型：CSV/CQV 文件、图片文件夹、manifest 复合题库。 */
+export type SourceType = "csv" | "image" | "manifest";
+
+/** 设置中的显式来源配置。`sourceType` 为空串表示尚未配置。 */
+export interface ConfiguredSourceSettings {
+  sourceType: SourceType | "";
+  sourcePath: string;
+}
+
+/**
+ * 仅图片且图片文件夹为 vault 根时的 sidecar 锚点。
+ * 根目录无法承载「文件夹路径即锚点」的约定（否则会落到 `/.sidecar.json`），
+ * 因此用这个固定前缀在根目录下生成独立 sidecar。
+ */
+export const ROOT_IMAGE_ANCHOR = ".csv-quiz-root-images";
+
 /** 识别的题库内容文件扩展名（小写，不含点）。 */
 const CSV_EXTENSIONS = new Set(["csv", "cqv"]);
 
@@ -253,18 +269,11 @@ export function parseBankManifest(
   }
 
   const folder = normalizeBankFolder(bankFolder);
-  // vault 根不能作为图片文件夹的锚点（否则会扫描整个 vault，且视图无法区分
-  // “根目录图片库”与“未设置”）；要求 imageFolder 指向根下的子文件夹。
-  if (folder === ROOT_BANK_FOLDER && imageRel.path === "") {
-    return {
-      status: "error",
-      message:
-        "vault 根目录的 manifest.json 不支持 imageFolder 为 \".\"：请指定根下的图片子文件夹。",
-    };
-  }
+  // `imageFolder: "."` 表示 manifest 所在文件夹自身；根目录解析为根哨兵 `"/"`，
+  // 由调用方用 ROOT_IMAGE_ANCHOR 承载根级图片题库的 sidecar。
   const imageFolder =
     imageRel.path === ""
-      ? vaultFolderPath(folder)
+      ? folder
       : joinVaultPath(folder, imageRel.path);
 
   return {
@@ -528,6 +537,351 @@ function csvSource(folder: string, contentPath: string): BankResolution {
       anchor: contentPath,
       manifest: null,
     },
+  };
+}
+
+/** 把任意 vault 路径规范成无前导 `/`、无反斜杠的形态。 */
+function normalizeVaultFilePath(raw: string): string {
+  return raw
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/\/{2,}/g, "/")
+    .replace(/^\/+/, "");
+}
+
+function configuredError(reason: string, message: string): BankResolution {
+  return { status: "error", reason, message };
+}
+
+/**
+ * 按设置中的显式来源类型解析题库来源（4.1+）。
+ *
+ * - `sourceType: ""` → prompt unconfigured；
+ * - csv → 校验路径存在且为 .csv/.cqv；
+ * - image → 递归扫描文件夹（允许 vault 根 `/`），至少一张图片；
+ * - manifest → 严格读取 `<folder>/manifest.json`，不回退自动识别。
+ */
+export async function resolveConfiguredSource(
+  vault: Vault,
+  settings: ConfiguredSourceSettings
+): Promise<BankResolution> {
+  const sourceType = settings?.sourceType ?? "";
+  if (sourceType === "") {
+    return {
+      status: "prompt",
+      reason: "unconfigured",
+      message: "尚未设置题库来源类型：请选择 CSV 文件、图片文件夹或复合题库文件夹。",
+    };
+  }
+
+  if (sourceType === "csv") {
+    const path = normalizeVaultFilePath(settings.sourcePath ?? "");
+    if (path === "") {
+      return configuredError("csv-missing", "请选择 CSV/CQV 文件。");
+    }
+    if (!CSV_EXTENSIONS.has(extensionOf(path))) {
+      return configuredError(
+        "csv-extension",
+        `内容文件必须是 .csv 或 .cqv：${path}`
+      );
+    }
+    let exists = false;
+    try {
+      exists = await vault.adapter.exists(path);
+    } catch {
+      exists = false;
+    }
+    if (!exists) {
+      return configuredError("csv-missing", `内容文件不存在：${path}`);
+    }
+    return csvSource(dirnameVaultPath(path), path);
+  }
+
+  if (sourceType === "image") {
+    const raw = (settings.sourcePath ?? "").trim();
+    if (raw === "") {
+      return configuredError("image-folder-missing", "请选择图片文件夹。");
+    }
+    const folder = normalizeBankFolder(raw);
+    if (folder === "") {
+      return configuredError("image-folder-missing", "请选择图片文件夹。");
+    }
+    if (IMAGE_EXTENSIONS.has(extensionOf(folder))) {
+      return configuredError(
+        "image-folder-invalid",
+        `图片来源必须是文件夹，而不是图片文件：${folder}`
+      );
+    }
+    const files = await listVaultFiles(vault);
+    if (imagePathsUnder(files, vaultFolderPath(folder)).length === 0) {
+      return configuredError(
+        "image-folder-empty",
+        folder === ROOT_BANK_FOLDER
+          ? "vault 根目录下没有受支持的图片。"
+          : `图片文件夹不存在或没有受支持的图片：${folder}`
+      );
+    }
+    return {
+      status: "ok",
+      source: {
+        mode: "image",
+        bankFolder: folder,
+        contentPath: "",
+        imageFolder: folder,
+        anchor: folder === ROOT_BANK_FOLDER ? ROOT_IMAGE_ANCHOR : folder,
+        manifest: null,
+      },
+    };
+  }
+
+  // ---- manifest ----
+  const folder = normalizeBankFolder((settings.sourcePath ?? "").trim());
+  if (folder === "") {
+    return configuredError(
+      "manifest-folder-missing",
+      "请选择包含 manifest.json 的复合题库文件夹。"
+    );
+  }
+  const manifestPath = manifestPathForBank(folder);
+  let manifestText = "";
+  try {
+    if (!(await vault.adapter.exists(manifestPath))) {
+      return configuredError(
+        "manifest-missing",
+        `复合题库缺少 manifest.json：${manifestPath}`
+      );
+    }
+    manifestText = await vault.adapter.read(manifestPath);
+  } catch (e: unknown) {
+    return configuredError(
+      "manifest-read",
+      `读取 ${manifestPath} 失败：${errorMessageOf(e)}`
+    );
+  }
+
+  const parsed = parseBankManifest(manifestText, folder);
+  if (parsed.status === "ignored") {
+    return configuredError(
+      "manifest-invalid",
+      `manifest.json 的 type 不是 ${MANIFEST_TYPE}：${manifestPath}`
+    );
+  }
+  if (parsed.status === "error") {
+    return configuredError("manifest-invalid", parsed.message);
+  }
+
+  let contentExists = false;
+  try {
+    contentExists = await vault.adapter.exists(parsed.contentPath);
+  } catch {
+    contentExists = false;
+  }
+  if (!contentExists) {
+    return configuredError(
+      "content-missing",
+      `manifest.json 指定的内容文件不存在：${parsed.contentPath}`
+    );
+  }
+
+  const files = await listVaultFiles(vault);
+  if (imagePathsUnder(files, parsed.imageFolder).length === 0) {
+    return configuredError(
+      "image-folder-empty",
+      `manifest.json 指定的图片文件夹不存在或没有受支持的图片：${
+        parsed.imageFolder === "" ? ROOT_BANK_FOLDER : parsed.imageFolder
+      }`
+    );
+  }
+
+  return {
+    status: "ok",
+    source: {
+      mode: "manifest",
+      bankFolder: folder,
+      contentPath: parsed.contentPath,
+      imageFolder: parsed.imageFolder,
+      anchor: manifestAnchorForBank(folder),
+      manifest: parsed.manifest,
+    },
+  };
+}
+
+/* ===================== 旧配置 → manifest ===================== */
+
+export interface LegacyManifestResult {
+  status: "created" | "reused" | "error";
+  bankFolder?: string;
+  contentPath?: string;
+  imageFolder?: string;
+  message?: string;
+}
+
+/** 文件夹 → 段数组（根为 `[]`）。 */
+function bankFolderSegments(folder: string): string[] {
+  const normalized = normalizeBankFolder(folder);
+  return normalized === "" || normalized === ROOT_BANK_FOLDER
+    ? []
+    : normalized.split("/");
+}
+
+/**
+ * 为旧版「CSV 文件 + 图片文件夹」配置生成复合题库 manifest.json。
+ *
+ * 以两者的最低公共祖先作为题库文件夹（根为 `/`），manifest 内的路径相对该文件夹；
+ * 已有 manifest.json 时只在内容完全一致时复用，否则报错且**不覆盖**。
+ */
+export async function createLegacyManifest(
+  vault: Vault,
+  csvPath: string,
+  imageFolder: string
+): Promise<LegacyManifestResult> {
+  const contentPath = normalizeVaultFilePath(csvPath ?? "");
+  const imageRaw = (imageFolder ?? "").trim();
+  if (contentPath === "") {
+    return { status: "error", message: "CSV 路径不能为空。" };
+  }
+  if (imageRaw === "") {
+    return {
+      status: "error",
+      message: "图片文件夹为空，无法创建复合题库 manifest.json。",
+    };
+  }
+
+  const contentFolder = normalizeBankFolder(dirnameVaultPath(contentPath));
+  const contentBase = contentPath.slice(contentPath.lastIndexOf("/") + 1);
+  if (contentBase === "") {
+    return { status: "error", message: `CSV 路径无效：${contentPath}` };
+  }
+  const normalizedContentPath = joinVaultPath(contentFolder, contentBase);
+
+  const imageBankFolder = normalizeBankFolder(imageRaw);
+  if (imageBankFolder === "") {
+    return {
+      status: "error",
+      message: "图片文件夹为空，无法创建复合题库 manifest.json。",
+    };
+  }
+  if (IMAGE_EXTENSIONS.has(extensionOf(imageBankFolder))) {
+    return {
+      status: "error",
+      message: `图片路径必须是文件夹：${imageBankFolder}`,
+    };
+  }
+
+  const contentSegments = bankFolderSegments(contentFolder);
+  const imageSegments = bankFolderSegments(imageBankFolder);
+  const lca: string[] = [];
+  const limit = Math.min(contentSegments.length, imageSegments.length);
+  for (let i = 0; i < limit; i += 1) {
+    if (contentSegments[i] !== imageSegments[i]) break;
+    lca.push(contentSegments[i]);
+  }
+  const bankFolder = lca.length === 0 ? ROOT_BANK_FOLDER : lca.join("/");
+
+  const contentRel = [
+    ...contentSegments.slice(lca.length),
+    contentBase,
+  ].join("/");
+  const imageRel = imageSegments.slice(lca.length).join("/") || ".";
+  const imageFolderValue = imageRel;
+
+  const isSafeRelative = (value: string): boolean =>
+    value === "." ||
+    (value !== "" &&
+      value.split("/").every((segment) => segment !== "" && segment !== ".."));
+
+  if (!isSafeRelative(contentRel) || !isSafeRelative(imageFolderValue)) {
+    return {
+      status: "error",
+      message: "无法生成安全的相对路径（不允许 .. 或空段）。",
+    };
+  }
+
+  const manifestPath = manifestPathForBank(bankFolder);
+  let manifestExists = false;
+  try {
+    manifestExists = await vault.adapter.exists(manifestPath);
+  } catch {
+    manifestExists = false;
+  }
+
+  if (manifestExists) {
+    let text: string;
+    try {
+      text = await vault.adapter.read(manifestPath);
+    } catch (e: unknown) {
+      return {
+        status: "error",
+        message: `读取已有 ${manifestPath} 失败：${errorMessageOf(e)}`,
+      };
+    }
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch (e: unknown) {
+      return {
+        status: "error",
+        message: `已有 ${manifestPath} 不是合法 JSON：${errorMessageOf(e)}`,
+      };
+    }
+    if (
+      raw === null ||
+      typeof raw !== "object" ||
+      Array.isArray(raw) ||
+      (raw as Record<string, unknown>).type !== MANIFEST_TYPE
+    ) {
+      return {
+        status: "error",
+        message: `已有 ${manifestPath} 的 type 不是 ${MANIFEST_TYPE}，不会覆盖。`,
+      };
+    }
+    const parsed = parseBankManifest(text, bankFolder);
+    if (parsed.status !== "ok") {
+      return {
+        status: "error",
+        message:
+          parsed.status === "error"
+            ? parsed.message
+            : `已有 ${manifestPath} 的类型不是 ${MANIFEST_TYPE}，不会覆盖。`,
+      };
+    }
+    if (
+      parsed.contentPath !== normalizedContentPath ||
+      parsed.imageFolder !== imageBankFolder
+    ) {
+      return {
+        status: "error",
+        message: `已有 ${manifestPath} 指向的 content/imageFolder（${parsed.contentPath} / ${parsed.imageFolder}）与当前配置不一致，不会覆盖。`,
+      };
+    }
+    return {
+      status: "reused",
+      bankFolder,
+      contentPath: parsed.contentPath,
+      imageFolder: parsed.imageFolder,
+    };
+  }
+
+  const manifest: BankManifest = {
+    type: MANIFEST_TYPE,
+    version: 1,
+    content: contentRel,
+    imageFolder: imageFolderValue,
+  };
+  try {
+    await vault.adapter.write(manifestPath, JSON.stringify(manifest, null, 2));
+  } catch (e: unknown) {
+    return {
+      status: "error",
+      message: `写入 ${manifestPath} 失败：${errorMessageOf(e)}`,
+    };
+  }
+
+  return {
+    status: "created",
+    bankFolder,
+    contentPath: normalizedContentPath,
+    imageFolder: imageBankFolder,
   };
 }
 
