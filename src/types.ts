@@ -145,6 +145,8 @@ export interface PluginSettings {
   keyMastered: string;
   /** 标记快捷键：重复 */
   keyRepeat: string;
+  /** 已执行过「manifest 组成 sidecar 合并」的 manifest 锚点集合（一次性迁移标记）。 */
+  manifestMerged: Record<string, boolean>;
 }
 
 export interface PluginData {
@@ -186,4 +188,5 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   bankSingleSources: {},
   sourceType: "",
   sourcePath: "",
+  manifestMerged: {},
 };

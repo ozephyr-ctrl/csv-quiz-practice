@@ -17,7 +17,9 @@ import {
   normalizeBankFolder,
   resolveBankSource,
   resolveConfiguredSource,
+  ROOT_IMAGE_ANCHOR,
   type BankResolution,
+  type ResolvedBankSource,
   type SourceType,
 } from "./bankResolver";
 
@@ -40,6 +42,21 @@ function normalizeBankSingleSources(raw: unknown): Record<string, "csv"> {
 /** 把任意值收敛为合法的显式来源类型（未知值视为未设置）。 */
 function normalizeSourceType(raw: unknown): SourceType | "" {
   return raw === "csv" || raw === "image" || raw === "manifest" ? raw : "";
+}
+
+/**
+ * 归一化「manifest 组成 sidecar 已合并」标记：只保留 value === true 且 key 非空
+ * （trim 后）的项；类型不对返回 {}。
+ */
+function normalizeManifestMerged(raw: unknown): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    const anchor = key.trim();
+    if (anchor === "" || value !== true) continue;
+    out[anchor] = true;
+  }
+  return out;
 }
 
 /**
@@ -75,6 +92,8 @@ export default class CSVQuizPlugin extends Plugin {
   private legacyBankFolder = "";
   private legacyBankSingleSources: Record<string, "csv"> = {};
   private settingTab: CSVQuizSettingTab | null = null;
+  /** manifest 组成 sidecar 合并的并发锁：同锚点复用同一 promise，避免重复合并导致统计翻倍。 */
+  private manifestMergePromises = new Map<string, Promise<void>>();
 
   async onload(): Promise<void> {
     this.stateManager = new StateManager(this);
@@ -572,6 +591,7 @@ export default class CSVQuizPlugin extends Plugin {
       keyFavorite: toBinding(raw.keyFavorite, DEFAULT_SETTINGS.keyFavorite),
       keyMastered: toBinding(raw.keyMastered, DEFAULT_SETTINGS.keyMastered),
       keyRepeat: toBinding(raw.keyRepeat, DEFAULT_SETTINGS.keyRepeat),
+      manifestMerged: normalizeManifestMerged(raw.manifestMerged),
     };
   }
 
@@ -589,6 +609,93 @@ export default class CSVQuizPlugin extends Plugin {
     return this.bankStatus?.status === "ok" ? this.bankStatus.source.anchor : "";
   }
 
+  /**
+   * manifest 复合题库：确保组成内容源的 sidecar 进度已一次性并入 manifest 锚点 sidecar。
+   * - 仅 manifest 模式；已合并过的锚点（settings.manifestMerged）直接返回
+   * - 同锚点并发调用复用同一 promise（onload 与视图可能同时触发）
+   * - 任何失败都不抛出（合并失败不应变成题库加载失败）
+   */
+  async ensureManifestSidecarMerged(source: ResolvedBankSource): Promise<void> {
+    if (source.mode !== "manifest") return;
+    const key = source.anchor.trim();
+    if (key === "") return;
+    if (this.settings.manifestMerged[key] === true) return;
+    const pending = this.manifestMergePromises.get(key);
+    if (pending) return pending;
+    const task = this.runManifestSidecarMerge(source, key).finally(() => {
+      this.manifestMergePromises.delete(key);
+    });
+    this.manifestMergePromises.set(key, task);
+    return task;
+  }
+
+  /** ensureManifestSidecarMerged 的实际执行体（结果只记录日志/提示，不抛出）。 */
+  private async runManifestSidecarMerge(
+    source: ResolvedBankSource,
+    key: string
+  ): Promise<void> {
+    const components: string[] = [];
+    const seen = new Set<string>();
+    const push = (anchor: string | undefined): void => {
+      const value = (anchor ?? "").trim();
+      if (value === "" || value === key || seen.has(value)) return;
+      seen.add(value);
+      components.push(value);
+    };
+    for (const contentPath of source.contentPaths) push(contentPath);
+    const imageFolder = (source.imageFolder ?? "").trim();
+    if (imageFolder !== "") {
+      push(imageFolder === "/" ? ROOT_IMAGE_ANCHOR : imageFolder);
+    }
+    if (components.length === 0) {
+      // 无任何组成内容源：标记完成，避免每次启动重复探测
+      this.settings.manifestMerged[key] = true;
+      await this.saveSettings();
+      return;
+    }
+
+    try {
+      const result = await this.stateManager.mergeManifestComponentSidecars(
+        key,
+        components,
+        {
+          favorite: this.settings.defaultFilterFavorite,
+          mastered: this.settings.defaultFilterMastered,
+          repeat: this.settings.defaultFilterRepeat,
+          wrong: this.settings.defaultFilterWrong,
+        }
+      );
+      if (result.status === "merged") {
+        this.settings.manifestMerged[key] = true;
+        await this.saveSettings();
+        console.info(
+          `CSV Quiz: 已把 ${result.mergedComponents ?? 0} 个组成 sidecar 并入 manifest 进度` +
+            `（新增答题 ${result.addedAnswers ?? 0} 条，✅${result.correctCount ?? 0} / ❌${result.wrongCount ?? 0}）`
+        );
+        return;
+      }
+      if (result.reason === "target-has-progress") {
+        // 目标已有复合题库进度：不再合并（避免重复累计），直接标记完成
+        this.settings.manifestMerged[key] = true;
+        await this.saveSettings();
+        return;
+      }
+      if (result.reason === "no-component-progress") {
+        // 组成暂无进度：不标记，以后新增组成仍有进度时可再尝试
+        return;
+      }
+      console.error(
+        "CSV Quiz: manifest 组成 sidecar 合并未完成",
+        key,
+        result.status,
+        result.reason
+      );
+    } catch (e: unknown) {
+      // 合并失败不阻塞题库加载
+      console.error("CSV Quiz: manifest 组成 sidecar 合并失败", key, e);
+    }
+  }
+
   /** 确保当前题库的 sidecar 状态已载入内存（无视图时面板未载入）。返回是否可用。 */
   private async ensureSidecarLoaded(notice: boolean = true): Promise<boolean> {
     const res = await this.resolveBank();
@@ -596,6 +703,9 @@ export default class CSVQuizPlugin extends Plugin {
       if (notice) new Notice(res.message);
       return false;
     }
+    // manifest 复合题库：先把组成内容源 sidecar 进度并入 manifest 锚点（一次性；
+    // 失败仅记录日志，不阻塞加载），再 loadSidecar 读取合并后的状态。
+    await this.ensureManifestSidecarMerged(res.source);
     // 来源迁移已在 onload 完成；用户切换来源不自动串库（不做正/反向 manifest 迁移）。
     const anchor = res.source.anchor;
     const st = this.stateManager.getState();

@@ -153,6 +153,21 @@ export interface SidecarMergeOpResult {
   reason?: string;
 }
 
+/** manifest 复合题库：把组成内容源 sidecar 一次性并入 manifest sidecar 的结果。 */
+export interface ManifestSidecarMergeResult {
+  status: "merged" | "skipped" | "error";
+  reason?:
+    | "target-has-progress"
+    | "no-component-progress"
+    | "target-corrupt"
+    | "write-failed";
+  mergedComponents?: number;
+  addedAnswers?: number;
+  correctCount?: number;
+  wrongCount?: number;
+}
+
+
 export class StateManager {
   private plugin: Plugin;
   private vault: Vault;
@@ -1016,6 +1031,145 @@ export class StateManager {
       console.error("CSV Quiz: 归档图片内容源 sidecar 失败", srcPath, e);
     }
     return result;
+  }
+
+  /** sidecar 是否含用户进度（answered / memoryCards / 对错计数 / meta 任一非空）。 */
+  private sidecarHasProgress(data: SidecarData): boolean {
+    const s = data.state;
+    return (
+      Object.keys(s.answeredQuestions).length > 0 ||
+      (s.memoryCards !== undefined && Object.keys(s.memoryCards).length > 0) ||
+      s.correctCount > 0 ||
+      s.wrongCount > 0 ||
+      Object.keys(data.meta).length > 0
+    );
+  }
+
+  /**
+   * manifest 复合题库：把组成内容源（content/contents/图片文件夹）的 sidecar 一次性
+   * 并入 manifest 锚点的 sidecar（5.0.0 遗留问题：复合题库加载了全部题目，但
+   * manifest.sidecar.json 是新建空状态，组成 sidecar 里的进度全部不可见）。
+   *
+   * - 目标缺失 → 以空状态为 base；目标损坏 → error（不覆盖，避免丢数据）
+   * - 目标已有任何进度 → skipped/target-has-progress（避免重复累计）
+   * - 组成按写入时间参与 mergeSidecarData（answered/meta/memoryCards 并集，base 优先），
+   *   对错计数/每日答题量按累计口径求和，会话字段（displayOrder/currentIndex/filter*）
+   *   一律保留目标值（缺失时为空，后续由视图重建）
+   * - 不删除/不归档任何组成 sidecar（保留回退数据源）
+   */
+  async mergeManifestComponentSidecars(
+    targetAnchor: string,
+    componentAnchors: string[],
+    defaultFilters: { favorite: string; mastered: string; repeat: string; wrong: string }
+  ): Promise<ManifestSidecarMergeResult> {
+    const target = targetAnchor.trim();
+    if (target === "") return { status: "skipped" };
+
+    const targetResult = await readSidecar(this.vault, target);
+    if (targetResult.status === "corrupt") {
+      console.error(
+        "CSV Quiz: manifest sidecar 损坏，跳过组成侧进度合并",
+        target,
+        targetResult.reason
+      );
+      return { status: "error", reason: "target-corrupt" };
+    }
+
+    let targetData: SidecarData;
+    let targetTs = 0;
+    if (targetResult.status === "missing") {
+      // 目标缺失：空状态作 base。剔除 csvPath（sidecar 不存该字段）。
+      const { csvPath: _csvPath, ...emptyState } =
+        this.emptySessionState(defaultFilters);
+      void _csvPath;
+      targetData = { version: 1, meta: {}, state: { ...emptyState } };
+    } else {
+      targetData = targetResult.data;
+      targetTs = await this.sidecarTimestampMs(target, targetResult.data);
+      if (this.sidecarHasProgress(targetData)) {
+        return { status: "skipped", reason: "target-has-progress" };
+      }
+    }
+
+    // 组成去重（排除空与 target 自身），只收「有进度」的 sidecar
+    const seen = new Set<string>();
+    const components: SidecarConflictSource[] = [];
+    for (const rawAnchor of componentAnchors) {
+      const anchor = rawAnchor.trim();
+      if (anchor === "" || anchor === target || seen.has(anchor)) continue;
+      seen.add(anchor);
+      const result = await readSidecar(this.vault, anchor);
+      if (result.status === "missing") continue;
+      if (result.status === "corrupt") {
+        // 单个组成损坏不阻塞其余组成合并
+        console.error(
+          "CSV Quiz: 组成内容源 sidecar 损坏，跳过合并",
+          anchor,
+          result.reason
+        );
+        continue;
+      }
+      if (!this.sidecarHasProgress(result.data)) continue;
+      components.push({
+        path: sidecarPathFor(anchor),
+        data: result.data,
+        tsMs: await this.sidecarTimestampMs(anchor, result.data),
+      });
+    }
+    if (components.length === 0) {
+      return { status: "skipped", reason: "no-component-progress" };
+    }
+
+    const merge = mergeSidecarData(targetData, targetTs, components);
+
+    // 累计口径求和：对错计数 / 每日答题量（同一题可多次作答，不能按唯一题重算）
+    let correctCount = targetData.state.correctCount;
+    let wrongCount = targetData.state.wrongCount;
+    const dailyAnswers: Record<string, number> = {
+      ...(targetData.state.dailyAnswers ?? {}),
+    };
+    let memoryInitialized = targetData.state.memoryInitialized === true;
+    for (const component of components) {
+      correctCount += component.data.state.correctCount;
+      wrongCount += component.data.state.wrongCount;
+      memoryInitialized =
+        memoryInitialized || component.data.state.memoryInitialized === true;
+      for (const [date, count] of Object.entries(
+        component.data.state.dailyAnswers ?? {}
+      )) {
+        dailyAnswers[date] = (dailyAnswers[date] ?? 0) + count;
+      }
+    }
+
+    const mergedData: SidecarData = {
+      version: 1,
+      meta: merge.data.meta,
+      state: {
+        ...merge.data.state,
+        // 会话字段（displayOrder/currentIndex/filter*）取自 base（target）
+        correctCount,
+        wrongCount,
+        dailyAnswers:
+          Object.keys(dailyAnswers).length > 0 ? dailyAnswers : undefined,
+        memoryInitialized,
+        updatedAt: Date.now(),
+      },
+    };
+
+    try {
+      await writeSidecar(this.vault, target, mergedData);
+    } catch (e: unknown) {
+      console.error("CSV Quiz: 写入 manifest 合并后 sidecar 失败", target, e);
+      return { status: "error", reason: "write-failed" };
+    }
+
+    return {
+      status: "merged",
+      mergedComponents: components.length,
+      addedAnswers: merge.addedAnswers,
+      correctCount,
+      wrongCount,
+    };
   }
 
   /**

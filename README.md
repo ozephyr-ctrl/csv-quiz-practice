@@ -123,6 +123,9 @@ Choose an explicit source type in settings:
 
 每个状态文件保存答题记录、统计、记忆卡片（FSRS）、筛选、收藏/掌握/错题、标签与分类的修改等。**切换题库时各题库状态相互独立、自动恢复，不会互相覆盖。**
 
+- 首次使用复合题库时，会把 `content`、`contents`、`imageFolder` 各自旧 sidecar 的答题/FSRS/meta/累计统计合并到 `manifest.sidecar.json`；旧 sidecar 保留作回退。合并按 manifest 锚点只执行一次，重置进度后不会再次合并。
+  On first use of a composite bank, progress from the sidecars of `content`, `contents`, and `imageFolder` is merged into `manifest.sidecar.json`; the old sidecars are kept for rollback. This runs once per manifest anchor and is not repeated after a reset.
+
 State files are named by source type:
 
 - Composite bank (`manifest.json`): `manifest.sidecar.json` next to the manifest

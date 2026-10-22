@@ -455,6 +455,16 @@ export class QuizView extends ItemView {
     }
     this.applyResolvedSource(source);
     if (this.isClosed || epoch !== this.loadEpoch) return;
+    // manifest 复合题库：先把组成内容源 sidecar 进度并入 manifest 锚点（一次性，
+    // main 侧有并发锁），再 loadSidecar 读取合并后的状态；失败不阻塞加载。
+    await (
+      this.plugin as unknown as {
+        ensureManifestSidecarMerged?: (
+          s: ResolvedBankSource
+        ) => Promise<void>;
+      }
+    ).ensureManifestSidecarMerged?.(source);
+    if (this.isClosed || epoch !== this.loadEpoch) return;
     const contentPath = source.anchor;
 
     // 载入题库（loadQuestions 内部含 id 质量门槛：空/重复题号拒绝加载）
@@ -4457,6 +4467,16 @@ export class QuizView extends ItemView {
       return;
     }
     this.applyResolvedSource(source);
+    if (this.isClosed || epoch !== this.loadEpoch) return;
+    // manifest 复合题库：先把组成内容源 sidecar 进度并入 manifest 锚点（一次性，
+    // main 侧有并发锁），再 loadSidecar 读取合并后的状态；失败不阻塞加载。
+    await (
+      this.plugin as unknown as {
+        ensureManifestSidecarMerged?: (
+          s: ResolvedBankSource
+        ) => Promise<void>;
+      }
+    ).ensureManifestSidecarMerged?.(source);
     if (this.isClosed || epoch !== this.loadEpoch) return;
     const contentPath = source.anchor;
 

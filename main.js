@@ -499,7 +499,8 @@ var DEFAULT_SETTINGS = {
   bankFolder: "",
   bankSingleSources: {},
   sourceType: "",
-  sourcePath: ""
+  sourcePath: "",
+  manifestMerged: {}
 };
 
 // src/settings.ts
@@ -6852,7 +6853,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     });
   }
   async initializeFromState() {
-    var _a, _b;
+    var _a, _b, _c, _d;
     const epoch = ++this.loadEpoch;
     const settings = this.getSettings();
     const inMemoryState = this.stateManager.getState();
@@ -6869,6 +6870,8 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       return;
     }
     this.applyResolvedSource(source);
+    if (this.isClosed || epoch !== this.loadEpoch) return;
+    await ((_b = (_a = this.plugin).ensureManifestSidecarMerged) == null ? void 0 : _b.call(_a, source));
     if (this.isClosed || epoch !== this.loadEpoch) return;
     const contentPath = source.anchor;
     const status = await this.loadQuestions();
@@ -6935,7 +6938,7 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     if (epoch !== this.loadEpoch) return;
     this.saveState();
     this.startAutoSave();
-    (_b = (_a = this.plugin).refreshMemoryReminder) == null ? void 0 : _b.call(_a);
+    (_d = (_c = this.plugin).refreshMemoryReminder) == null ? void 0 : _d.call(_c);
   }
   /** Read and parse the content source. Returns "ok", "empty" (no questions), or "error". */
   async loadQuestions() {
@@ -9925,7 +9928,7 @@ ${summarizeBankRowErrors(rowErrors)}`
     return true;
   }
   async refresh(preserveState = false) {
-    var _a, _b;
+    var _a, _b, _c, _d;
     const epoch = ++this.loadEpoch;
     const hadPersistableState = this.canPersistState && this.stateManager.getState() !== null;
     this.canPersistState = false;
@@ -9966,6 +9969,8 @@ ${summarizeBankRowErrors(rowErrors)}`
       return;
     }
     this.applyResolvedSource(source);
+    if (this.isClosed || epoch !== this.loadEpoch) return;
+    await ((_b = (_a = this.plugin).ensureManifestSidecarMerged) == null ? void 0 : _b.call(_a, source));
     if (this.isClosed || epoch !== this.loadEpoch) return;
     const contentPath = source.anchor;
     const wasSwitching = this.stateManager.getContentPath() !== contentPath;
@@ -10055,7 +10060,7 @@ ${summarizeBankRowErrors(rowErrors)}`
       if (epoch !== this.loadEpoch) return;
       this.saveState();
       this.startAutoSave();
-      (_b = (_a = this.plugin).refreshMemoryReminder) == null ? void 0 : _b.call(_a);
+      (_d = (_c = this.plugin).refreshMemoryReminder) == null ? void 0 : _d.call(_c);
       new import_obsidian6.Notice(
         wasSwitching ? "\u5DF2\u5207\u6362\u9898\u5E93" : preserveState ? "\u56FE\u7247\u9898\u5E93\u5DF2\u5237\u65B0" : "\u5DF2\u5237\u65B0\uFF0C\u91CD\u65B0\u5F00\u59CB"
       );
@@ -10934,6 +10939,119 @@ var StateManager = class {
     }
     return result;
   }
+  /** sidecar 是否含用户进度（answered / memoryCards / 对错计数 / meta 任一非空）。 */
+  sidecarHasProgress(data) {
+    const s = data.state;
+    return Object.keys(s.answeredQuestions).length > 0 || s.memoryCards !== void 0 && Object.keys(s.memoryCards).length > 0 || s.correctCount > 0 || s.wrongCount > 0 || Object.keys(data.meta).length > 0;
+  }
+  /**
+   * manifest 复合题库：把组成内容源（content/contents/图片文件夹）的 sidecar 一次性
+   * 并入 manifest 锚点的 sidecar（5.0.0 遗留问题：复合题库加载了全部题目，但
+   * manifest.sidecar.json 是新建空状态，组成 sidecar 里的进度全部不可见）。
+   *
+   * - 目标缺失 → 以空状态为 base；目标损坏 → error（不覆盖，避免丢数据）
+   * - 目标已有任何进度 → skipped/target-has-progress（避免重复累计）
+   * - 组成按写入时间参与 mergeSidecarData（answered/meta/memoryCards 并集，base 优先），
+   *   对错计数/每日答题量按累计口径求和，会话字段（displayOrder/currentIndex/filter*）
+   *   一律保留目标值（缺失时为空，后续由视图重建）
+   * - 不删除/不归档任何组成 sidecar（保留回退数据源）
+   */
+  async mergeManifestComponentSidecars(targetAnchor, componentAnchors, defaultFilters) {
+    var _a, _b, _c;
+    const target = targetAnchor.trim();
+    if (target === "") return { status: "skipped" };
+    const targetResult = await readSidecar(this.vault, target);
+    if (targetResult.status === "corrupt") {
+      console.error(
+        "CSV Quiz: manifest sidecar \u635F\u574F\uFF0C\u8DF3\u8FC7\u7EC4\u6210\u4FA7\u8FDB\u5EA6\u5408\u5E76",
+        target,
+        targetResult.reason
+      );
+      return { status: "error", reason: "target-corrupt" };
+    }
+    let targetData;
+    let targetTs = 0;
+    if (targetResult.status === "missing") {
+      const { csvPath: _csvPath, ...emptyState } = this.emptySessionState(defaultFilters);
+      void _csvPath;
+      targetData = { version: 1, meta: {}, state: { ...emptyState } };
+    } else {
+      targetData = targetResult.data;
+      targetTs = await this.sidecarTimestampMs(target, targetResult.data);
+      if (this.sidecarHasProgress(targetData)) {
+        return { status: "skipped", reason: "target-has-progress" };
+      }
+    }
+    const seen = /* @__PURE__ */ new Set();
+    const components = [];
+    for (const rawAnchor of componentAnchors) {
+      const anchor = rawAnchor.trim();
+      if (anchor === "" || anchor === target || seen.has(anchor)) continue;
+      seen.add(anchor);
+      const result = await readSidecar(this.vault, anchor);
+      if (result.status === "missing") continue;
+      if (result.status === "corrupt") {
+        console.error(
+          "CSV Quiz: \u7EC4\u6210\u5185\u5BB9\u6E90 sidecar \u635F\u574F\uFF0C\u8DF3\u8FC7\u5408\u5E76",
+          anchor,
+          result.reason
+        );
+        continue;
+      }
+      if (!this.sidecarHasProgress(result.data)) continue;
+      components.push({
+        path: sidecarPathFor(anchor),
+        data: result.data,
+        tsMs: await this.sidecarTimestampMs(anchor, result.data)
+      });
+    }
+    if (components.length === 0) {
+      return { status: "skipped", reason: "no-component-progress" };
+    }
+    const merge = mergeSidecarData(targetData, targetTs, components);
+    let correctCount = targetData.state.correctCount;
+    let wrongCount = targetData.state.wrongCount;
+    const dailyAnswers = {
+      ...(_a = targetData.state.dailyAnswers) != null ? _a : {}
+    };
+    let memoryInitialized = targetData.state.memoryInitialized === true;
+    for (const component of components) {
+      correctCount += component.data.state.correctCount;
+      wrongCount += component.data.state.wrongCount;
+      memoryInitialized = memoryInitialized || component.data.state.memoryInitialized === true;
+      for (const [date, count] of Object.entries(
+        (_b = component.data.state.dailyAnswers) != null ? _b : {}
+      )) {
+        dailyAnswers[date] = ((_c = dailyAnswers[date]) != null ? _c : 0) + count;
+      }
+    }
+    const mergedData = {
+      version: 1,
+      meta: merge.data.meta,
+      state: {
+        ...merge.data.state,
+        // 会话字段（displayOrder/currentIndex/filter*）取自 base（target）
+        correctCount,
+        wrongCount,
+        dailyAnswers: Object.keys(dailyAnswers).length > 0 ? dailyAnswers : void 0,
+        memoryInitialized,
+        updatedAt: Date.now()
+      }
+    };
+    try {
+      await writeSidecar(this.vault, target, mergedData);
+    } catch (e) {
+      console.error("CSV Quiz: \u5199\u5165 manifest \u5408\u5E76\u540E sidecar \u5931\u8D25", target, e);
+      return { status: "error", reason: "write-failed" };
+    }
+    return {
+      status: "merged",
+      mergedComponents: components.length,
+      addedAnswers: merge.addedAnswers,
+      correctCount,
+      wrongCount
+    };
+  }
   /**
    * 设置保存防抖：设置面板每次击键都会触发，合并为最后一次变更后 400ms 写入一次。
    * 使用"共享 promise"语义：每次调用都会登记一个 resolve，由最终那次写入完成后统一
@@ -10993,6 +11111,16 @@ function normalizeBankSingleSources(raw) {
 function normalizeSourceType2(raw) {
   return raw === "csv" || raw === "image" || raw === "manifest" ? raw : "";
 }
+function normalizeManifestMerged(raw) {
+  const out = {};
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [key, value] of Object.entries(raw)) {
+    const anchor = key.trim();
+    if (anchor === "" || value !== true) continue;
+    out[anchor] = true;
+  }
+  return out;
+}
 function normalizeSourcePath(type, raw) {
   const value = typeof raw === "string" ? raw.trim() : "";
   if (type === "image" || type === "manifest") return normalizeBankFolder(value);
@@ -11014,6 +11142,8 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
     this.legacyBankFolder = "";
     this.legacyBankSingleSources = {};
     this.settingTab = null;
+    /** manifest 组成 sidecar 合并的并发锁：同锚点复用同一 promise，避免重复合并导致统计翻倍。 */
+    this.manifestMergePromises = /* @__PURE__ */ new Map();
   }
   async onload() {
     this.stateManager = new StateManager(this);
@@ -11387,7 +11517,8 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
       keyOptionD: toBinding(raw.keyOptionD, DEFAULT_SETTINGS.keyOptionD),
       keyFavorite: toBinding(raw.keyFavorite, DEFAULT_SETTINGS.keyFavorite),
       keyMastered: toBinding(raw.keyMastered, DEFAULT_SETTINGS.keyMastered),
-      keyRepeat: toBinding(raw.keyRepeat, DEFAULT_SETTINGS.keyRepeat)
+      keyRepeat: toBinding(raw.keyRepeat, DEFAULT_SETTINGS.keyRepeat),
+      manifestMerged: normalizeManifestMerged(raw.manifestMerged)
     };
   }
   async saveSettings() {
@@ -11402,6 +11533,83 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
     var _a;
     return ((_a = this.bankStatus) == null ? void 0 : _a.status) === "ok" ? this.bankStatus.source.anchor : "";
   }
+  /**
+   * manifest 复合题库：确保组成内容源的 sidecar 进度已一次性并入 manifest 锚点 sidecar。
+   * - 仅 manifest 模式；已合并过的锚点（settings.manifestMerged）直接返回
+   * - 同锚点并发调用复用同一 promise（onload 与视图可能同时触发）
+   * - 任何失败都不抛出（合并失败不应变成题库加载失败）
+   */
+  async ensureManifestSidecarMerged(source) {
+    if (source.mode !== "manifest") return;
+    const key = source.anchor.trim();
+    if (key === "") return;
+    if (this.settings.manifestMerged[key] === true) return;
+    const pending = this.manifestMergePromises.get(key);
+    if (pending) return pending;
+    const task = this.runManifestSidecarMerge(source, key).finally(() => {
+      this.manifestMergePromises.delete(key);
+    });
+    this.manifestMergePromises.set(key, task);
+    return task;
+  }
+  /** ensureManifestSidecarMerged 的实际执行体（结果只记录日志/提示，不抛出）。 */
+  async runManifestSidecarMerge(source, key) {
+    var _a, _b, _c, _d, _e;
+    const components = [];
+    const seen = /* @__PURE__ */ new Set();
+    const push = (anchor) => {
+      const value = (anchor != null ? anchor : "").trim();
+      if (value === "" || value === key || seen.has(value)) return;
+      seen.add(value);
+      components.push(value);
+    };
+    for (const contentPath of source.contentPaths) push(contentPath);
+    const imageFolder = ((_a = source.imageFolder) != null ? _a : "").trim();
+    if (imageFolder !== "") {
+      push(imageFolder === "/" ? ROOT_IMAGE_ANCHOR : imageFolder);
+    }
+    if (components.length === 0) {
+      this.settings.manifestMerged[key] = true;
+      await this.saveSettings();
+      return;
+    }
+    try {
+      const result = await this.stateManager.mergeManifestComponentSidecars(
+        key,
+        components,
+        {
+          favorite: this.settings.defaultFilterFavorite,
+          mastered: this.settings.defaultFilterMastered,
+          repeat: this.settings.defaultFilterRepeat,
+          wrong: this.settings.defaultFilterWrong
+        }
+      );
+      if (result.status === "merged") {
+        this.settings.manifestMerged[key] = true;
+        await this.saveSettings();
+        console.info(
+          `CSV Quiz: \u5DF2\u628A ${(_b = result.mergedComponents) != null ? _b : 0} \u4E2A\u7EC4\u6210 sidecar \u5E76\u5165 manifest \u8FDB\u5EA6\uFF08\u65B0\u589E\u7B54\u9898 ${(_c = result.addedAnswers) != null ? _c : 0} \u6761\uFF0C\u2705${(_d = result.correctCount) != null ? _d : 0} / \u274C${(_e = result.wrongCount) != null ? _e : 0}\uFF09`
+        );
+        return;
+      }
+      if (result.reason === "target-has-progress") {
+        this.settings.manifestMerged[key] = true;
+        await this.saveSettings();
+        return;
+      }
+      if (result.reason === "no-component-progress") {
+        return;
+      }
+      console.error(
+        "CSV Quiz: manifest \u7EC4\u6210 sidecar \u5408\u5E76\u672A\u5B8C\u6210",
+        key,
+        result.status,
+        result.reason
+      );
+    } catch (e) {
+      console.error("CSV Quiz: manifest \u7EC4\u6210 sidecar \u5408\u5E76\u5931\u8D25", key, e);
+    }
+  }
   /** 确保当前题库的 sidecar 状态已载入内存（无视图时面板未载入）。返回是否可用。 */
   async ensureSidecarLoaded(notice = true) {
     const res = await this.resolveBank();
@@ -11409,6 +11617,7 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
       if (notice) new import_obsidian8.Notice(res.message);
       return false;
     }
+    await this.ensureManifestSidecarMerged(res.source);
     const anchor = res.source.anchor;
     const st = this.stateManager.getState();
     if (st !== null && this.stateManager.getContentPath() === anchor) {
