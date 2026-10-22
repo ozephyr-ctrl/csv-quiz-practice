@@ -63,7 +63,14 @@ import {
   type ImageRatingKey,
 } from "./imageBank";
 import { renderImageQuestionUi } from "./imageQuestionUi";
-import { resolveContentPath } from "./contentSource";
+import {
+  normalizeBankFolder,
+  resolveBankSource,
+  manifestAnchorForBank,
+  type BankResolution,
+  type ResolvedBankSource,
+} from "./bankResolver";
+import { sidecarPathFor } from "./sidecar";
 
 /** FSRS 调度器单例：纯函数调度、不持有状态，可跨会话复用（模块级）。 */
 const memoryScheduler = fsrs();
@@ -106,6 +113,12 @@ export class QuizView extends ItemView {
   private csvPath: string = "";
   /** 图片题文件夹（vault 相对路径；空串=不启用）。 */
   private imageFolder: string = "";
+  /** 当前题库的 sidecar 锚点（复合题库为 <folder>/manifest）。 */
+  private sourceAnchor: string = "";
+  /** 最近一次来源解析结果（用于设置页/诊断）。 */
+  private sourceResolution: BankResolution | null = null;
+  /** 当前来源所属题库文件夹（用于区分同库锚点迁移与切换题库）。 */
+  private sourceBankFolder: string = "";
   /** 未展示答案时的脱敏图片地址（blob URL，不含文件名）；仅缓存当前题。 */
   private imageBlobUrl: string | null = null;
   private imageBlobPath: string | null = null;
@@ -388,9 +401,6 @@ export class QuizView extends ItemView {
     // 避免读到尚未落盘的旧磁盘设置导致竞态。settings 已由 main 的 loadSettings 加载，
     // 不再调用 loadPluginData（外部修改检测留到阶段 3 处理）。
     const settings = this.getSettings();
-    this.csvPath = settings.csvPath;
-    this.imageFolder = settings.imageFolder;
-    const contentPath = this.getContentPath();
 
     // 3A: 捕获加载前的内存进度（用于 sidecar 外部修改检测；loadSidecar 会覆盖 currentState）
     const inMemoryState = this.stateManager.getState();
@@ -406,6 +416,20 @@ export class QuizView extends ItemView {
     // onClose() 会因 getState() 为 null 而跳过保存，避免用默认值覆盖磁盘进度。
     // 成功加载路径末尾的 saveState() 会重新设置正确的 currentState。
     this.stateManager.setState(null);
+
+    // 解析题库来源（manifest / 唯一 CSV / 仅图片）；prompt=both 时提供“仅用 CSV”
+    const source = await this.resolveSourceForView(true);
+    if (this.isClosed) return;
+    if (epoch !== this.loadEpoch) return;
+    if (!source) {
+      this.canPersistState = false;
+      this.startAutoSave();
+      return;
+    }
+    this.applyResolvedSource(source);
+    await this.migrateManifestSidecar(source, "", "");
+    if (this.isClosed || epoch !== this.loadEpoch) return;
+    const contentPath = source.anchor;
 
     // 载入题库（loadQuestions 内部含 id 质量门槛：空/重复题号拒绝加载）
     const status = await this.loadQuestions();
@@ -4148,10 +4172,13 @@ export class QuizView extends ItemView {
   async refresh(preserveState: boolean = false): Promise<void> {
     // M2: 记录本次加载世代号（新流程开始会自增，使本流程过期）
     const epoch = ++this.loadEpoch;
+    const hadPersistableState =
+      this.canPersistState && this.stateManager.getState() !== null;
     this.canPersistState = false;
     await this.saveCurrentEdit();
-    // 手动刷新图片题库：保留当前内存进度，先立即落盘，避免 loadSidecar 覆盖未保存状态
-    if (preserveState && !this.isClosed) {
+    // 手动刷新图片题库：保留当前内存进度，先立即落盘，避免 loadSidecar 覆盖未保存状态。
+    // 未就绪视图（canPersistState=false / contentPath=null）不得写兼容模式空状态。
+    if (preserveState && !this.isClosed && hadPersistableState) {
       try {
         await this.stateManager.saveStateImmediately(this.buildCurrentState());
       } catch (e) {
@@ -4174,14 +4201,33 @@ export class QuizView extends ItemView {
     }
 
     const settings = this.getSettings();
-    this.csvPath = settings.csvPath;
-    this.imageFolder = settings.imageFolder;
-    const contentPath = this.getContentPath();
+    const oldAnchor =
+      this.sourceAnchor || this.stateManager.getContentPath() || "";
+    const oldBankFolder = this.sourceBankFolder;
+    const source = await this.resolveSourceForView(!preserveState);
+    if (this.isClosed) {
+      this.canPersistState = true;
+      return;
+    }
+    if (epoch !== this.loadEpoch) return;
+    if (!source) {
+      if (preserveState) {
+        // 手动刷新失败：保留旧视图/旧锚点，可继续使用
+        this.canPersistState = true;
+        this.startAutoSave();
+      } else {
+        this.canPersistState = false;
+        this.startAutoSave();
+      }
+      return;
+    }
+    this.applyResolvedSource(source);
+    await this.migrateManifestSidecar(source, oldAnchor, oldBankFolder);
+    if (this.isClosed || epoch !== this.loadEpoch) return;
+    const contentPath = source.anchor;
 
-    // S1: 判定本次刷新语义——切换题库（内容源变了，含 changeQuizPath 已 unloadSidecar
+    // S1: 判定本次刷新语义——切换题库（内容源变了，含 change* 已 unloadSidecar
     // 使 contentPath 为 null 的情况）或同一题库的重置刷新。
-    // 注意：不能用 task 提示的 `!== null && !== csvPath` 公式——changeQuizPath 先调用
-    // unloadSidecar 把 contentPath 置 null，按旧公式会漏判主切换流导致目标题库进度被清空。
     const wasSwitching =
       this.stateManager.getContentPath() !== contentPath;
     // T4: 切换题库时 contentMtimeMs 是旧题库的 mtime，先清空避免跨文件误报
@@ -4354,8 +4400,139 @@ export class QuizView extends ItemView {
   }
 
   /** 当前内容源锚点：CSV/CQV 优先，否则图片文件夹；sidecar 命名与状态匹配共用。 */
+  /** 当前内容源锚点：manifest 复合题库为 <folder>/manifest；单一来源为内容路径。 */
   private getContentPath(): string {
-    return resolveContentPath(this.csvPath, this.imageFolder);
+    return this.sourceAnchor;
+  }
+
+  /** 应用解析结果到视图的读取路径。 */
+  private applyResolvedSource(source: ResolvedBankSource): void {
+    this.csvPath = source.contentPath;
+    this.imageFolder = source.imageFolder;
+    this.sourceAnchor = source.anchor;
+    this.sourceBankFolder = source.bankFolder;
+  }
+
+  /**
+   * 解析当前题库来源。prompt=both 时提供「仅用 CSV」快捷选择并写入设置；
+   * 其它 prompt/error 返回 null。调用方决定是否 showError/保留旧视图。
+   */
+  private async resolveSourceForView(
+    showErrorOnFailure: boolean
+  ): Promise<ResolvedBankSource | null> {
+    const settings = this.getSettings();
+    const resolve = () =>
+      resolveBankSource(this.vault, {
+        bankFolder: settings.bankFolder,
+        bankSingleSources: settings.bankSingleSources,
+      });
+
+    let resolution: BankResolution = await resolve();
+    this.sourceResolution = resolution;
+    (this.plugin as unknown as { bankStatus?: BankResolution | null }).bankStatus =
+      resolution;
+
+    if (
+      resolution.status === "prompt" &&
+      resolution.reason === "both" &&
+      resolution.csvCandidate
+    ) {
+      const modal = new ChoiceModal(this.app, {
+        title: "题库来源需要确认",
+        message: resolution.message,
+        options: [
+          { label: "仅用 CSV", value: "csv", cta: true },
+          { label: "取消", value: "cancel" },
+        ],
+      });
+      modal.open();
+      const choice = await modal.promise;
+      if (this.isClosed) return null;
+      if (choice === "csv") {
+        const key = normalizeBankFolder(settings.bankFolder);
+        settings.bankSingleSources[key] = "csv";
+        await (this.plugin as unknown as {
+          saveSettings?: () => Promise<void>;
+        }).saveSettings?.();
+        resolution = await resolve();
+        this.sourceResolution = resolution;
+        (this.plugin as unknown as {
+          bankStatus?: BankResolution | null;
+        }).bankStatus = resolution;
+      } else {
+        return null;
+      }
+    }
+
+    if (resolution.status === "ok") return resolution.source;
+
+    const message =
+      resolution.status === "error" || resolution.status === "prompt"
+        ? resolution.message
+        : "无法解析题库来源";
+    new Notice(message);
+    if (showErrorOnFailure) this.showError(message);
+    return null;
+  }
+
+  /** 复合题库首次启用/删除时正向/反向迁移 sidecar；仅同题库文件夹内做旧锚点转移。 */
+  private async migrateManifestSidecar(
+    source: ResolvedBankSource,
+    oldAnchor: string,
+    oldBankFolder: string
+  ): Promise<void> {
+    if (source.mode === "manifest") {
+      try {
+        const manifestSidecar = sidecarPathFor(source.anchor);
+        if (
+          !(await this.vault.adapter.exists(manifestSidecar)) &&
+          source.contentPath
+        ) {
+          await this.stateManager.transferSidecar(
+            source.contentPath,
+            source.anchor
+          );
+        }
+      } catch (e) {
+        console.error("CSV Quiz: 迁移 manifest sidecar 失败", e);
+      }
+    } else {
+      // manifest 已删除：把 manifest.sidecar.json 反向迁移到当前单源锚点
+      const manifestAnchor = manifestAnchorForBank(source.bankFolder);
+      if (manifestAnchor !== source.anchor) {
+        try {
+          const manifestSidecar = sidecarPathFor(manifestAnchor);
+          if (await this.vault.adapter.exists(manifestSidecar)) {
+            const transfer = await this.stateManager.transferSidecar(
+              manifestAnchor,
+              source.anchor
+            );
+            if (
+              transfer.status === "copied" ||
+              transfer.status === "merged"
+            ) {
+              await this.stateManager.archiveSidecar(manifestAnchor);
+            }
+          }
+        } catch (e) {
+          console.error("CSV Quiz: manifest sidecar 反向迁移失败", e);
+        }
+      }
+    }
+    // 同一题库文件夹内锚点变化（manifest 新建/删除）才做通用转移；
+    // 换题库文件夹属于换库，不能把旧库进度并入新库。
+    if (
+      oldBankFolder !== "" &&
+      oldBankFolder === source.bankFolder &&
+      oldAnchor &&
+      oldAnchor !== source.anchor
+    ) {
+      try {
+        await this.stateManager.transferSidecar(oldAnchor, source.anchor);
+      } catch (e) {
+        console.error("CSV Quiz: 切换来源锚点时迁移状态失败", e);
+      }
+    }
   }
 
   private buildCurrentState(): QuizSessionState {

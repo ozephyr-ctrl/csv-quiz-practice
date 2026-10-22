@@ -881,6 +881,25 @@ export class StateManager {
   }
 
   /**
+   * 把某内容源的 sidecar 归档为 `.merged`（不删除数据）。
+   * 用于 manifest 删除后反向迁移完成、避免下次启动重复合并旧快照。
+   */
+  async archiveSidecar(contentPath: string): Promise<void> {
+    if (contentPath === "") return;
+    const srcPath = sidecarPathFor(contentPath);
+    const dstPath = `${srcPath}.merged`;
+    try {
+      if (!(await this.vault.adapter.exists(srcPath))) return;
+      if (await this.vault.adapter.exists(dstPath)) {
+        await this.vault.adapter.remove(dstPath);
+      }
+      await this.vault.adapter.rename(srcPath, dstPath);
+    } catch (e) {
+      console.error("CSV Quiz: 归档 sidecar 失败", srcPath, e);
+    }
+  }
+
+  /**
    * 把 from 内容源的 sidecar 复制/合并到 to 内容源（不删除 from）。
    * 用于「图片文件夹-only ↔ CSV 锚点」切换：用户补上/去掉 CSV 路径时，
    * 让进度跟随内容源迁移，且保留源文件以便回退。

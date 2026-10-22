@@ -495,7 +495,9 @@ var DEFAULT_SETTINGS = {
   keyFavorite: "m",
   keyMastered: "e",
   keyRepeat: "x",
-  imageFolder: ""
+  imageFolder: "",
+  bankFolder: "",
+  bankSingleSources: {}
 };
 
 // src/settings.ts
@@ -1610,28 +1612,8 @@ function mergeSidecarData(base, baseTsMs, others) {
   };
 }
 
-// src/contentSource.ts
-function normalizeVaultFolder(raw) {
-  if (!raw) return "";
-  const segments = raw.trim().replace(/\\/g, "/").split("/");
-  const out = [];
-  for (const segment of segments) {
-    if (segment === "" || segment === ".") continue;
-    if (segment === "..") {
-      out.pop();
-      continue;
-    }
-    out.push(segment);
-  }
-  return out.join("/");
-}
-function resolveContentPath(csvPath, imageFolder) {
-  const trimmed = csvPath.trim();
-  if (trimmed !== "") return trimmed;
-  return normalizeVaultFolder(imageFolder);
-}
-
 // src/settings.ts
+var BANK_FOLDER_DESC = "vault \u5185\u7684\u9898\u5E93\u6587\u4EF6\u5939\uFF1A\u6587\u4EF6\u5939\u5185\u6709 manifest.json \u89C6\u4E3A\u590D\u5408\u9898\u5E93\uFF08CSV/CQV + \u56FE\u7247\u5E76\u7528\uFF09\uFF1B\u5426\u5219\u81EA\u52A8\u8BC6\u522B\u552F\u4E00\u7684 CSV/CQV \u6216\u4EC5\u56FE\u7247\uFF1Bvault \u6839\u7528 / \u8868\u793A\u3002";
 var KEY_BINDING_SETTING_KEYS = /* @__PURE__ */ new Set([
   "keyOptionA",
   "keyOptionB",
@@ -1657,38 +1639,29 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
     return [
       { name: "\u5237\u9898\u554A - \u8BBE\u7F6E" },
       {
-        name: "CSV \u6587\u4EF6\u8DEF\u5F84",
-        desc: "\u9898\u5E93\u6587\u4EF6\u76F8\u5BF9\u4E8E\u5E93\u6839\u76EE\u5F55\u7684\u8DEF\u5F84\uFF08.csv \u6216\u7F16\u8BD1\u4EA7\u7269 .cqv\uFF09\uFF1B\u7559\u7A7A\u5219\u53EA\u4F7F\u7528\u56FE\u7247\u9898\u3002\u72B6\u6001\u6587\u4EF6: " + this.contentSidecarLabel(),
-        control: {
-          type: "file",
-          key: "csvPath",
-          defaultValue: DEFAULT_SETTINGS.csvPath,
-          filter: (file) => file.extension === "csv" || file.extension === "cqv"
-        }
-      },
-      {
-        name: "\u56FE\u7247\u9898\u6587\u4EF6\u5939",
-        desc: "vault \u5185\u6587\u4EF6\u5939\uFF08\u9012\u5F52\u626B\u63CF png/jpg/jpeg/webp/gif/bmp\uFF09\uFF1B\u6587\u4EF6\u540D\u53BB\u6269\u5C55\u540D=\u7B54\u6848\uFF0C\u56FE\u7247=\u9898\u5E72\u3002\u5F00\u542F\u8BB0\u5FC6\u7EC3\u4E60\u540E\u5C55\u793A\u56DB\u7EA7\u8BC4\u5206\u3002",
+        name: "\u9898\u5E93\u6587\u4EF6\u5939",
+        desc: BANK_FOLDER_DESC,
         control: {
           type: "folder",
-          key: "imageFolder",
-          defaultValue: DEFAULT_SETTINGS.imageFolder,
-          placeholder: "\u4F8B\u5982\uFF1A\u56FE\u7247\u9898",
-          filter: (folder) => !folder.path.split("/").some((p) => p.startsWith("."))
+          key: "bankFolder",
+          defaultValue: DEFAULT_SETTINGS.bankFolder,
+          placeholder: "\u4F8B\u5982\uFF1A\u9898\u5E93/\u884C\u6D4B\uFF08\u6839\u76EE\u5F55\u7528 /\uFF09",
+          includeRoot: true,
+          filter: (folder) => !folder.path.split("/").some((segment) => segment.startsWith("."))
         }
       },
       {
-        name: "\u4EC5\u4F7F\u7528\u56FE\u7247\u9898",
-        desc: "\u6E05\u7A7A CSV/CQV \u8DEF\u5F84\uFF0C\u53EA\u52A0\u8F7D\u56FE\u7247\u9898\u6587\u4EF6\u5939\uFF1B\u56FE\u7247\u6587\u4EF6\u5939\u4E3A\u7A7A\u65F6\u4F1A\u63D0\u793A\u65E0\u6CD5\u52A0\u8F7D\u3002",
-        action: () => {
-          void this.plugin.changeQuizPath("");
+        name: "\u9898\u5E93\u89E3\u6790\u72B6\u6001",
+        render: (setting) => {
+          this.renderBankStatus(setting.descEl);
         }
       },
       {
-        name: "\u6E05\u9664\u56FE\u7247\u9898\u6587\u4EF6\u5939",
-        desc: "\u5173\u95ED\u56FE\u7247\u9898\u6A21\u5F0F\uFF1B\u82E5\u540C\u65F6\u6CA1\u6709 CSV/CQV\uFF0C\u5C06\u65E0\u6CD5\u52A0\u8F7D\u9898\u76EE\u3002",
+        name: "\u4EC5\u7528 CSV",
+        desc: "\u5F53\u524D\u9898\u5E93\u6587\u4EF6\u5939\u540C\u65F6\u5305\u542B CSV/CQV \u4E0E\u56FE\u7247\uFF1B\u9009\u62E9\u540E\u53EA\u52A0\u8F7D CSV/CQV\uFF08\u5982\u9700\u4E24\u8005\u5E76\u7528\u8BF7\u5728\u8BE5\u6587\u4EF6\u5939\u521B\u5EFA manifest.json\uFF09\u3002",
+        visible: () => this.isCsvChoicePrompt(),
         action: () => {
-          void this.plugin.changeImageFolder("");
+          void this.plugin.useCsvOnly();
         }
       },
       {
@@ -1908,10 +1881,10 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
             }
           },
           {
-            name: "\u5237\u65B0\u56FE\u7247\u9898\u5E93",
-            desc: "\u91CD\u65B0\u626B\u63CF\u56FE\u7247\u9898\u6587\u4EF6\u5939\uFF08\u65B0\u589E/\u5220\u9664/\u66FF\u6362\u56FE\u7247\uFF09\uFF0C\u4FDD\u7559\u7B54\u9898\u8BB0\u5F55\u4E0E FSRS \u5361\u7247\uFF1B\u9700\u9762\u677F\u5DF2\u6253\u5F00",
+            name: "\u5237\u65B0\u9898\u5E93",
+            desc: "\u91CD\u65B0\u89E3\u6790\u9898\u5E93\u6587\u4EF6\u5939\uFF08manifest/CSV/\u56FE\u7247\u7684\u65B0\u589E\u3001\u5220\u9664\u6216\u66FF\u6362\uFF09\uFF0C\u4FDD\u7559\u7B54\u9898\u8BB0\u5F55\u4E0E FSRS \u5361\u7247\uFF1B\u9700\u9762\u677F\u5DF2\u6253\u5F00",
             action: () => {
-              void this.plugin.refreshImageBank();
+              void this.plugin.refreshBank();
             }
           },
           {
@@ -1945,12 +1918,8 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
    * 从而覆盖整个 data.json 并丢失 quizState。
    */
   async setControlValue(key, value) {
-    if (key === "csvPath") {
-      await this.plugin.changeQuizPath(String(value));
-      return;
-    }
-    if (key === "imageFolder") {
-      await this.plugin.changeImageFolder(String(value));
+    if (key === "bankFolder") {
+      await this.plugin.changeBankFolder(String(value));
       return;
     }
     if (key === "randomOrder") {
@@ -2013,8 +1982,8 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     new import_obsidian3.Setting(containerEl).setName("\u5237\u9898\u554A - \u8BBE\u7F6E").setHeading();
-    this.addCSVPathSetting(containerEl);
-    this.addImageFolderSetting(containerEl);
+    this.addBankFolderSetting(containerEl);
+    this.addBankStatusSetting(containerEl);
     this.addToggleSetting(
       containerEl,
       "\u968F\u673A\u9898\u76EE\u987A\u5E8F",
@@ -2176,11 +2145,11 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
         void this.handleResetProgress();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("\u5237\u65B0\u56FE\u7247\u9898\u5E93").setDesc(
-      "\u91CD\u65B0\u626B\u63CF\u56FE\u7247\u9898\u6587\u4EF6\u5939\uFF08\u65B0\u589E/\u5220\u9664/\u66FF\u6362\u56FE\u7247\uFF09\uFF0C\u4FDD\u7559\u7B54\u9898\u8BB0\u5F55\u4E0E FSRS \u5361\u7247\uFF1B\u9700\u9762\u677F\u5DF2\u6253\u5F00"
+    new import_obsidian3.Setting(containerEl).setName("\u5237\u65B0\u9898\u5E93").setDesc(
+      "\u91CD\u65B0\u89E3\u6790\u9898\u5E93\u6587\u4EF6\u5939\uFF08manifest/CSV/\u56FE\u7247\u7684\u65B0\u589E\u3001\u5220\u9664\u6216\u66FF\u6362\uFF09\uFF0C\u4FDD\u7559\u7B54\u9898\u8BB0\u5F55\u4E0E FSRS \u5361\u7247\uFF1B\u9700\u9762\u677F\u5DF2\u6253\u5F00"
     ).addButton(
       (btn) => btn.setButtonText("\u5237\u65B0").onClick(() => {
-        void this.plugin.refreshImageBank();
+        void this.plugin.refreshBank();
       })
     );
     new import_obsidian3.Setting(containerEl).setName("\u4F18\u5316\u9898\u5E93").setDesc("\u628A\u5F53\u524D CSV \u9898\u5E93\u7F16\u8BD1\u4E3A\u5206\u53D1\u4EA7\u7269 .cqv\uFF08\u9700\u9762\u677F\u5DF2\u6253\u5F00\uFF09").addButton(
@@ -2194,83 +2163,78 @@ var CSVQuizSettingTab = class extends import_obsidian3.PluginSettingTab {
       })
     );
   }
-  /** 当前内容源 sidecar 展示文本（CSV/CQV 或图片文件夹）。 */
-  contentSidecarLabel() {
-    const anchor = resolveContentPath(
-      this.plugin.settings.csvPath,
-      this.plugin.settings.imageFolder
-    );
-    return anchor ? sidecarPathFor(anchor) : "\uFF08\u672A\u8BBE\u7F6E\u5185\u5BB9\u6E90\uFF09";
+  /** 是否处于「CSV 与图片并存」的待选择状态。 */
+  isCsvChoicePrompt() {
+    const status = this.plugin.bankStatus;
+    return status !== null && status.status === "prompt" && status.reason === "both" && !!status.csvCandidate;
   }
-  addCSVPathSetting(containerEl) {
-    let textComponent = null;
-    new import_obsidian3.Setting(containerEl).setName("CSV \u6587\u4EF6\u8DEF\u5F84").setDesc(
-      "\u9898\u5E93\u6587\u4EF6\u76F8\u5BF9\u4E8E\u5E93\u6839\u76EE\u5F55\u7684\u8DEF\u5F84\uFF08.csv \u6216\u7F16\u8BD1\u4EA7\u7269 .cqv\uFF09\uFF1B\u7559\u7A7A\u5219\u53EA\u4F7F\u7528\u56FE\u7247\u9898\u3002\u72B6\u6001\u6587\u4EF6: " + this.contentSidecarLabel()
-    ).addText((text) => {
-      textComponent = text;
-      const originalPath = this.plugin.settings.csvPath;
-      text.setPlaceholder("\u9898\u5E93.csv").setValue(originalPath);
-      text.inputEl.addEventListener("change", () => {
-        const finalValue = text.inputEl.value;
-        if (finalValue !== this.plugin.settings.csvPath) {
-          void this.plugin.changeQuizPath(finalValue);
-        }
-      });
-    }).addButton((btn) => {
-      btn.setButtonText("\u4ECE\u5E93\u4E2D\u9009\u62E9").onClick(() => this.pickCSVFile());
-    }).addButton((btn) => {
-      btn.setButtonText("\u6E05\u7A7A").onClick(() => {
-        if (textComponent) textComponent.inputEl.value = "";
-        void this.plugin.changeQuizPath("");
-      });
-    });
-  }
-  addImageFolderSetting(containerEl) {
-    let suggest = null;
-    let textComponent = null;
-    new import_obsidian3.Setting(containerEl).setName("\u56FE\u7247\u9898\u6587\u4EF6\u5939").setDesc(
-      "vault \u5185\u6587\u4EF6\u5939\uFF08\u9012\u5F52\u626B\u63CF png/jpg/jpeg/webp/gif/bmp\uFF09\uFF1B\u6587\u4EF6\u540D\u53BB\u6269\u5C55\u540D=\u7B54\u6848\uFF0C\u56FE\u7247=\u9898\u5E72\uFF1B\u5206\u7C7B\u4E3A \u8BC6\u56FE/\u4E00\u7EA7\u5B50\u6587\u4EF6\u5939/\u4E8C\u7EA7\u5B50\u6587\u4EF6\u5939\u3002"
-    ).addText((text) => {
-      textComponent = text;
-      const originalPath = this.plugin.settings.imageFolder;
-      text.setPlaceholder("\u4F8B\u5982\uFF1A\u56FE\u7247\u9898").setValue(originalPath);
-      text.inputEl.addEventListener("change", () => {
-        const finalValue = normalizeVaultFolder(text.inputEl.value);
-        text.setValue(finalValue);
-        if (finalValue !== this.plugin.settings.imageFolder) {
-          void this.plugin.changeImageFolder(finalValue);
-        }
-      });
-      suggest = new FolderSuggest(this.app, text.inputEl);
-      suggest.onSelect((folder) => {
-        const next = normalizeVaultFolder(folder.path);
-        text.setValue(next);
-        if (next !== this.plugin.settings.imageFolder) {
-          void this.plugin.changeImageFolder(next);
-        }
-      });
-    }).addButton((btn) => {
-      btn.setButtonText("\u6E05\u7A7A").onClick(() => {
-        if (textComponent) textComponent.inputEl.value = "";
-        suggest == null ? void 0 : suggest.close();
-        void this.plugin.changeImageFolder("");
-      });
-    });
-  }
-  pickCSVFile() {
-    const csvFiles = this.app.vault.getFiles().filter((f) => f.extension === "csv" || f.extension === "cqv").map((f) => f.path);
-    if (csvFiles.length === 0) {
-      new import_obsidian3.Notice("\u5E93\u4E2D\u6CA1\u6709\u627E\u5230\u9898\u5E93\u6587\u4EF6\uFF08.csv / .cqv\uFF09");
-      return;
+  /** 解析结果的模式标签。 */
+  bankModeLabel(status) {
+    if (status === null) return "\u672A\u89E3\u6790";
+    if (status.status === "error") return "\u9519\u8BEF";
+    if (status.status === "prompt") return "\u672A\u89E3\u6790";
+    switch (status.source.mode) {
+      case "manifest":
+        return "\u590D\u5408\u9898\u5E93\uFF08manifest.json\uFF09";
+      case "csv":
+        return "\u6587\u5B57\u9898\u5E93\uFF08CSV/CQV\uFF09";
+      case "image":
+        return "\u56FE\u7247\u9898\u5E93";
+      default:
+        return "\u672A\u89E3\u6790";
     }
-    const modal = new FilePickerModal(
-      this.app,
-      csvFiles,
-      (selectedPath) => {
-        void this.plugin.changeQuizPath(selectedPath);
+  }
+  /** 把当前解析结果渲染为只读状态行（模式/内容文件/图片文件夹/状态文件）。 */
+  renderBankStatus(el) {
+    el.empty();
+    const status = this.plugin.bankStatus;
+    const source = (status == null ? void 0 : status.status) === "ok" ? status.source : null;
+    const lines = [
+      ["\u6A21\u5F0F", this.bankModeLabel(status)],
+      ["\u5185\u5BB9\u6587\u4EF6", source ? source.contentPath || "\u2014" : "\u2014"],
+      ["\u56FE\u7247\u6587\u4EF6\u5939", source ? source.imageFolder || "\u2014" : "\u2014"]
+    ];
+    if (source) lines.push(["\u72B6\u6001\u6587\u4EF6", sidecarPathFor(source.anchor)]);
+    for (const [label, value] of lines) {
+      el.createDiv({ text: `${label}\uFF1A${value}` });
+    }
+    if (status && status.status !== "ok") {
+      el.createDiv({ text: status.message });
+      if (status.status === "prompt" && status.reason === "type-mismatch") {
+        el.createDiv({ text: "\u63D0\u793A\uFF1Amanifest.json \u7C7B\u578B\u4E0D\u5339\u914D\uFF0C\u5DF2\u5FFD\u7565\u3002" });
       }
-    );
-    modal.open();
+    }
+  }
+  addBankFolderSetting(containerEl) {
+    let textComponent = null;
+    const apply = async (raw) => {
+      await this.plugin.changeBankFolder(raw);
+      textComponent == null ? void 0 : textComponent.setValue(this.plugin.settings.bankFolder);
+    };
+    new import_obsidian3.Setting(containerEl).setName("\u9898\u5E93\u6587\u4EF6\u5939").setDesc(BANK_FOLDER_DESC).addText((text) => {
+      textComponent = text;
+      text.setPlaceholder("\u4F8B\u5982\uFF1A\u9898\u5E93/\u884C\u6D4B\uFF08\u6839\u76EE\u5F55\u7528 /\uFF09").setValue(this.plugin.settings.bankFolder);
+      text.inputEl.addEventListener("change", () => {
+        void apply(text.inputEl.value);
+      });
+      const suggest = new FolderSuggest(this.app, text.inputEl);
+      suggest.onSelect((folder) => {
+        const next = folder.path === "" ? "/" : folder.path;
+        text.setValue(next);
+        void apply(next);
+      });
+    });
+  }
+  addBankStatusSetting(containerEl) {
+    const setting = new import_obsidian3.Setting(containerEl).setName("\u9898\u5E93\u89E3\u6790\u72B6\u6001");
+    this.renderBankStatus(setting.descEl);
+    if (this.isCsvChoicePrompt()) {
+      setting.addButton(
+        (btn) => btn.setButtonText("\u4EC5\u7528 CSV").onClick(() => {
+          void this.plugin.useCsvOnly();
+        })
+      );
+    }
   }
   addToggleSetting(containerEl, name, desc, key) {
     new import_obsidian3.Setting(containerEl).setName(name).setDesc(desc).addToggle((toggle) => {
@@ -2334,36 +2298,20 @@ var FolderSuggest = class extends import_obsidian3.AbstractInputSuggest {
   }
   getSuggestions(query) {
     const q = query.trim().toLowerCase();
-    return this.app.vault.getAllFolders(false).filter(
+    return this.app.vault.getAllFolders(true).filter(
       (folder) => !folder.path.split("/").some((segment) => segment.startsWith("."))
-    ).filter((folder) => q === "" || folder.path.toLowerCase().includes(q)).slice(0, 100);
+    ).filter(
+      (folder) => q === "" || folder.path.toLowerCase().includes(q) || folder.path === "/" && "\u6839\u76EE\u5F55".includes(q)
+    ).slice(0, 100);
   }
   renderSuggestion(folder, el) {
-    el.setText(folder.path);
+    el.setText(folder.path === "" ? "/" : folder.path);
   }
   selectSuggestion(folder, evt) {
-    this.setValue(folder.path);
+    this.setValue(folder.path === "" ? "/" : folder.path);
     this.input.trigger("input");
     this.close();
     super.selectSuggestion(folder, evt);
-  }
-};
-var FilePickerModal = class extends import_obsidian3.SuggestModal {
-  constructor(app, files, onSelect) {
-    super(app);
-    this.files = files;
-    this.onSelect = onSelect;
-  }
-  getSuggestions(query) {
-    return this.files.filter(
-      (f) => f.toLowerCase().includes(query.toLowerCase())
-    );
-  }
-  renderSuggestion(file, el) {
-    el.createEl("div", { text: file });
-  }
-  onChooseSuggestion(file, evt) {
-    this.onSelect(file);
   }
 };
 
@@ -5405,6 +5353,423 @@ function renderImageQuestionUi(opts) {
   }
 }
 
+// src/bankResolver.ts
+var MANIFEST_FILENAME = "manifest.json";
+var MANIFEST_TYPE = "csvquiz-bank";
+var MANIFEST_SIDECAR_BASENAME = "manifest";
+var ROOT_BANK_FOLDER = "/";
+var CSV_EXTENSIONS = /* @__PURE__ */ new Set(["csv", "cqv"]);
+function normalizeBankFolder(raw) {
+  const trimmed = raw.trim();
+  if (trimmed === "") return "";
+  const segments = trimmed.replace(/\\/g, "/").split("/");
+  const out = [];
+  for (const segment of segments) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") {
+      out.pop();
+      continue;
+    }
+    out.push(segment);
+  }
+  return out.length === 0 ? ROOT_BANK_FOLDER : out.join("/");
+}
+function vaultFolderPath(bankFolder) {
+  return bankFolder === ROOT_BANK_FOLDER ? "" : bankFolder;
+}
+function joinVaultPath(folder, name) {
+  if (folder === "" || folder === ROOT_BANK_FOLDER) return name;
+  return `${folder}/${name}`;
+}
+function dirnameVaultPath(path) {
+  const normalized = path.trim().replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+  const withoutTrailing = normalized.replace(/\/+$/, "");
+  if (withoutTrailing === "") return ROOT_BANK_FOLDER;
+  const idx = withoutTrailing.lastIndexOf("/");
+  if (idx < 0) return ROOT_BANK_FOLDER;
+  const dir = withoutTrailing.slice(0, idx);
+  const normalizedDir = normalizeBankFolder(dir);
+  return normalizedDir === "" ? ROOT_BANK_FOLDER : normalizedDir;
+}
+function manifestPathForBank(folder) {
+  return joinVaultPath(folder, MANIFEST_FILENAME);
+}
+function manifestAnchorForBank(folder) {
+  return joinVaultPath(folder, MANIFEST_SIDECAR_BASENAME);
+}
+function isAbsoluteLike(path) {
+  return path.startsWith("/") || path.startsWith("\\") || /^[A-Za-z]:/.test(path);
+}
+function normalizeManifestRelative(raw, allowBackslash) {
+  const trimmed = raw.trim();
+  if (trimmed === "") return { ok: false };
+  if (!allowBackslash && trimmed.indexOf("\\") >= 0) return { ok: false };
+  const unified = trimmed.replace(/\\/g, "/");
+  if (isAbsoluteLike(unified)) return { ok: false };
+  const out = [];
+  for (const segment of unified.split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") return { ok: false };
+    out.push(segment);
+  }
+  return { ok: true, path: out.join("/") };
+}
+function extensionOf2(path) {
+  const base = path.slice(path.lastIndexOf("/") + 1);
+  const dot = base.lastIndexOf(".");
+  return dot >= 0 ? base.slice(dot + 1).toLowerCase() : "";
+}
+function parseBankManifest(text, bankFolder) {
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    return { status: "error", message: `manifest.json \u4E0D\u662F\u5408\u6CD5 JSON\uFF1A${reason}` };
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return { status: "error", message: "manifest.json \u9876\u5C42\u5FC5\u987B\u662F\u5BF9\u8C61\u3002" };
+  }
+  const record = raw;
+  if (record.type !== MANIFEST_TYPE) return { status: "ignored" };
+  if (record.version !== 1) {
+    return {
+      status: "error",
+      message: `manifest.json \u7684 version \u5FC5\u987B\u4E3A 1\uFF08\u5F53\u524D\uFF1A${String(
+        record.version
+      )}\uFF09\u3002`
+    };
+  }
+  const contentRaw = record.content;
+  const imageRaw = record.imageFolder;
+  if (typeof contentRaw !== "string" || contentRaw.trim() === "" || typeof imageRaw !== "string" || imageRaw.trim() === "") {
+    return {
+      status: "error",
+      message: "manifest.json \u7684 content \u4E0E imageFolder \u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32\u3002"
+    };
+  }
+  const contentRel = normalizeManifestRelative(contentRaw, false);
+  if (!contentRel.ok || contentRel.path === "") {
+    return {
+      status: "error",
+      message: "manifest.json \u7684 content \u5FC5\u987B\u662F\u76F8\u5BF9 manifest \u6240\u5728\u76EE\u5F55\u7684\u6587\u4EF6\u8DEF\u5F84\uFF08\u7981\u6B62\u7EDD\u5BF9\u8DEF\u5F84\u3001.. \u4E0E\u53CD\u659C\u6760\uFF09\u3002"
+    };
+  }
+  if (!CSV_EXTENSIONS.has(extensionOf2(contentRel.path))) {
+    return {
+      status: "error",
+      message: "manifest.json \u7684 content \u5FC5\u987B\u662F .csv \u6216 .cqv \u6587\u4EF6\u3002"
+    };
+  }
+  const imageRel = normalizeManifestRelative(imageRaw, true);
+  if (!imageRel.ok) {
+    return {
+      status: "error",
+      message: "manifest.json \u7684 imageFolder \u5FC5\u987B\u662F\u76F8\u5BF9 manifest \u6240\u5728\u76EE\u5F55\u7684\u6587\u4EF6\u5939\u8DEF\u5F84\uFF08\u7981\u6B62\u7EDD\u5BF9\u8DEF\u5F84\u4E0E ..\uFF09\u3002"
+    };
+  }
+  const folder = normalizeBankFolder(bankFolder);
+  if (folder === ROOT_BANK_FOLDER && imageRel.path === "") {
+    return {
+      status: "error",
+      message: 'vault \u6839\u76EE\u5F55\u7684 manifest.json \u4E0D\u652F\u6301 imageFolder \u4E3A "."\uFF1A\u8BF7\u6307\u5B9A\u6839\u4E0B\u7684\u56FE\u7247\u5B50\u6587\u4EF6\u5939\u3002'
+    };
+  }
+  const imageFolder = imageRel.path === "" ? vaultFolderPath(folder) : joinVaultPath(folder, imageRel.path);
+  return {
+    status: "ok",
+    manifest: {
+      type: MANIFEST_TYPE,
+      version: 1,
+      content: contentRaw.trim(),
+      imageFolder: imageRaw.trim()
+    },
+    contentPath: joinVaultPath(folder, contentRel.path),
+    imageFolder
+  };
+}
+function folderKey(raw) {
+  const normalized = normalizeBankFolder(raw);
+  return normalized === "" ? ROOT_BANK_FOLDER : normalized;
+}
+function sameFolder(a, b) {
+  return folderKey(a) === folderKey(b);
+}
+function chooseCsvCandidate(files, bankFolder) {
+  var _a;
+  const folder = normalizeBankFolder(bankFolder);
+  const groups = /* @__PURE__ */ new Map();
+  for (const raw of files) {
+    if (raw === "") continue;
+    const path = raw.trim().replace(/\\/g, "/");
+    if (path === "") continue;
+    const slash = path.lastIndexOf("/");
+    const base = slash < 0 ? path : path.slice(slash + 1);
+    const parent = slash < 0 ? null : path.slice(0, slash);
+    if (base === "" || base.startsWith(".")) continue;
+    if (parent !== null && !sameFolder(parent, folder)) continue;
+    const ext = extensionOf2(base);
+    if (!CSV_EXTENSIONS.has(ext)) continue;
+    const stem = base.slice(0, base.lastIndexOf("."));
+    if (stem === "") continue;
+    const key = stem.toLowerCase();
+    const group = (_a = groups.get(key)) != null ? _a : { stem, csv: null, cqv: null };
+    if (ext === "csv") {
+      if (group.csv === null) group.csv = path;
+    } else if (group.cqv === null) {
+      group.cqv = path;
+    }
+    groups.set(key, group);
+  }
+  const chosen = [];
+  groups.forEach((group) => {
+    const path = group.csv !== null ? group.csv : group.cqv;
+    if (path !== null) chosen.push(path);
+  });
+  if (chosen.length === 0) return { status: "none" };
+  if (chosen.length === 1) return { status: "one", path: chosen[0] };
+  chosen.sort(
+    (a, b) => a.localeCompare(b, void 0, { numeric: true, sensitivity: "base" })
+  );
+  return { status: "multiple", paths: chosen };
+}
+function migrateLegacySettings(settings) {
+  var _a, _b, _c, _d;
+  const bankSingleSources = {
+    ...(_a = settings.bankSingleSources) != null ? _a : {}
+  };
+  const existingBank = (_b = settings.bankFolder) != null ? _b : "";
+  if (existingBank.trim() !== "") {
+    return {
+      bankFolder: existingBank,
+      bankSingleSources,
+      changed: false
+    };
+  }
+  const csvPath = ((_c = settings.csvPath) != null ? _c : "").trim();
+  const imageFolder = ((_d = settings.imageFolder) != null ? _d : "").trim();
+  if (csvPath !== "") {
+    const folder = dirnameVaultPath(csvPath);
+    if (imageFolder !== "") bankSingleSources[folder] = "csv";
+    return { bankFolder: folder, bankSingleSources, changed: true };
+  }
+  if (imageFolder !== "") {
+    return {
+      bankFolder: normalizeBankFolder(imageFolder),
+      bankSingleSources,
+      changed: true
+    };
+  }
+  return { bankFolder: "", bankSingleSources, changed: false };
+}
+async function listVaultFiles(vault) {
+  const maybeVault = vault;
+  if (typeof maybeVault.getFiles === "function") {
+    try {
+      const files = maybeVault.getFiles();
+      return Array.isArray(files) ? files : [];
+    } catch (e) {
+      return [];
+    }
+  }
+  const adapter = vault.adapter;
+  if (typeof adapter.list !== "function") return [];
+  const out = [];
+  const walk = async (dir) => {
+    var _a, _b;
+    let listing;
+    try {
+      listing = await adapter.list(dir);
+    } catch (e) {
+      return;
+    }
+    const parent = dir === "" || dir === ROOT_BANK_FOLDER ? ROOT_BANK_FOLDER : dir;
+    for (const file of (_a = listing.files) != null ? _a : []) {
+      out.push({ path: file, parent: { path: parent } });
+    }
+    for (const folder of (_b = listing.folders) != null ? _b : []) {
+      await walk(folder);
+    }
+  };
+  await walk("");
+  return out;
+}
+function parentPathOf(file) {
+  if (file.parent && typeof file.parent.path === "string") return file.parent.path;
+  return dirnameVaultPath(file.path);
+}
+function directChildPaths(files, folder) {
+  const result = [];
+  for (const file of files) {
+    if (!file || typeof file.path !== "string" || file.path === "") continue;
+    if (!sameFolder(parentPathOf(file), folder)) continue;
+    result.push(file.path);
+  }
+  return result;
+}
+function hasHiddenSegment2(relativePath) {
+  for (const segment of relativePath.split("/")) {
+    if (segment.startsWith(".")) return true;
+  }
+  return false;
+}
+function imagePathsUnder(files, folderVaultPath) {
+  const root = folderVaultPath.trim().replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/, "");
+  const prefix = root === "" ? "" : `${root}/`;
+  const result = [];
+  for (const file of files) {
+    if (!file || typeof file.path !== "string" || file.path === "") continue;
+    const path = file.path.replace(/\\/g, "/");
+    if (prefix !== "" && !path.startsWith(prefix)) continue;
+    const relative = path.slice(prefix.length);
+    if (relative === "") continue;
+    if (hasHiddenSegment2(relative)) continue;
+    if (!IMAGE_EXTENSIONS.has(extensionOf2(relative))) continue;
+    result.push(path);
+  }
+  return result;
+}
+function errorMessageOf(e) {
+  return e instanceof Error ? e.message : String(e);
+}
+function csvSource(folder, contentPath) {
+  return {
+    status: "ok",
+    source: {
+      mode: "csv",
+      bankFolder: folder,
+      contentPath,
+      imageFolder: "",
+      anchor: contentPath,
+      manifest: null
+    }
+  };
+}
+async function resolveBankSource(vault, settings) {
+  var _a, _b;
+  const folder = normalizeBankFolder((_a = settings == null ? void 0 : settings.bankFolder) != null ? _a : "");
+  if (folder === "") {
+    return {
+      status: "prompt",
+      reason: "unconfigured",
+      message: "\u5C1A\u672A\u8BBE\u7F6E\u9898\u5E93\u6587\u4EF6\u5939\uFF1A\u8BF7\u5728\u8BBE\u7F6E\u4E2D\u9009\u62E9\u9898\u5E93\u6587\u4EF6\u5939\uFF08\u6216\u5728\u5176\u4E2D\u521B\u5EFA manifest.json\uFF09\u3002"
+    };
+  }
+  const allFiles = await listVaultFiles(vault);
+  const manifestPath = manifestPathForBank(folder);
+  let manifestText = null;
+  try {
+    if (await vault.adapter.exists(manifestPath)) {
+      manifestText = await vault.adapter.read(manifestPath);
+    }
+  } catch (e) {
+    return {
+      status: "error",
+      reason: "manifest-read",
+      message: `\u8BFB\u53D6 ${manifestPath} \u5931\u8D25\uFF1A${errorMessageOf(e)}`
+    };
+  }
+  let hadIgnoredManifest = false;
+  if (manifestText !== null) {
+    const parsed = parseBankManifest(manifestText, folder);
+    if (parsed.status === "error") {
+      return {
+        status: "error",
+        reason: "manifest-invalid",
+        message: parsed.message
+      };
+    }
+    if (parsed.status === "ignored") {
+      hadIgnoredManifest = true;
+    } else {
+      let contentExists = false;
+      try {
+        contentExists = await vault.adapter.exists(parsed.contentPath);
+      } catch (e) {
+        contentExists = false;
+      }
+      if (!contentExists) {
+        return {
+          status: "error",
+          reason: "content-missing",
+          message: `manifest.json \u6307\u5B9A\u7684\u5185\u5BB9\u6587\u4EF6\u4E0D\u5B58\u5728\uFF1A${parsed.contentPath}`
+        };
+      }
+      if (imagePathsUnder(allFiles, parsed.imageFolder).length === 0) {
+        return {
+          status: "error",
+          reason: "image-folder-empty",
+          message: `manifest.json \u6307\u5B9A\u7684\u56FE\u7247\u6587\u4EF6\u5939\u4E0D\u5B58\u5728\u6216\u6CA1\u6709\u53D7\u652F\u6301\u7684\u56FE\u7247\uFF1A${parsed.imageFolder === "" ? ROOT_BANK_FOLDER : parsed.imageFolder}`
+        };
+      }
+      return {
+        status: "ok",
+        source: {
+          mode: "manifest",
+          bankFolder: folder,
+          contentPath: parsed.contentPath,
+          imageFolder: parsed.imageFolder,
+          anchor: manifestAnchorForBank(folder),
+          manifest: parsed.manifest
+        }
+      };
+    }
+  }
+  const direct = directChildPaths(allFiles, folder);
+  const csv = chooseCsvCandidate(direct, folder);
+  const images = imagePathsUnder(allFiles, vaultFolderPath(folder));
+  const hasImages = images.length > 0;
+  const forceCsv = ((_b = settings == null ? void 0 : settings.bankSingleSources) == null ? void 0 : _b[folder]) === "csv";
+  if (csv.status === "one") {
+    if (forceCsv || !hasImages) return csvSource(folder, csv.path);
+    return {
+      status: "prompt",
+      reason: "both",
+      message: `\u9898\u5E93\u300C${csv.path}\u300D\u540C\u65F6\u5305\u542B CSV/CQV \u4E0E\u56FE\u7247\uFF1A\u5982\u9700\u4E24\u8005\u5E76\u7528\u8BF7\u5728\u8BE5\u6587\u4EF6\u5939\u521B\u5EFA manifest.json\uFF1B\u53EA\u7EC3 CSV \u8BF7\u9009\u62E9\u300C\u4EC5\u7528 CSV\u300D\u3002`,
+      csvCandidate: csv.path
+    };
+  }
+  if (csv.status === "multiple") {
+    return {
+      status: "prompt",
+      reason: "multiple-csv",
+      message: `\u9898\u5E93\u6587\u4EF6\u5939\u300C${vaultFolderPath(folder) || ROOT_BANK_FOLDER}\u300D\u4E2D\u6709\u591A\u4E2A\u9898\u5E93\uFF08${csv.paths.join("\u3001")}\uFF09\uFF1A\u8BF7\u521B\u5EFA manifest.json \u6307\u5B9A\u5185\u5BB9\uFF0C\u6216\u53EA\u4FDD\u7559\u4E00\u4E2A CSV/CQV\u3002`
+    };
+  }
+  if (hasImages) {
+    if (folder === ROOT_BANK_FOLDER) {
+      return {
+        status: "prompt",
+        reason: hadIgnoredManifest ? "type-mismatch" : "unconfigured",
+        message: hadIgnoredManifest ? `vault \u6839\u76EE\u5F55\u53EA\u6709\u56FE\u7247\uFF0C\u4E14\u6839\u76EE\u5F55\u7684 manifest.json \u4E0D\u662F ${MANIFEST_TYPE} \u7C7B\u578B\uFF1A\u8BF7\u4FEE\u6B63 manifest.json\uFF0C\u6216\u9009\u62E9\u9898\u5E93\u5B50\u6587\u4EF6\u5939\u3002` : "vault \u6839\u76EE\u5F55\u53EA\u6709\u56FE\u7247\uFF0C\u65E0\u6CD5\u5728\u6839\u76EE\u5F55\u751F\u6210\u72B6\u6001\u6587\u4EF6\uFF1A\u8BF7\u9009\u62E9\u9898\u5E93\u5B50\u6587\u4EF6\u5939\uFF0C\u6216\u5728\u5176\u4E2D\u521B\u5EFA manifest.json\u3002"
+      };
+    }
+    return {
+      status: "ok",
+      source: {
+        mode: "image",
+        bankFolder: folder,
+        contentPath: "",
+        imageFolder: vaultFolderPath(folder),
+        anchor: vaultFolderPath(folder),
+        manifest: null
+      }
+    };
+  }
+  if (hadIgnoredManifest) {
+    return {
+      status: "prompt",
+      reason: "type-mismatch",
+      message: `\u9898\u5E93\u6587\u4EF6\u5939\u300C${vaultFolderPath(folder) || ROOT_BANK_FOLDER}\u300D\u4E2D\u7684 manifest.json \u7C7B\u578B\u4E0D\u662F ${MANIFEST_TYPE}\uFF0C\u5DF2\u5FFD\u7565\uFF1B\u4E5F\u6CA1\u6709\u53EF\u7528\u7684 CSV/CQV \u6216\u56FE\u7247\u3002\u8BF7\u4FEE\u6B63 manifest.json \u7684 type\u3002`
+    };
+  }
+  return {
+    status: "prompt",
+    reason: "empty",
+    message: `\u9898\u5E93\u6587\u4EF6\u5939\u300C${vaultFolderPath(folder) || ROOT_BANK_FOLDER}\u300D\u4E2D\u65E2\u6CA1\u6709 CSV/CQV \u6587\u4EF6\uFF0C\u4E5F\u6CA1\u6709\u53D7\u652F\u6301\u7684\u56FE\u7247\u3002`
+  };
+}
+
 // src/quizView.ts
 var memoryScheduler = fsrs();
 function sameIdSet(a, b) {
@@ -5438,6 +5803,12 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     this.csvPath = "";
     /** 图片题文件夹（vault 相对路径；空串=不启用）。 */
     this.imageFolder = "";
+    /** 当前题库的 sidecar 锚点（复合题库为 <folder>/manifest）。 */
+    this.sourceAnchor = "";
+    /** 最近一次来源解析结果（用于设置页/诊断）。 */
+    this.sourceResolution = null;
+    /** 当前来源所属题库文件夹（用于区分同库锚点迁移与切换题库）。 */
+    this.sourceBankFolder = "";
     /** 未展示答案时的脱敏图片地址（blob URL，不含文件名）；仅缓存当前题。 */
     this.imageBlobUrl = null;
     this.imageBlobPath = null;
@@ -5693,14 +6064,23 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     var _a, _b;
     const epoch = ++this.loadEpoch;
     const settings = this.getSettings();
-    this.csvPath = settings.csvPath;
-    this.imageFolder = settings.imageFolder;
-    const contentPath = this.getContentPath();
     const inMemoryState = this.stateManager.getState();
     const inMemoryMeta = this.stateManager.getMeta();
     this.buildFilterPanel(settings);
     this.buildPracticePanel(settings);
     this.stateManager.setState(null);
+    const source = await this.resolveSourceForView(true);
+    if (this.isClosed) return;
+    if (epoch !== this.loadEpoch) return;
+    if (!source) {
+      this.canPersistState = false;
+      this.startAutoSave();
+      return;
+    }
+    this.applyResolvedSource(source);
+    await this.migrateManifestSidecar(source, "", "");
+    if (this.isClosed || epoch !== this.loadEpoch) return;
+    const contentPath = source.anchor;
     const status = await this.loadQuestions();
     if (this.isClosed) return;
     if (epoch !== this.loadEpoch) return;
@@ -8590,9 +8970,10 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
   async refresh(preserveState = false) {
     var _a, _b, _c;
     const epoch = ++this.loadEpoch;
+    const hadPersistableState = this.canPersistState && this.stateManager.getState() !== null;
     this.canPersistState = false;
     await this.saveCurrentEdit();
-    if (preserveState && !this.isClosed) {
+    if (preserveState && !this.isClosed && hadPersistableState) {
       try {
         await this.stateManager.saveStateImmediately(this.buildCurrentState());
       } catch (e) {
@@ -8611,9 +8992,28 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
       this.autoSaveTimer = null;
     }
     const settings = this.getSettings();
-    this.csvPath = settings.csvPath;
-    this.imageFolder = settings.imageFolder;
-    const contentPath = this.getContentPath();
+    const oldAnchor = this.sourceAnchor || this.stateManager.getContentPath() || "";
+    const oldBankFolder = this.sourceBankFolder;
+    const source = await this.resolveSourceForView(!preserveState);
+    if (this.isClosed) {
+      this.canPersistState = true;
+      return;
+    }
+    if (epoch !== this.loadEpoch) return;
+    if (!source) {
+      if (preserveState) {
+        this.canPersistState = true;
+        this.startAutoSave();
+      } else {
+        this.canPersistState = false;
+        this.startAutoSave();
+      }
+      return;
+    }
+    this.applyResolvedSource(source);
+    await this.migrateManifestSidecar(source, oldAnchor, oldBankFolder);
+    if (this.isClosed || epoch !== this.loadEpoch) return;
+    const contentPath = source.anchor;
     const wasSwitching = this.stateManager.getContentPath() !== contentPath;
     if (wasSwitching) {
       this.contentMtimeMs = null;
@@ -8727,8 +9127,100 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
     return this.plugin.settings;
   }
   /** 当前内容源锚点：CSV/CQV 优先，否则图片文件夹；sidecar 命名与状态匹配共用。 */
+  /** 当前内容源锚点：manifest 复合题库为 <folder>/manifest；单一来源为内容路径。 */
   getContentPath() {
-    return resolveContentPath(this.csvPath, this.imageFolder);
+    return this.sourceAnchor;
+  }
+  /** 应用解析结果到视图的读取路径。 */
+  applyResolvedSource(source) {
+    this.csvPath = source.contentPath;
+    this.imageFolder = source.imageFolder;
+    this.sourceAnchor = source.anchor;
+    this.sourceBankFolder = source.bankFolder;
+  }
+  /**
+   * 解析当前题库来源。prompt=both 时提供「仅用 CSV」快捷选择并写入设置；
+   * 其它 prompt/error 返回 null。调用方决定是否 showError/保留旧视图。
+   */
+  async resolveSourceForView(showErrorOnFailure) {
+    var _a, _b;
+    const settings = this.getSettings();
+    const resolve = () => resolveBankSource(this.vault, {
+      bankFolder: settings.bankFolder,
+      bankSingleSources: settings.bankSingleSources
+    });
+    let resolution = await resolve();
+    this.sourceResolution = resolution;
+    this.plugin.bankStatus = resolution;
+    if (resolution.status === "prompt" && resolution.reason === "both" && resolution.csvCandidate) {
+      const modal = new ChoiceModal(this.app, {
+        title: "\u9898\u5E93\u6765\u6E90\u9700\u8981\u786E\u8BA4",
+        message: resolution.message,
+        options: [
+          { label: "\u4EC5\u7528 CSV", value: "csv", cta: true },
+          { label: "\u53D6\u6D88", value: "cancel" }
+        ]
+      });
+      modal.open();
+      const choice = await modal.promise;
+      if (this.isClosed) return null;
+      if (choice === "csv") {
+        const key = normalizeBankFolder(settings.bankFolder);
+        settings.bankSingleSources[key] = "csv";
+        await ((_b = (_a = this.plugin).saveSettings) == null ? void 0 : _b.call(_a));
+        resolution = await resolve();
+        this.sourceResolution = resolution;
+        this.plugin.bankStatus = resolution;
+      } else {
+        return null;
+      }
+    }
+    if (resolution.status === "ok") return resolution.source;
+    const message = resolution.status === "error" || resolution.status === "prompt" ? resolution.message : "\u65E0\u6CD5\u89E3\u6790\u9898\u5E93\u6765\u6E90";
+    new import_obsidian6.Notice(message);
+    if (showErrorOnFailure) this.showError(message);
+    return null;
+  }
+  /** 复合题库首次启用/删除时正向/反向迁移 sidecar；仅同题库文件夹内做旧锚点转移。 */
+  async migrateManifestSidecar(source, oldAnchor, oldBankFolder) {
+    if (source.mode === "manifest") {
+      try {
+        const manifestSidecar = sidecarPathFor(source.anchor);
+        if (!await this.vault.adapter.exists(manifestSidecar) && source.contentPath) {
+          await this.stateManager.transferSidecar(
+            source.contentPath,
+            source.anchor
+          );
+        }
+      } catch (e) {
+        console.error("CSV Quiz: \u8FC1\u79FB manifest sidecar \u5931\u8D25", e);
+      }
+    } else {
+      const manifestAnchor = manifestAnchorForBank(source.bankFolder);
+      if (manifestAnchor !== source.anchor) {
+        try {
+          const manifestSidecar = sidecarPathFor(manifestAnchor);
+          if (await this.vault.adapter.exists(manifestSidecar)) {
+            const transfer = await this.stateManager.transferSidecar(
+              manifestAnchor,
+              source.anchor
+            );
+            if (transfer.status === "copied" || transfer.status === "merged") {
+              await this.stateManager.archiveSidecar(manifestAnchor);
+            }
+          }
+        } catch (e) {
+          console.error("CSV Quiz: manifest sidecar \u53CD\u5411\u8FC1\u79FB\u5931\u8D25", e);
+        }
+      }
+    }
+    if (oldBankFolder !== "" && oldBankFolder === source.bankFolder && oldAnchor && oldAnchor !== source.anchor) {
+      try {
+        await this.stateManager.transferSidecar(oldAnchor, source.anchor);
+      } catch (e) {
+        console.error("CSV Quiz: \u5207\u6362\u6765\u6E90\u951A\u70B9\u65F6\u8FC1\u79FB\u72B6\u6001\u5931\u8D25", e);
+      }
+    }
   }
   buildCurrentState() {
     let savedIndex = this.currentIndex;
@@ -8799,6 +9291,24 @@ var QuizView = _QuizView;
 
 // src/stateManager.ts
 var import_obsidian7 = require("obsidian");
+
+// src/contentSource.ts
+function normalizeVaultFolder(raw) {
+  if (!raw) return "";
+  const segments = raw.trim().replace(/\\/g, "/").split("/");
+  const out = [];
+  for (const segment of segments) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") {
+      out.pop();
+      continue;
+    }
+    out.push(segment);
+  }
+  return out.join("/");
+}
+
+// src/stateManager.ts
 var SAVE_MAX_WAIT_MS = 3e3;
 function computeSaveDelay(delay, firstScheduledAt, now, maxWaitMs) {
   return Math.max(0, Math.min(delay, firstScheduledAt + maxWaitMs - now));
@@ -9398,6 +9908,24 @@ var StateManager = class {
     return 0;
   }
   /**
+   * 把某内容源的 sidecar 归档为 `.merged`（不删除数据）。
+   * 用于 manifest 删除后反向迁移完成、避免下次启动重复合并旧快照。
+   */
+  async archiveSidecar(contentPath) {
+    if (contentPath === "") return;
+    const srcPath = sidecarPathFor(contentPath);
+    const dstPath = `${srcPath}.merged`;
+    try {
+      if (!await this.vault.adapter.exists(srcPath)) return;
+      if (await this.vault.adapter.exists(dstPath)) {
+        await this.vault.adapter.remove(dstPath);
+      }
+      await this.vault.adapter.rename(srcPath, dstPath);
+    } catch (e) {
+      console.error("CSV Quiz: \u5F52\u6863 sidecar \u5931\u8D25", srcPath, e);
+    }
+  }
+  /**
    * 把 from 内容源的 sidecar 复制/合并到 to 内容源（不删除 from）。
    * 用于「图片文件夹-only ↔ CSV 锚点」切换：用户补上/去掉 CSV 路径时，
    * 让进度跟随内容源迁移，且保留源文件以便回退。
@@ -9532,16 +10060,36 @@ var StateManager = class {
 };
 
 // src/main.ts
+function normalizeBankSingleSources(raw) {
+  const out = {};
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [key, value] of Object.entries(raw)) {
+    if (value !== "csv") continue;
+    const folder = normalizeBankFolder(key);
+    if (folder === "") continue;
+    out[folder] = "csv";
+  }
+  return out;
+}
 var CSVQuizPlugin = class extends import_obsidian8.Plugin {
   constructor() {
     super(...arguments);
     this.memoryReminderTimer = null;
+    /** 最近一次题库来源解析结果（设置页同步读取）。 */
+    this.bankStatus = null;
+    this.bankMigrated = false;
     this.settingTab = null;
   }
   async onload() {
     this.stateManager = new StateManager(this);
     this.csvWriteQueue = new CSVWriteQueue(this.app);
     await this.loadSettings();
+    if (this.bankMigrated) {
+      await this.saveSettings();
+      new import_obsidian8.Notice(
+        "\u5DF2\u8FC1\u79FB\u4E3A\u9898\u5E93\u6587\u4EF6\u5939\u6A21\u5F0F\uFF1B\u65E7\u6DF7\u5408\u914D\u7F6E\u6309\u4EC5 CSV \u52A0\u8F7D\uFF0C\u5982\u9700\u56FE\u7247\u6DF7\u6392\u8BF7\u521B\u5EFA manifest.json"
+      );
+    }
     await this.stateManager.loadLegacyQuizState();
     try {
       if (this.settings.csvPath) {
@@ -9569,6 +10117,13 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
       }
     } catch (e) {
       console.error("CSV Quiz: \u8FC1\u79FB\u65E7\u8FDB\u5EA6\u5931\u8D25", e);
+    }
+    await this.migrateContentSidecarToBank();
+    if (this.bankMigrated) {
+      this.settings.csvPath = "";
+      this.settings.imageFolder = "";
+      await this.saveSettings();
+      this.bankMigrated = false;
     }
     this.registerView(VIEW_TYPE_QUIZ, (leaf) => {
       const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ);
@@ -9602,7 +10157,7 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
       () => this.updateMemoryReminder(),
       5 * 60 * 1e3
     );
-    void this.ensureSidecarLoaded().then(() => this.updateMemoryReminder());
+    void this.ensureSidecarLoaded(false).then(() => this.updateMemoryReminder());
   }
   onunload() {
     if (this.memoryReminderTimer !== null) {
@@ -9639,99 +10194,115 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
     }
   }
   /**
-   * 题库路径变更入口：当前视图有 sidecar 状态时弹轻量确认（信息性，防误切），
-   * 确认后切换（切换即落盘：unloadSidecar flush 当前 sidecar 再重载新题库）。
-   * 无状态（新题库首次使用）直接切换。未变化时直接忽略。
+   * 解析当前题库文件夹的来源（缓存到 this.bankStatus；force=true 重新扫描）。
+   * 解析异常统一转为 error 结果，避免设置页/视图因 IO 异常中断。
    */
-  async changeQuizPath(newPath) {
-    const nextPath = newPath.trim();
-    if (nextPath === this.settings.csvPath) return;
-    const prevPath = this.settings.csvPath;
-    const prevContentPath = this.getContentPath();
+  async resolveBank(force = false) {
+    if (!force && this.bankStatus !== null) return this.bankStatus;
+    let res;
+    try {
+      res = await resolveBankSource(this.app.vault, {
+        bankFolder: this.settings.bankFolder,
+        bankSingleSources: this.settings.bankSingleSources
+      });
+    } catch (e) {
+      console.error("CSV Quiz: \u89E3\u6790\u9898\u5E93\u6765\u6E90\u5931\u8D25", e);
+      res = {
+        status: "error",
+        reason: "resolve-failed",
+        message: `\u89E3\u6790\u9898\u5E93\u6765\u6E90\u5931\u8D25\uFF1A${e instanceof Error ? e.message : String(e)}`
+      };
+    }
+    this.bankStatus = res;
+    return res;
+  }
+  /**
+   * 题库文件夹变更入口：有 sidecar 状态时轻量确认；切换即落盘并刷新。
+   * 锚点变化（manifest/唯一 CSV/图片文件夹）时把旧锚点 sidecar 转移到新锚点
+   * （保留旧文件，便于回退）。
+   * 返回 false 表示用户取消或保存失败（设置已回滚）。
+   */
+  async changeBankFolder(newFolder) {
+    const next = normalizeBankFolder(newFolder);
+    if (next === this.settings.bankFolder && next !== "") return true;
     const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
     const view = leaf == null ? void 0 : leaf.view;
     if (view && view.hasLoadedState()) {
-      const confirmed = await view.confirmQuizSwitch(
-        nextPath || "\uFF08\u4EC5\u4F7F\u7528\u56FE\u7247\u9898\uFF09"
-      );
-      if (!confirmed) return;
+      const confirmed = await view.confirmQuizSwitch(next || "\uFF08\u672A\u8BBE\u7F6E\uFF09");
+      if (!confirmed) return false;
     }
-    this.settings.csvPath = nextPath;
+    const prevFolder = this.settings.bankFolder;
+    this.settings.bankFolder = next;
     await this.saveSettings();
     try {
       await this.stateManager.unloadSidecar();
     } catch (e) {
       console.error("CSV Quiz: \u5207\u6362\u9898\u5E93\u524D\u4FDD\u5B58\u5F53\u524D\u8FDB\u5EA6\u5931\u8D25", e);
       new import_obsidian8.Notice("\u5F53\u524D\u8FDB\u5EA6\u4FDD\u5B58\u5931\u8D25\uFF0C\u5DF2\u4E2D\u6B62\u5207\u6362\u9898\u5E93");
-      this.settings.csvPath = prevPath;
+      this.settings.bankFolder = prevFolder;
       await this.saveSettings();
-      return;
+      return false;
     }
-    const nextContentPath = this.getContentPath();
-    const anchorChanged = prevContentPath !== "" && nextContentPath !== "" && prevContentPath !== nextContentPath && (!prevPath && !!nextPath || !!prevPath && !nextPath);
-    if (anchorChanged) {
-      try {
-        const res = await this.stateManager.transferSidecar(
-          prevContentPath,
-          nextContentPath
-        );
-        if (res.status === "error") {
-          new import_obsidian8.Notice("\u56FE\u7247\u9898/\u6587\u5B57\u9898\u8FDB\u5EA6\u5408\u5E76\u5931\u8D25\uFF0C\u5DF2\u4FDD\u7559\u539F\u72B6\u6001\u6587\u4EF6");
-        }
-      } catch (e) {
-        console.error("CSV Quiz: \u5185\u5BB9\u6E90\u5207\u6362\u65F6\u8FC1\u79FB\u72B6\u6001\u5931\u8D25", e);
-        new import_obsidian8.Notice("\u56FE\u7247\u9898/\u6587\u5B57\u9898\u8FDB\u5EA6\u5408\u5E76\u5931\u8D25\uFF0C\u5DF2\u4FDD\u7559\u539F\u72B6\u6001\u6587\u4EF6");
-      }
-    }
+    const res = await this.resolveBank(true);
     this.refreshQuiz();
+    this.syncSettingsUI();
+    if (res.status !== "ok") new import_obsidian8.Notice(res.message);
+    return true;
   }
   /**
-   * 图片题文件夹变更入口：有状态时轻量确认；切换即落盘并刷新。
-   * 仅图片模式下文件夹即内容源，换文件夹视为新题库，不迁移旧状态。
+   * 当前题库同时含 CSV/CQV 与图片（prompt/both）时，记住「该文件夹仅用 CSV」，
+   * 重新解析并刷新视图。
    */
-  async changeImageFolder(newPath) {
-    const nextPath = normalizeVaultFolder(newPath);
-    if (nextPath === this.settings.imageFolder) return;
-    const prevPath = this.settings.imageFolder;
-    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
-    const view = leaf == null ? void 0 : leaf.view;
-    if (view && view.hasLoadedState()) {
-      const confirmed = await view.confirmQuizSwitch(
-        nextPath ? `\u56FE\u7247\u6587\u4EF6\u5939\u300C${nextPath}\u300D` : "\uFF08\u4E0D\u542F\u7528\u56FE\u7247\u9898\uFF09"
-      );
-      if (!confirmed) return;
-    }
-    this.settings.imageFolder = nextPath;
-    await this.saveSettings();
-    try {
-      await this.stateManager.unloadSidecar();
-    } catch (e) {
-      console.error("CSV Quiz: \u5207\u6362\u56FE\u7247\u6587\u4EF6\u5939\u524D\u4FDD\u5B58\u5F53\u524D\u8FDB\u5EA6\u5931\u8D25", e);
-      new import_obsidian8.Notice("\u5F53\u524D\u8FDB\u5EA6\u4FDD\u5B58\u5931\u8D25\uFF0C\u5DF2\u4E2D\u6B62\u5207\u6362\u56FE\u7247\u6587\u4EF6\u5939");
-      this.settings.imageFolder = prevPath;
-      await this.saveSettings();
-      return;
-    }
-    if (this.settings.csvPath && nextPath) {
-      try {
-        const res = await this.stateManager.mergeImageSidecar(
-          this.settings.csvPath,
-          nextPath
-        );
-        if (res.status === "error") {
-          new import_obsidian8.Notice("\u56FE\u7247\u9898\u5386\u53F2\u8FDB\u5EA6\u5408\u5E76\u5931\u8D25\uFF0C\u5DF2\u4FDD\u7559\u539F\u72B6\u6001\u6587\u4EF6");
-        }
-      } catch (e) {
-        console.error("CSV Quiz: \u5408\u5E76\u56FE\u7247\u9898\u5386\u53F2\u8FDB\u5EA6\u5931\u8D25", e);
+  async useCsvOnly() {
+    const status = await this.resolveBank(true);
+    if (status !== null && status.status === "prompt" && status.reason === "both" && !!status.csvCandidate) {
+      const folder = normalizeBankFolder(this.settings.bankFolder);
+      if (folder !== "") {
+        this.settings.bankSingleSources[folder] = "csv";
+        await this.saveSettings();
+        await this.resolveBank(true);
+        this.refreshQuiz();
+        this.syncSettingsUI();
+        return;
       }
     }
-    this.refreshQuiz();
+    new import_obsidian8.Notice("\u5F53\u524D\u9898\u5E93\u6CA1\u6709\u53EF\u9009\u7684 CSV/CQV \u6216\u65E0\u9700\u9009\u62E9");
+  }
+  /**
+   * 启动时把旧内容源（settings.csvPath）的 sidecar 迁移到新题库锚点
+   * （manifest / 唯一 CSV / 图片文件夹）。仅在两者不同且旧路径已配置时执行；
+   * 保留旧文件以便回退。
+   */
+  async migrateContentSidecarToBank() {
+    const res = await this.resolveBank(true);
+    if (res.status !== "ok") return;
+    await this.migrateManifestSidecarBack(res.source);
+    const legacyPath = this.settings.csvPath.trim();
+    if (legacyPath === "" || legacyPath === res.source.anchor) return;
+    try {
+      const transfer = await this.stateManager.transferSidecar(
+        legacyPath,
+        res.source.anchor
+      );
+      if (transfer.status === "error") {
+        console.error(
+          "CSV Quiz: \u65E7\u5185\u5BB9\u6E90 sidecar \u8FC1\u79FB\u5931\u8D25",
+          legacyPath,
+          "\u2192",
+          res.source.anchor,
+          transfer.reason
+        );
+      }
+    } catch (e) {
+      console.error("CSV Quiz: \u65E7\u5185\u5BB9\u6E90 sidecar \u8FC1\u79FB\u5931\u8D25", e);
+    }
   }
   /**
    * 根据当前状态栏显示「待复习」卡片数提醒；无到期卡片、
    * 无状态或设置关闭时清空文本。
    */
   updateMemoryReminder() {
+    if (!this.statusBar) return;
     if (!this.settings || !this.settings.memoryReminder) {
       this.statusBar.setText("");
       return;
@@ -9771,6 +10342,8 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
       ...clean,
       csvPath: typeof raw.csvPath === "string" ? raw.csvPath.trim() : DEFAULT_SETTINGS.csvPath,
       imageFolder: typeof raw.imageFolder === "string" ? normalizeVaultFolder(raw.imageFolder) : DEFAULT_SETTINGS.imageFolder,
+      bankFolder: typeof raw.bankFolder === "string" ? normalizeBankFolder(raw.bankFolder) : DEFAULT_SETTINGS.bankFolder,
+      bankSingleSources: normalizeBankSingleSources(raw.bankSingleSources),
       autoNextDelay: toNumber(
         raw.autoNextDelay,
         DEFAULT_SETTINGS.autoNextDelay
@@ -9789,6 +10362,19 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
       keyMastered: toBinding(raw.keyMastered, DEFAULT_SETTINGS.keyMastered),
       keyRepeat: toBinding(raw.keyRepeat, DEFAULT_SETTINGS.keyRepeat)
     };
+    if (!Object.prototype.hasOwnProperty.call(raw, "bankFolder")) {
+      const migrated = migrateLegacySettings({
+        bankFolder: this.settings.bankFolder,
+        csvPath: typeof raw.csvPath === "string" ? raw.csvPath : "",
+        imageFolder: typeof raw.imageFolder === "string" ? raw.imageFolder : "",
+        bankSingleSources: this.settings.bankSingleSources
+      });
+      if (migrated.changed) {
+        this.settings.bankFolder = migrated.bankFolder;
+        this.settings.bankSingleSources = migrated.bankSingleSources;
+        this.bankMigrated = true;
+      }
+    }
   }
   async saveSettings() {
     this.updateMemoryReminder();
@@ -9797,25 +10383,82 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
   async flushSettingsSave() {
     await this.stateManager.flushSettingsSave();
   }
-  /** 当前内容源锚点：CSV/CQV 优先，否则图片文件夹；用于 sidecar 命名与状态匹配。 */
+  /** 当前题库的 sidecar 锚点（解析成功时）；未解析/未配置返回 ""。 */
   getContentPath() {
-    return resolveContentPath(this.settings.csvPath, this.settings.imageFolder);
+    var _a;
+    return ((_a = this.bankStatus) == null ? void 0 : _a.status) === "ok" ? this.bankStatus.source.anchor : "";
+  }
+  /**
+   * manifest 已删除但 manifest.sidecar.json 仍在时，把状态反向迁移到当前
+   * 单源锚点（CSV/图片文件夹），避免重启后加载陈旧 sidecar 造成进度回退。
+   * 迁移成功后归档 manifest sidecar，防止重复合并旧快照。
+   */
+  async migrateManifestSidecarBack(source) {
+    if (source.mode === "manifest") return;
+    const manifestAnchor = manifestAnchorForBank(source.bankFolder);
+    if (manifestAnchor === source.anchor) return;
+    const manifestSidecar = sidecarPathFor(manifestAnchor);
+    try {
+      if (!await this.app.vault.adapter.exists(manifestSidecar)) return;
+      const transfer = await this.stateManager.transferSidecar(
+        manifestAnchor,
+        source.anchor
+      );
+      if (transfer.status === "copied" || transfer.status === "merged") {
+        await this.stateManager.archiveSidecar(manifestAnchor);
+      }
+    } catch (e) {
+      console.error("CSV Quiz: manifest sidecar \u53CD\u5411\u8FC1\u79FB\u5931\u8D25", e);
+    }
   }
   /** 确保当前题库的 sidecar 状态已载入内存（无视图时面板未载入）。返回是否可用。 */
-  async ensureSidecarLoaded() {
-    const contentPath = this.getContentPath();
-    if (!contentPath) return false;
+  async ensureSidecarLoaded(notice = true) {
+    const res = await this.resolveBank();
+    if (res.status !== "ok") {
+      if (notice) new import_obsidian8.Notice(res.message);
+      return false;
+    }
+    await this.migrateManifestSidecarBack(res.source);
+    const anchor = res.source.anchor;
     const st = this.stateManager.getState();
-    if (st !== null && this.stateManager.getContentPath() === contentPath) {
+    if (st !== null && this.stateManager.getContentPath() === anchor) {
       return true;
     }
-    const res = await this.stateManager.loadSidecar(contentPath, {
+    if (res.source.mode === "manifest" && res.source.contentPath !== "") {
+      try {
+        const manifestSidecar = sidecarPathFor(anchor);
+        const legacySidecar = sidecarPathFor(res.source.contentPath);
+        const manifestExists = await this.app.vault.adapter.exists(
+          manifestSidecar
+        );
+        if (!manifestExists) {
+          const legacyExists = await this.app.vault.adapter.exists(
+            legacySidecar
+          );
+          if (legacyExists) {
+            const transfer = await this.stateManager.transferSidecar(
+              res.source.contentPath,
+              anchor
+            );
+            if (transfer.status === "error") {
+              console.error(
+                "CSV Quiz: \u8FC1\u79FB\u65E7\u5185\u5BB9 sidecar \u5230 manifest \u951A\u70B9\u5931\u8D25",
+                transfer.reason
+              );
+            }
+          }
+        }
+      } catch (e) {
+        console.error("CSV Quiz: \u68C0\u67E5 manifest sidecar \u5931\u8D25", e);
+      }
+    }
+    const load = await this.stateManager.loadSidecar(anchor, {
       favorite: this.settings.defaultFilterFavorite,
       mastered: this.settings.defaultFilterMastered,
       repeat: this.settings.defaultFilterRepeat,
       wrong: this.settings.defaultFilterWrong
     });
-    return res.status !== "corrupt";
+    return load.status !== "corrupt";
   }
   /**
    * 清除已保存的刷题进度；若面板已打开则立即重建会话。
@@ -9831,7 +10474,7 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
         await view.applyResetChoice(choice);
       } else {
         if (!await this.ensureSidecarLoaded()) {
-          new import_obsidian8.Notice("\u65E0\u6CD5\u52A0\u8F7D\u9898\u5E93\u72B6\u6001\uFF1A\u8BF7\u5148\u8BBE\u7F6E\u9898\u5E93\u6587\u4EF6\u6216\u56FE\u7247\u9898\u6587\u4EF6\u5939\uFF0C\u5E76\u6253\u5F00\u5237\u9898\u9762\u677F");
+          new import_obsidian8.Notice("\u65E0\u6CD5\u52A0\u8F7D\u9898\u5E93\u72B6\u6001\uFF1A\u8BF7\u5148\u8BBE\u7F6E\u9898\u5E93\u6587\u4EF6\u5939\u5E76\u6253\u5F00\u5237\u9898\u9762\u677F");
           return;
         }
         const state = this.stateManager.getState();
@@ -9866,7 +10509,7 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
       return;
     }
     if (!await this.ensureSidecarLoaded()) {
-      new import_obsidian8.Notice("\u65E0\u6CD5\u52A0\u8F7D\u9898\u5E93\u72B6\u6001\uFF1A\u8BF7\u5148\u8BBE\u7F6E\u9898\u5E93\u6587\u4EF6\u6216\u56FE\u7247\u9898\u6587\u4EF6\u5939\uFF0C\u5E76\u6253\u5F00\u5237\u9898\u9762\u677F");
+      new import_obsidian8.Notice("\u65E0\u6CD5\u52A0\u8F7D\u9898\u5E93\u72B6\u6001\uFF1A\u8BF7\u5148\u8BBE\u7F6E\u9898\u5E93\u6587\u4EF6\u5939\u5E76\u6253\u5F00\u5237\u9898\u9762\u677F");
       return;
     }
     await this.stateManager.clearState();
@@ -9885,7 +10528,7 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
       await view.reorderForRandomSetting();
     } else {
       if (!await this.ensureSidecarLoaded()) {
-        new import_obsidian8.Notice("\u65E0\u6CD5\u52A0\u8F7D\u9898\u5E93\u72B6\u6001\uFF1A\u8BF7\u5148\u8BBE\u7F6E\u9898\u5E93\u6587\u4EF6\u6216\u56FE\u7247\u9898\u6587\u4EF6\u5939\uFF0C\u5E76\u6253\u5F00\u5237\u9898\u9762\u677F");
+        new import_obsidian8.Notice("\u65E0\u6CD5\u52A0\u8F7D\u9898\u5E93\u72B6\u6001\uFF1A\u8BF7\u5148\u8BBE\u7F6E\u9898\u5E93\u6587\u4EF6\u5939\u5E76\u6253\u5F00\u5237\u9898\u9762\u677F");
         return;
       }
       const state = this.stateManager.getState();
@@ -9903,7 +10546,7 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
       await view.resetDailyNewQuota();
     } else {
       if (!await this.ensureSidecarLoaded()) {
-        new import_obsidian8.Notice("\u65E0\u6CD5\u52A0\u8F7D\u9898\u5E93\u72B6\u6001\uFF1A\u8BF7\u5148\u8BBE\u7F6E\u9898\u5E93\u6587\u4EF6\u6216\u56FE\u7247\u9898\u6587\u4EF6\u5939\uFF0C\u5E76\u6253\u5F00\u5237\u9898\u9762\u677F");
+        new import_obsidian8.Notice("\u65E0\u6CD5\u52A0\u8F7D\u9898\u5E93\u72B6\u6001\uFF1A\u8BF7\u5148\u8BBE\u7F6E\u9898\u5E93\u6587\u4EF6\u5939\u5E76\u6253\u5F00\u5237\u9898\u9762\u677F");
         return;
       }
       const state = this.stateManager.getState();
@@ -9924,26 +10567,32 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
     }
   }
   /**
-   * 手动刷新图片题库：重新扫描图片文件夹并保留当前答题/FSRS 进度。
-   * 面板未打开时无需处理，下次打开会自然重新扫描。
+   * 手动刷新题库：重新解析题库文件夹（manifest/CSV/图片），并保留当前答题/FSRS 进度。
+   * 面板未打开时仅重新解析，下次打开会自然重新扫描。
    */
-  async refreshImageBank() {
-    if (!this.settings.imageFolder) {
-      new import_obsidian8.Notice("\u672A\u8BBE\u7F6E\u56FE\u7247\u9898\u6587\u4EF6\u5939");
+  async refreshBank() {
+    const res = await this.resolveBank(true);
+    if (res.status !== "ok") {
+      new import_obsidian8.Notice(res.message);
       return;
     }
     const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
     const view = leaf == null ? void 0 : leaf.view;
     if (!view) {
-      new import_obsidian8.Notice("\u5237\u9898\u9762\u677F\u672A\u6253\u5F00\uFF1A\u56FE\u7247\u9898\u5E93\u5C06\u5728\u4E0B\u6B21\u6253\u5F00\u65F6\u91CD\u65B0\u626B\u63CF");
+      new import_obsidian8.Notice("\u5237\u9898\u9762\u677F\u672A\u6253\u5F00\uFF1A\u9898\u5E93\u5C06\u5728\u4E0B\u6B21\u6253\u5F00\u65F6\u91CD\u65B0\u626B\u63CF");
       return;
     }
     try {
       await view.refresh(true);
+      this.syncSettingsUI();
     } catch (e) {
-      console.error("CSV Quiz: \u5237\u65B0\u56FE\u7247\u9898\u5E93\u5931\u8D25", e);
-      new import_obsidian8.Notice("\u5237\u65B0\u56FE\u7247\u9898\u5E93\u5931\u8D25");
+      console.error("CSV Quiz: \u5237\u65B0\u9898\u5E93\u5931\u8D25", e);
+      new import_obsidian8.Notice("\u5237\u65B0\u9898\u5E93\u5931\u8D25");
     }
+  }
+  /** @deprecated 旧名称，保留为 refreshBank 的别名。 */
+  async refreshImageBank() {
+    await this.refreshBank();
   }
   /** 「随机考试题数」设置变更后同步视图按钮文案（即时生效）。 */
   syncRandomExamCount() {

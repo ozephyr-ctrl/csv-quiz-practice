@@ -10,7 +10,32 @@ import { QuizView } from "./quizView";
 import { StateManager } from "./stateManager";
 import { CSVWriteQueue } from "./csvHandler";
 import { countDueCards } from "./utils";
-import { normalizeVaultFolder, resolveContentPath } from "./contentSource";
+import { normalizeVaultFolder } from "./contentSource";
+import {
+  manifestAnchorForBank,
+  migrateLegacySettings,
+  normalizeBankFolder,
+  resolveBankSource,
+  type BankResolution,
+  type ResolvedBankSource,
+} from "./bankResolver";
+import { sidecarPathFor } from "./sidecar";
+
+/**
+ * 归一化「仅用 CSV」记录：只保留 value === "csv" 的字符串键，
+ * key 用 normalizeBankFolder 归一（vault 根保留 "/"，空串/非法键丢弃）。
+ */
+function normalizeBankSingleSources(raw: unknown): Record<string, "csv"> {
+  const out: Record<string, "csv"> = {};
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (value !== "csv") continue;
+    const folder = normalizeBankFolder(key);
+    if (folder === "") continue;
+    out[folder] = "csv";
+  }
+  return out;
+}
 
 export default class CSVQuizPlugin extends Plugin {
   settings: PluginSettings;
@@ -18,6 +43,9 @@ export default class CSVQuizPlugin extends Plugin {
   csvWriteQueue: CSVWriteQueue;
   statusBar: HTMLElement;
   memoryReminderTimer: number | null = null;
+  /** 最近一次题库来源解析结果（设置页同步读取）。 */
+  bankStatus: BankResolution | null = null;
+  private bankMigrated = false;
   private settingTab: CSVQuizSettingTab | null = null;
 
   async onload(): Promise<void> {
@@ -25,9 +53,16 @@ export default class CSVQuizPlugin extends Plugin {
     this.csvWriteQueue = new CSVWriteQueue(this.app);
 
     await this.loadSettings();
+    // 3.6.x → 题库文件夹：迁移结果需立即落盘，避免下次启动重复迁移/提示
+    if (this.bankMigrated) {
+      await this.saveSettings();
+      new Notice(
+        "已迁移为题库文件夹模式；旧混合配置按仅 CSV 加载，如需图片混排请创建 manifest.json"
+      );
+    }
     await this.stateManager.loadLegacyQuizState();
 
-    // 阶段 4：迁移旧版进度——data.json.quizState → 当前 csvPath 的 sidecar（无视图场景）
+    // 阶段 4：迁移旧版进度——data.json.quizState → 旧 csvPath 的 sidecar（无视图场景）
     // 仅图片模式没有 CSV 内容源，旧版 CSV 进度无可迁移目标，直接跳过。
     try {
       if (this.settings.csvPath) {
@@ -55,6 +90,17 @@ export default class CSVQuizPlugin extends Plugin {
       }
     } catch (e) {
       console.error("CSV Quiz: 迁移旧进度失败", e);
+    }
+
+    // 题库来源解析 + 旧内容源 sidecar → 新锚点（manifest/唯一 CSV/图片文件夹）
+    await this.migrateContentSidecarToBank();
+    // 迁移完成后清空 legacy 路径，避免之后每次启动把旧 sidecar 再次迁移到
+    // 当前（可能已切换的）题库锚点。
+    if (this.bankMigrated) {
+      this.settings.csvPath = "";
+      this.settings.imageFolder = "";
+      await this.saveSettings();
+      this.bankMigrated = false;
     }
 
     this.registerView(VIEW_TYPE_QUIZ, (leaf) => {
@@ -97,7 +143,7 @@ export default class CSVQuizPlugin extends Plugin {
     );
     // L7: 迁移会清空内存状态（currentState 为 null）；异步载入当前题库 sidecar
     // 后刷新状态栏提醒，避免迁移后提醒失效直到首次打开面板
-    void this.ensureSidecarLoaded().then(() => this.updateMemoryReminder());
+    void this.ensureSidecarLoaded(false).then(() => this.updateMemoryReminder());
   }
 
   onunload(): void {
@@ -141,106 +187,128 @@ export default class CSVQuizPlugin extends Plugin {
   }
 
   /**
-   * 题库路径变更入口：当前视图有 sidecar 状态时弹轻量确认（信息性，防误切），
-   * 确认后切换（切换即落盘：unloadSidecar flush 当前 sidecar 再重载新题库）。
-   * 无状态（新题库首次使用）直接切换。未变化时直接忽略。
+   * 解析当前题库文件夹的来源（缓存到 this.bankStatus；force=true 重新扫描）。
+   * 解析异常统一转为 error 结果，避免设置页/视图因 IO 异常中断。
    */
-  async changeQuizPath(newPath: string): Promise<void> {
-    const nextPath = newPath.trim();
-    if (nextPath === this.settings.csvPath) return;
-    const prevPath = this.settings.csvPath;
-    const prevContentPath = this.getContentPath();
+  private async resolveBank(force = false): Promise<BankResolution> {
+    if (!force && this.bankStatus !== null) return this.bankStatus;
+    let res: BankResolution;
+    try {
+      res = await resolveBankSource(this.app.vault, {
+        bankFolder: this.settings.bankFolder,
+        bankSingleSources: this.settings.bankSingleSources,
+      });
+    } catch (e) {
+      console.error("CSV Quiz: 解析题库来源失败", e);
+      res = {
+        status: "error",
+        reason: "resolve-failed",
+        message: `解析题库来源失败：${e instanceof Error ? e.message : String(e)}`,
+      };
+    }
+    this.bankStatus = res;
+    return res;
+  }
+
+  /**
+   * 题库文件夹变更入口：有 sidecar 状态时轻量确认；切换即落盘并刷新。
+   * 锚点变化（manifest/唯一 CSV/图片文件夹）时把旧锚点 sidecar 转移到新锚点
+   * （保留旧文件，便于回退）。
+   * 返回 false 表示用户取消或保存失败（设置已回滚）。
+   */
+  async changeBankFolder(newFolder: string): Promise<boolean> {
+    const next = normalizeBankFolder(newFolder);
+    if (next === this.settings.bankFolder && next !== "") return true;
+
     const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
     const view = leaf?.view as QuizView | undefined;
     if (view && view.hasLoadedState()) {
-      const confirmed = await view.confirmQuizSwitch(
-        nextPath || "（仅使用图片题）"
-      );
-      if (!confirmed) return;
+      const confirmed = await view.confirmQuizSwitch(next || "（未设置）");
+      if (!confirmed) return false;
     }
-    this.settings.csvPath = nextPath;
+
+    const prevFolder = this.settings.bankFolder;
+
+    this.settings.bankFolder = next;
     await this.saveSettings();
     // 切换即落盘：flush 当前 sidecar 并清空 contentPath，避免刷新时误清旧题库状态
     try {
       await this.stateManager.unloadSidecar();
     } catch (e) {
-      // T1: 旧题库状态保存失败时中止切换并回滚设置，避免「设置指向新路径、
+      // 旧题库状态保存失败时中止切换并回滚设置，避免「设置指向新题库、
       // 视图停留旧题库」的不一致状态
       console.error("CSV Quiz: 切换题库前保存当前进度失败", e);
       new Notice("当前进度保存失败，已中止切换题库");
-      this.settings.csvPath = prevPath;
+      this.settings.bankFolder = prevFolder;
       await this.saveSettings();
-      return;
+      return false;
     }
-    // 仅在“新增/移除 CSV 导致内容源锚点变化”时迁移状态：
-    // 图片-only → 混合（图片 sidecar 并入 CSV sidecar）；混合 → 图片-only（复制回图片 sidecar）。
-    // 切换不同 CSV 题库时不迁移，保持各题库状态独立。
-    const nextContentPath = this.getContentPath();
-    const anchorChanged =
-      prevContentPath !== "" &&
-      nextContentPath !== "" &&
-      prevContentPath !== nextContentPath &&
-      ((!prevPath && !!nextPath) || (!!prevPath && !nextPath));
-    if (anchorChanged) {
-      try {
-        const res = await this.stateManager.transferSidecar(
-          prevContentPath,
-          nextContentPath
-        );
-        if (res.status === "error") {
-          new Notice("图片题/文字题进度合并失败，已保留原状态文件");
-        }
-      } catch (e) {
-        console.error("CSV Quiz: 内容源切换时迁移状态失败", e);
-        new Notice("图片题/文字题进度合并失败，已保留原状态文件");
-      }
-    }
+
+    const res = await this.resolveBank(true);
+    // 切换题库文件夹 = 切换题库：不把旧库 sidecar 迁移到新库，避免题号重叠时
+    // 污染新库的答题/FSRS；同一文件夹内 manifest 增删由视图/启动路径的
+    // 正向/反向锚点迁移处理。
     this.refreshQuiz();
+    this.syncSettingsUI();
+    if (res.status !== "ok") new Notice(res.message);
+    return true;
   }
 
   /**
-   * 图片题文件夹变更入口：有状态时轻量确认；切换即落盘并刷新。
-   * 仅图片模式下文件夹即内容源，换文件夹视为新题库，不迁移旧状态。
+   * 当前题库同时含 CSV/CQV 与图片（prompt/both）时，记住「该文件夹仅用 CSV」，
+   * 重新解析并刷新视图。
    */
-  async changeImageFolder(newPath: string): Promise<void> {
-    const nextPath = normalizeVaultFolder(newPath);
-    if (nextPath === this.settings.imageFolder) return;
-    const prevPath = this.settings.imageFolder;
-    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
-    const view = leaf?.view as QuizView | undefined;
-    if (view && view.hasLoadedState()) {
-      const confirmed = await view.confirmQuizSwitch(
-        nextPath ? `图片文件夹「${nextPath}」` : "（不启用图片题）"
-      );
-      if (!confirmed) return;
-    }
-    this.settings.imageFolder = nextPath;
-    await this.saveSettings();
-    try {
-      await this.stateManager.unloadSidecar();
-    } catch (e) {
-      console.error("CSV Quiz: 切换图片文件夹前保存当前进度失败", e);
-      new Notice("当前进度保存失败，已中止切换图片文件夹");
-      this.settings.imageFolder = prevPath;
-      await this.saveSettings();
-      return;
-    }
-    // 已选 CSV/CQV 时，图片状态统一存 CSV sidecar；若该图片文件夹有历史
-    // 图片-only sidecar，先合并进来再刷新，避免切换后丢进度。
-    if (this.settings.csvPath && nextPath) {
-      try {
-        const res = await this.stateManager.mergeImageSidecar(
-          this.settings.csvPath,
-          nextPath
-        );
-        if (res.status === "error") {
-          new Notice("图片题历史进度合并失败，已保留原状态文件");
-        }
-      } catch (e) {
-        console.error("CSV Quiz: 合并图片题历史进度失败", e);
+  async useCsvOnly(): Promise<void> {
+    // 重新解析，避免设置页使用外部文件变化前的陈旧 both 缓存
+    const status = await this.resolveBank(true);
+    if (
+      status !== null &&
+      status.status === "prompt" &&
+      status.reason === "both" &&
+      !!status.csvCandidate
+    ) {
+      const folder = normalizeBankFolder(this.settings.bankFolder);
+      if (folder !== "") {
+        this.settings.bankSingleSources[folder] = "csv";
+        await this.saveSettings();
+        await this.resolveBank(true);
+        this.refreshQuiz();
+        this.syncSettingsUI();
+        return;
       }
     }
-    this.refreshQuiz();
+    new Notice("当前题库没有可选的 CSV/CQV 或无需选择");
+  }
+
+  /**
+   * 启动时把旧内容源（settings.csvPath）的 sidecar 迁移到新题库锚点
+   * （manifest / 唯一 CSV / 图片文件夹）。仅在两者不同且旧路径已配置时执行；
+   * 保留旧文件以便回退。
+   */
+  private async migrateContentSidecarToBank(): Promise<void> {
+    const res = await this.resolveBank(true);
+    if (res.status !== "ok") return;
+    // manifest 删除后 manifest.sidecar.json 的反向迁移（启动路径）
+    await this.migrateManifestSidecarBack(res.source);
+    const legacyPath = this.settings.csvPath.trim();
+    if (legacyPath === "" || legacyPath === res.source.anchor) return;
+    try {
+      const transfer = await this.stateManager.transferSidecar(
+        legacyPath,
+        res.source.anchor
+      );
+      if (transfer.status === "error") {
+        console.error(
+          "CSV Quiz: 旧内容源 sidecar 迁移失败",
+          legacyPath,
+          "→",
+          res.source.anchor,
+          transfer.reason
+        );
+      }
+    } catch (e) {
+      console.error("CSV Quiz: 旧内容源 sidecar 迁移失败", e);
+    }
   }
 
   /**
@@ -248,6 +316,8 @@ export default class CSVQuizPlugin extends Plugin {
    * 无状态或设置关闭时清空文本。
    */
   updateMemoryReminder(): void {
+    // onload 早期（loadSettings 迁移后立即 saveSettings）状态栏尚未创建
+    if (!this.statusBar) return;
     if (!this.settings || !this.settings.memoryReminder) {
       this.statusBar.setText("");
       return;
@@ -309,6 +379,11 @@ export default class CSVQuizPlugin extends Plugin {
         typeof raw.imageFolder === "string"
           ? normalizeVaultFolder(raw.imageFolder)
           : DEFAULT_SETTINGS.imageFolder,
+      bankFolder:
+        typeof raw.bankFolder === "string"
+          ? normalizeBankFolder(raw.bankFolder)
+          : DEFAULT_SETTINGS.bankFolder,
+      bankSingleSources: normalizeBankSingleSources(raw.bankSingleSources),
       autoNextDelay: toNumber(
         raw.autoNextDelay,
         DEFAULT_SETTINGS.autoNextDelay
@@ -333,6 +408,23 @@ export default class CSVQuizPlugin extends Plugin {
       keyMastered: toBinding(raw.keyMastered, DEFAULT_SETTINGS.keyMastered),
       keyRepeat: toBinding(raw.keyRepeat, DEFAULT_SETTINGS.keyRepeat),
     };
+
+    // 3.6.x → 题库文件夹迁移：只迁移用户显式保存过的旧路径，不用默认 csvPath
+    // （避免新用户被自动绑定到根目录的 题库.csv）。若 data 已有 bankFolder 字段
+    // （包括用户主动清空后的 ""），说明已进入新模型，不再重复迁移。
+    if (!Object.prototype.hasOwnProperty.call(raw, "bankFolder")) {
+      const migrated = migrateLegacySettings({
+        bankFolder: this.settings.bankFolder,
+        csvPath: typeof raw.csvPath === "string" ? raw.csvPath : "",
+        imageFolder: typeof raw.imageFolder === "string" ? raw.imageFolder : "",
+        bankSingleSources: this.settings.bankSingleSources,
+      });
+      if (migrated.changed) {
+        this.settings.bankFolder = migrated.bankFolder;
+        this.settings.bankSingleSources = migrated.bankSingleSources;
+        this.bankMigrated = true;
+      }
+    }
   }
 
   async saveSettings(): Promise<void> {
@@ -344,28 +436,90 @@ export default class CSVQuizPlugin extends Plugin {
     await this.stateManager.flushSettingsSave();
   }
 
-  /** 当前内容源锚点：CSV/CQV 优先，否则图片文件夹；用于 sidecar 命名与状态匹配。 */
+  /** 当前题库的 sidecar 锚点（解析成功时）；未解析/未配置返回 ""。 */
   private getContentPath(): string {
-    return resolveContentPath(this.settings.csvPath, this.settings.imageFolder);
+    return this.bankStatus?.status === "ok" ? this.bankStatus.source.anchor : "";
+  }
+
+  /**
+   * manifest 已删除但 manifest.sidecar.json 仍在时，把状态反向迁移到当前
+   * 单源锚点（CSV/图片文件夹），避免重启后加载陈旧 sidecar 造成进度回退。
+   * 迁移成功后归档 manifest sidecar，防止重复合并旧快照。
+   */
+  private async migrateManifestSidecarBack(
+    source: ResolvedBankSource
+  ): Promise<void> {
+    if (source.mode === "manifest") return;
+    const manifestAnchor = manifestAnchorForBank(source.bankFolder);
+    if (manifestAnchor === source.anchor) return;
+    const manifestSidecar = sidecarPathFor(manifestAnchor);
+    try {
+      if (!(await this.app.vault.adapter.exists(manifestSidecar))) return;
+      const transfer = await this.stateManager.transferSidecar(
+        manifestAnchor,
+        source.anchor
+      );
+      if (transfer.status === "copied" || transfer.status === "merged") {
+        await this.stateManager.archiveSidecar(manifestAnchor);
+      }
+    } catch (e) {
+      console.error("CSV Quiz: manifest sidecar 反向迁移失败", e);
+    }
   }
 
   /** 确保当前题库的 sidecar 状态已载入内存（无视图时面板未载入）。返回是否可用。 */
-  private async ensureSidecarLoaded(): Promise<boolean> {
-    const contentPath = this.getContentPath();
-    if (!contentPath) return false;
+  private async ensureSidecarLoaded(notice: boolean = true): Promise<boolean> {
+    const res = await this.resolveBank();
+    if (res.status !== "ok") {
+      if (notice) new Notice(res.message);
+      return false;
+    }
+    // manifest 删除后的反向迁移（启动/无视图重置也覆盖）
+    await this.migrateManifestSidecarBack(res.source);
+    const anchor = res.source.anchor;
     const st = this.stateManager.getState();
-    if (st !== null && this.stateManager.getContentPath() === contentPath) {
+    if (st !== null && this.stateManager.getContentPath() === anchor) {
       return true;
     }
-    // 未载入或路径不匹配（含面板从未打开 contentPath=null）：按当前设置载入。
+    // manifest 模式：`<folder>/manifest.sidecar.json` 尚未建立时，把旧内容文件
+    // 的 sidecar 一次性迁移过来（保留旧文件），避免复合题库首个会话丢进度。
+    if (res.source.mode === "manifest" && res.source.contentPath !== "") {
+      try {
+        const manifestSidecar = sidecarPathFor(anchor);
+        const legacySidecar = sidecarPathFor(res.source.contentPath);
+        const manifestExists = await this.app.vault.adapter.exists(
+          manifestSidecar
+        );
+        if (!manifestExists) {
+          const legacyExists = await this.app.vault.adapter.exists(
+            legacySidecar
+          );
+          if (legacyExists) {
+            const transfer = await this.stateManager.transferSidecar(
+              res.source.contentPath,
+              anchor
+            );
+            if (transfer.status === "error") {
+              console.error(
+                "CSV Quiz: 迁移旧内容 sidecar 到 manifest 锚点失败",
+                transfer.reason
+              );
+            }
+          }
+        }
+      } catch (e) {
+        console.error("CSV Quiz: 检查 manifest sidecar 失败", e);
+      }
+    }
+    // 未载入或路径不匹配（含面板从未打开 contentPath=null）：按当前锚点载入。
     // loadSidecar 会正确设置 contentPath/currentState；corrupt 仍安全拒绝。
-    const res = await this.stateManager.loadSidecar(contentPath, {
+    const load = await this.stateManager.loadSidecar(anchor, {
       favorite: this.settings.defaultFilterFavorite,
       mastered: this.settings.defaultFilterMastered,
       repeat: this.settings.defaultFilterRepeat,
       wrong: this.settings.defaultFilterWrong,
     });
-    return res.status !== "corrupt";
+    return load.status !== "corrupt";
   }
 
   /**
@@ -386,7 +540,7 @@ export default class CSVQuizPlugin extends Plugin {
       } else {
         // M5: 无视图时 sidecar 状态未载入（currentState 为 null），先确保载入
         if (!(await this.ensureSidecarLoaded())) {
-          new Notice("无法加载题库状态：请先设置题库文件或图片题文件夹，并打开刷题面板");
+          new Notice("无法加载题库状态：请先设置题库文件夹并打开刷题面板");
           return;
         }
         const state = this.stateManager.getState();
@@ -437,7 +591,7 @@ export default class CSVQuizPlugin extends Plugin {
     // W1: 无视图时先确保 sidecar 状态已载入，否则 clearState() 走兼容分支
     // 写 data.json.quizState（而非 sidecar），磁盘 sidecar 原样保留、静默无效
     if (!(await this.ensureSidecarLoaded())) {
-      new Notice("无法加载题库状态：请先设置题库文件或图片题文件夹，并打开刷题面板");
+      new Notice("无法加载题库状态：请先设置题库文件夹并打开刷题面板");
       return;
     }
     await this.stateManager.clearState();
@@ -458,7 +612,7 @@ export default class CSVQuizPlugin extends Plugin {
     } else {
       // M5: 无视图时先确保 sidecar 状态已载入，避免静默 no-op
       if (!(await this.ensureSidecarLoaded())) {
-        new Notice("无法加载题库状态：请先设置题库文件或图片题文件夹，并打开刷题面板");
+        new Notice("无法加载题库状态：请先设置题库文件夹并打开刷题面板");
         return;
       }
       const state = this.stateManager.getState();
@@ -479,7 +633,7 @@ export default class CSVQuizPlugin extends Plugin {
       // M5: 无视图时先确保 sidecar 状态已载入，避免静默 no-op
       // （未开过面板且切换过题库路径时 currentState 为 null）
       if (!(await this.ensureSidecarLoaded())) {
-        new Notice("无法加载题库状态：请先设置题库文件或图片题文件夹，并打开刷题面板");
+        new Notice("无法加载题库状态：请先设置题库文件夹并打开刷题面板");
         return;
       }
       const state = this.stateManager.getState();
@@ -502,26 +656,33 @@ export default class CSVQuizPlugin extends Plugin {
   }
 
   /**
-   * 手动刷新图片题库：重新扫描图片文件夹并保留当前答题/FSRS 进度。
-   * 面板未打开时无需处理，下次打开会自然重新扫描。
+   * 手动刷新题库：重新解析题库文件夹（manifest/CSV/图片），并保留当前答题/FSRS 进度。
+   * 面板未打开时仅重新解析，下次打开会自然重新扫描。
    */
-  async refreshImageBank(): Promise<void> {
-    if (!this.settings.imageFolder) {
-      new Notice("未设置图片题文件夹");
+  async refreshBank(): Promise<void> {
+    const res = await this.resolveBank(true);
+    if (res.status !== "ok") {
+      new Notice(res.message);
       return;
     }
     const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
     const view = leaf?.view as QuizView | undefined;
     if (!view) {
-      new Notice("刷题面板未打开：图片题库将在下次打开时重新扫描");
+      new Notice("刷题面板未打开：题库将在下次打开时重新扫描");
       return;
     }
     try {
       await view.refresh(true);
+      this.syncSettingsUI();
     } catch (e) {
-      console.error("CSV Quiz: 刷新图片题库失败", e);
-      new Notice("刷新图片题库失败");
+      console.error("CSV Quiz: 刷新题库失败", e);
+      new Notice("刷新题库失败");
     }
+  }
+
+  /** @deprecated 旧名称，保留为 refreshBank 的别名。 */
+  async refreshImageBank(): Promise<void> {
+    await this.refreshBank();
   }
 
   /** 「随机考试题数」设置变更后同步视图按钮文案（即时生效）。 */

@@ -73,6 +73,12 @@ export interface QuizSessionState {
 
 export interface PluginSettings {
   csvPath: string;
+  /** @deprecated 旧版单一图片文件夹设置；3.6.x 迁移后不再作为主入口。 */
+  imageFolder: string;
+  /** 题库文件夹（vault 相对路径；"/"=vault 根；""=未设置）。 */
+  bankFolder: string;
+  /** 无 manifest 且同目录 CSV+图片时，用户为某题库选择「仅用 CSV」的文件夹集合。 */
+  bankSingleSources: Record<string, "csv">;
   randomOrder: boolean;
   randomOptions: boolean;
   autoNextDelay: number;
@@ -113,8 +119,6 @@ export interface PluginSettings {
   keyMastered: string;
   /** 标记快捷键：重复 */
   keyRepeat: string;
-  /** 图片题文件夹（vault 相对路径；空串 = 不启用） */
-  imageFolder: string;
 }
 
 export interface PluginData {
@@ -152,4 +156,6 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   keyMastered: "e",
   keyRepeat: "x",
   imageFolder: "",
+  bankFolder: "",
+  bankSingleSources: {},
 };
