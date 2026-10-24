@@ -123,8 +123,8 @@ Choose an explicit source type in settings:
 
 每个状态文件保存答题记录、统计、记忆卡片（FSRS）、筛选、收藏/掌握/错题、标签与分类的修改等。**切换题库时各题库状态相互独立、自动恢复，不会互相覆盖。**
 
-- 首次使用复合题库时，会把 `content`、`contents`、`imageFolder` 各自旧 sidecar 的答题/FSRS/meta/累计统计合并到 `manifest.sidecar.json`；旧 sidecar 保留作回退。合并是幂等的（每次载入比对，无变化不写盘，重复运行不会翻倍）。
-  On first use of a composite bank, progress from the sidecars of `content`, `contents`, and `imageFolder` is merged into `manifest.sidecar.json`; the old sidecars are kept for rollback. The merge is idempotent (compared on every load, no write when unchanged, no double counting).
+- 首次使用复合题库时，会把 `content`、`contents`、`imageFolder` 各自旧 sidecar 的答题/FSRS/meta/累计统计合并到 `manifest.sidecar.json`；旧 sidecar 保留作回退。合并是幂等的（每次载入比对，无变化不写盘，重复运行不会翻倍）。重置进度时会记录锚点级重置时间戳，重置前写入的组成 sidecar 不再被自动并回；重置后单独使用组成来源产生的新进度仍会并入。
+  On first use of a composite bank, progress from the sidecars of `content`, `contents`, and `imageFolder` is merged into `manifest.sidecar.json`; the old sidecars are kept for rollback. The merge is idempotent (compared on every load, no write when unchanged, no double counting). Resetting progress records a per-anchor reset timestamp; component sidecars written before the reset are no longer merged back, while new progress written afterwards still merges.
 
 State files are named by source type:
 
@@ -225,7 +225,7 @@ Each state file holds answer records, statistics, FSRS cards, filters, favorite/
   Forward/reverse cards share tags, categories and flags; editing either card updates the same CSV row
 - 修改自动保存到**状态文件**（不修改题库文件本身）
   Changes auto-save to the **state file** (the bank file itself is not modified)
-- **导出修改到 CSV**（编辑者用）：把状态文件中的标签/分类/重复修改写回题目所属 CSV 并清除对应覆盖；多 CSV manifest 会逐文件写回，`.cqv` 源跳过
+- **导出修改到 CSV**（编辑者用）：把状态文件中的标签/分类/重复修改写回题目所属 CSV 并清除对应覆盖；多 CSV manifest 会逐文件写回，`.cqv` 源跳过。导出清理的 B 类字段会跨 manifest 刷新保持清除，组件旧字段不会回填
   **Export changes to CSV** (for bank authors): write tag/category/repeat edits back to each question's source CSV and clear the overrides; multi-CSV manifests are written per file, `.cqv` sources are skipped
 
 ### 编译产物（.cqv）/ Compiled Bank (.cqv)

@@ -538,10 +538,31 @@ export class QuizView extends ItemView {
           // 用内存状态覆盖并保存；meta 逐字段恢复（getMeta 返回内部引用，无法整体替换）
           this.stateManager.setState(inMemoryState);
           this.restoreMetaFrom(inMemoryMeta);
-          await this.stateManager.saveStateImmediately(inMemoryState);
+          // 3A「使用当前」：内存可能是旧子集，强制走慢路径三方合并，
+          // 避免快路径覆盖 ensureManifestSidecarMerged 刚写入的合并结果。
+          await this.stateManager.saveStateImmediately(inMemoryState, {
+            forceMerge: true,
+          });
           // M2: 落盘期间已开始新加载流程 → 中止
-          if (epoch !== this.loadEpoch) return;
-          effectiveState = inMemoryState;
+          if (this.isClosed || epoch !== this.loadEpoch) return;
+          // 落盘的是「内存 ∪ 磁盘」合并结果，此时内存/视图仍是旧子集。
+          // 重新载入合并后的 sidecar，避免后续保存/记录清理/记忆重置拿子集
+          // 当权威状态覆盖磁盘全量。
+          const mergedLoad = await this.stateManager.loadSidecar(contentPath, {
+            favorite: settings.defaultFilterFavorite,
+            mastered: settings.defaultFilterMastered,
+            repeat: settings.defaultFilterRepeat,
+            wrong: settings.defaultFilterWrong,
+          });
+          if (this.isClosed || epoch !== this.loadEpoch) return;
+          if (mergedLoad.status === "corrupt") {
+            this.canPersistState = false;
+            this.showError(
+              "状态文件损坏，请重置刷题进度或删除状态文件后重试"
+            );
+            return;
+          }
+          effectiveState = mergedLoad.state;
         }
       }
     }
@@ -763,8 +784,15 @@ export class QuizView extends ItemView {
         return;
       }
 
+      const metaFieldClears = (
+        this.plugin as unknown as {
+          getManifestMetaClears?: (
+            anchor: string
+          ) => Map<string, Map<string, number>>;
+        }
+      ).getManifestMetaClears?.(this.sourceAnchor);
       const outcome: SidecarMergeOutcome =
-        await this.stateManager.mergeSidecarConflicts();
+        await this.stateManager.mergeSidecarConflicts(metaFieldClears);
       if (this.isClosed || epoch !== this.loadEpoch) return;
       if (outcome.status !== "merged") {
         if (outcome.unreadable) {
@@ -1838,6 +1866,8 @@ export class QuizView extends ItemView {
         // L2: 「重置并开始」是显式重置，必须权威覆盖磁盘旧记录，
         // 否则读改写合并会把刚清掉的进度并回来。
         if (this.canPersistState && this.stateManager.getState()) {
+          // 先写 manifest 重置闸门：防止旧组成 sidecar 在下次载入时并回复活。
+          await this.markManifestReset();
           await this.stateManager.saveStateImmediately(
             this.buildCurrentState(),
             { authoritative: true }
@@ -3173,6 +3203,8 @@ export class QuizView extends ItemView {
         } else {
           // L2: records/cards/all 是用户显式重置且无视图（无 tombstone 可用）：
           // 权威写直接覆盖磁盘，避免读改写合并把旧记录并回来。
+          // 同时写 manifest 重置闸门，防止旧组成 sidecar 被并回复活。
+          await this.markManifestReset();
           await this.stateManager.saveStateImmediately(state, {
             authoritative: true,
           });
@@ -3230,6 +3262,8 @@ export class QuizView extends ItemView {
     // refresh 内部已含 clearState → loadSidecar → applyMetaToQuestions → applyFreshStart
     // 完整重置流；确认弹窗仅存在于 resetProgress/enableMemoryPractice，此处不会重复弹出。
     if (choice === "all") {
+      // 先写重置闸门再 refresh（refresh 内部还会再写一次，幂等）。
+      await this.markManifestReset();
       await this.refresh();
       return;
     }
@@ -3259,6 +3293,8 @@ export class QuizView extends ItemView {
     this.selectedOptions = [];
     this.cancelAutoNext();
     this.renderQuestion();
+    // 重置闸门必须在落盘前写入：防止重置前写入的组成 sidecar 被并回复活。
+    await this.markManifestReset();
     if (choice === "records") {
       // L2: 显式清理刷题记录（保留 memoryCards）→ 权威写覆盖磁盘旧记录，
       // 否则读改写合并会把刚清掉的记录并回来。
@@ -4281,7 +4317,7 @@ export class QuizView extends ItemView {
         });
       } catch (e: unknown) {
         // 部分文件已写成功：仍需清理这些条目的 B 类 meta，避免下次重复导出
-        const cleared = this.clearExportedMeta(meta, exported);
+        const cleared = await this.clearExportedMeta(meta, exported);
         if (cleared > 0) {
           this.stateManager.scheduleSave(this.buildCurrentState(), 0);
         }
@@ -4295,7 +4331,7 @@ export class QuizView extends ItemView {
     }
 
     // 3. 全部文件写成功后清除对应 B 类覆盖（保留 C 类）；条目为空则删除整条
-    const cleared = this.clearExportedMeta(meta, exported);
+    const cleared = await this.clearExportedMeta(meta, exported);
     // 落盘（绕过视图守卫，确保 meta 清理持久化）
     this.stateManager.scheduleSave(this.buildCurrentState(), 0);
 
@@ -4314,20 +4350,53 @@ export class QuizView extends ItemView {
     return parts.length > 0 ? `（${parts.join("、")}）` : "";
   }
 
-  /** 清除已成功导出条目的 B 类 meta（保留 C 类；除 ts 外无字段则删除整条），返回清理条数。 */
-  private clearExportedMeta(
+  /**
+   * 清除已成功导出条目的 B 类 meta（保留 C 类；除 ts 外无字段则删除整条），返回清理条数。
+   * 先一次性把「已清除字段」记录到 settings.manifestMetaClears，再本地删除：
+   * manifest 组成 sidecar 合并时据此丢弃组件旧字段，避免被回填。
+   */
+  private async clearExportedMeta(
     meta: Record<string, SidecarMeta>,
     items: Array<{ id: string }>
-  ): number {
+  ): Promise<number> {
+    const bFields = [
+      "repeat",
+      "tags",
+      "category1",
+      "category2",
+      "category3",
+    ] as const;
+    // 1. 收集每个条目当前存在的 B 类字段（批量一次写入设置）
+    const records: Array<{ id: string; fields: string[] }> = [];
+    for (const { id } of items) {
+      const entry = meta[id];
+      if (!entry) continue;
+      const present = bFields.filter((field) => entry[field] !== undefined);
+      if (present.length > 0) records.push({ id, fields: present });
+    }
+    if (records.length > 0) {
+      await (
+        this.plugin as unknown as {
+          markManifestMetaCleared?: (
+            anchor: string,
+            entries: Array<{ id: string; fields: string[] }>
+          ) => Promise<void>;
+        }
+      ).markManifestMetaCleared?.(this.sourceAnchor, records);
+    }
+
+    // 2. 本地删除字段（字段级 tombstone 防慢路径合并回填）
     let cleared = 0;
     for (const { id } of items) {
       const entry = meta[id];
       if (!entry) continue;
-      delete entry.repeat;
-      delete entry.tags;
-      delete entry.category1;
-      delete entry.category2;
-      delete entry.category3;
+      const present = bFields.filter((field) => entry[field] !== undefined);
+      if (present.length > 0) {
+        this.stateManager.markMetaFieldsDeleted(id, present);
+      }
+      for (const field of bFields) {
+        delete entry[field];
+      }
       // ts 是每次写入都会补的时间戳，恒存在，不能算作“还有数据”
       const remaining = Object.keys(entry).filter((key) => key !== "ts");
       if (remaining.length === 0) {
@@ -4577,6 +4646,8 @@ export class QuizView extends ItemView {
         this.stateManager.getContentPath() === contentPath
       ) {
         // 同一题库的重置刷新（全部重置语义）：写空 sidecar 保留文件 + 清 meta/state
+        // 先写重置闸门：否则下一次载入会把重置前的组成 sidecar 并回复活。
+        await this.markManifestReset();
         await this.stateManager.clearState();
         // F1: clearState 期间视图被关闭 → 中止（onClose 已保存进度）
         if (this.isClosed) {
@@ -4678,6 +4749,18 @@ export class QuizView extends ItemView {
   /** 当前内容源锚点：manifest 复合题库为 <folder>/manifest；单一来源为内容路径。 */
   private getContentPath(): string {
     return this.sourceAnchor;
+  }
+
+  /**
+   * 标记当前 manifest 锚点刚完成重置：组成 sidecar 合并时只并入此后的新进度，
+   * 避免重置后旧组件 sidecar 被自动并回复活。重置必须在保存/refresh 前调用。
+   */
+  private async markManifestReset(): Promise<void> {
+    await (
+      this.plugin as unknown as {
+        markManifestReset?: (anchor?: string) => Promise<void>;
+      }
+    ).markManifestReset?.(this.sourceAnchor);
   }
 
   /** 应用解析结果到视图的读取路径。 */

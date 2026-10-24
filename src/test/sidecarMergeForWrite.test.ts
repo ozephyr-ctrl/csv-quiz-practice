@@ -43,7 +43,12 @@ function makeSidecar(
 }
 
 function noTombstones(): SidecarTombstones {
-  return { answered: new Set(), cards: new Set(), meta: new Set() };
+  return {
+    answered: new Set(),
+    cards: new Set(),
+    meta: new Set(),
+    metaFields: new Map(),
+  };
 }
 
 /** 相对今天偏移 n 天的本地日期键 "YYYY-MM-DD"。 */
@@ -195,7 +200,12 @@ describe("mergeSidecarForWrite：answeredQuestions", () => {
       base,
       memory,
       disk,
-      tombstones: { answered: new Set(["q2"]), cards: new Set(), meta: new Set() },
+      tombstones: {
+        answered: new Set(["q2"]),
+        cards: new Set(),
+        meta: new Set(),
+        metaFields: new Map(),
+      },
     });
     expect(out.state.answeredQuestions).toEqual({ q1: "A" });
   });
@@ -214,12 +224,12 @@ describe("mergeSidecarForWrite：answeredQuestions", () => {
 });
 
 describe("mergeSidecarForWrite：meta", () => {
-  it("逐字段合并：内存改动字段胜，未改字段取磁盘，内存缺失字段=删除", () => {
+  it("逐字段合并：内存改动字段胜，未改/缺失字段取磁盘或 base（删除只靠 tombstone）", () => {
     const base = makeSidecar({}, {
       q1: { tags: "#old", favorite: "1", mastered: "1", ts: 10 },
     });
     const memory = makeSidecar({}, {
-      q1: { tags: "#new", favorite: "1", ts: 20 }, // mastered 被用户清空
+      q1: { tags: "#new", favorite: "1", ts: 20 }, // 旧视图未包含 mastered
     });
     const disk = makeSidecar({}, {
       q1: { tags: "#disk", wrong: "1", ts: 30 },
@@ -229,7 +239,8 @@ describe("mergeSidecarForWrite：meta", () => {
     expect(out.meta.q1.tags).toBe("#new"); // 内存相对 base 变化
     expect(out.meta.q1.favorite).toBe("1"); // 内存未改且磁盘无该字段 → base/memory 值
     expect(out.meta.q1.wrong).toBe("1"); // 磁盘新增字段保留
-    expect(out.meta.q1.mastered).toBeUndefined(); // 内存删除
+    // 内存缺失字段不视为删除：旧视图子集不能删掉磁盘/base 的字段
+    expect(out.meta.q1.mastered).toBe("1");
     expect(out.meta.q1.ts).toBe(30); // 取用到的 entry ts 最大值（磁盘 30 用于 wrong 字段）
   });
 
@@ -255,9 +266,42 @@ describe("mergeSidecarForWrite：meta", () => {
       base,
       memory,
       disk,
-      tombstones: { answered: new Set(), cards: new Set(), meta: new Set(["q2"]) },
+      tombstones: {
+        answered: new Set(),
+        cards: new Set(),
+        meta: new Set(["q2"]),
+        metaFields: new Map(),
+      },
     });
     expect(Object.keys(out.meta)).toEqual(["q1"]);
+  });
+
+  it("字段级 meta tombstone：删除字段不复活，未标记字段仍合并", () => {
+    const base = makeSidecar({}, {
+      q1: { tags: "#a", repeat: "1", favorite: "1", ts: 10 },
+    });
+    const memory = makeSidecar({}, { q1: { favorite: "1", ts: 20 } });
+    const disk = makeSidecar({}, {
+      q1: { tags: "#a", repeat: "1", favorite: "1", mastered: "1", ts: 30 },
+    });
+
+    const out = merge({
+      base,
+      memory,
+      disk,
+      tombstones: {
+        answered: new Set(),
+        cards: new Set(),
+        meta: new Set(),
+        metaFields: new Map([["q1", new Set(["tags", "repeat"])]]),
+      },
+    });
+    // 被 tombstone 的字段即使磁盘仍有旧值也不写回
+    expect(out.meta.q1.tags).toBeUndefined();
+    expect(out.meta.q1.repeat).toBeUndefined();
+    // 未标记字段照常合并（C 类 favorite + 磁盘新增 mastered）
+    expect(out.meta.q1.favorite).toBe("1");
+    expect(out.meta.q1.mastered).toBe("1");
   });
 
   it("无字段的 entry 被丢弃", () => {
@@ -365,7 +409,12 @@ describe("mergeSidecarForWrite：memoryCards", () => {
       base,
       memory,
       disk,
-      tombstones: { answered: new Set(), cards: new Set(["a"]), meta: new Set() },
+      tombstones: {
+        answered: new Set(),
+        cards: new Set(["a"]),
+        meta: new Set(),
+        metaFields: new Map(),
+      },
     });
     expect(out.state.memoryCards).toBeUndefined();
   });

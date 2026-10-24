@@ -777,4 +777,54 @@ describe("StateManager.mergeSidecarConflicts（端到端）", () => {
       "2026-09-01T00:00:00.000Z"
     );
   });
+
+  it("导出清理记录阻止冲突副本旧 B 类字段回填", async () => {
+    const base = validSidecar();
+    base.meta = { q1: { tags: "#base", ts: 10 } };
+    const conflict: SidecarData = {
+      version: 1,
+      meta: { q1: { tags: "#conflict", ts: 20 } },
+      state: { ...validSidecar().state, updatedAt: undefined },
+    };
+    const files: Record<string, string> = {
+      "bank.csv.sidecar.json": JSON.stringify(base),
+      "bank.csv.sidecar 2.json": JSON.stringify(conflict),
+    };
+    const vault = stubVault(files, { "bank.csv.sidecar 2.json": 2000 });
+    const sm = new StateManager(stubPlugin(vault));
+    await sm.loadSidecar("bank.csv", filters);
+
+    const outcome = await sm.mergeSidecarConflicts(
+      new Map([["q1", new Map([["tags", 1000]])]])
+    );
+    expect(outcome.status).toBe("merged");
+    expect(sm.getMeta().q1?.tags).toBeUndefined();
+    const written = JSON.parse(files["bank.csv.sidecar.json"]);
+    expect(written.meta.q1?.tags).toBeUndefined();
+  });
+
+  it("导出后重新编辑的新值（ts > clearTs）不会被清理 tombstone 删掉", async () => {
+    const base = validSidecar();
+    base.meta = { q1: { tags: "#new", ts: 2000 } };
+    const conflict: SidecarData = {
+      version: 1,
+      meta: { q1: { tags: "#old", ts: 20 } },
+      state: { ...validSidecar().state, updatedAt: undefined },
+    };
+    const files: Record<string, string> = {
+      "bank.csv.sidecar.json": JSON.stringify(base),
+      "bank.csv.sidecar 2.json": JSON.stringify(conflict),
+    };
+    const vault = stubVault(files, { "bank.csv.sidecar 2.json": 2000 });
+    const sm = new StateManager(stubPlugin(vault));
+    await sm.loadSidecar("bank.csv", filters);
+
+    const outcome = await sm.mergeSidecarConflicts(
+      new Map([["q1", new Map([["tags", 1000]])]])
+    );
+    expect(outcome.status).toBe("merged");
+    expect(sm.getMeta().q1?.tags).toBe("#new");
+    const written = JSON.parse(files["bank.csv.sidecar.json"]);
+    expect(written.meta.q1?.tags).toBe("#new");
+  });
 });

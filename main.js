@@ -500,7 +500,9 @@ var DEFAULT_SETTINGS = {
   bankSingleSources: {},
   sourceType: "",
   sourcePath: "",
-  manifestMerged: {}
+  manifestMerged: {},
+  manifestResetAt: {},
+  manifestMetaClears: {}
 };
 
 // src/settings.ts
@@ -1708,16 +1710,18 @@ function mergeSidecarForWrite(args) {
     const diskEntry = ownProp(diskMeta, id);
     const baseEntry = ownProp(baseMeta, id);
     const memHasEntry = memEntry !== void 0;
+    const deletedFields = tombstones.metaFields.get(id);
     const entry = {};
     let maxTs;
     let hasField = false;
     for (const field of META_MERGE_FIELDS) {
+      if (deletedFields == null ? void 0 : deletedFields.has(field)) continue;
       const mv = memHasEntry ? memEntry[field] : void 0;
       const bv = baseEntry == null ? void 0 : baseEntry[field];
       const dv = diskEntry == null ? void 0 : diskEntry[field];
       let value;
       let primaryTs;
-      if (memHasEntry && mv !== bv) {
+      if (memHasEntry && mv !== void 0 && mv !== bv) {
         value = mv;
         primaryTs = memEntry.ts;
       } else if (dv !== void 0) {
@@ -1798,7 +1802,7 @@ function mergeSidecarForWrite(args) {
     dailyAnswers = merged;
   }
   pruneDailyAnswers(dailyAnswers, /* @__PURE__ */ new Date());
-  const memoryInitialized = memState.memoryInitialized === true || (diskState == null ? void 0 : diskState.memoryInitialized) === true || (baseState == null ? void 0 : baseState.memoryInitialized) === true;
+  const memoryInitialized = memState.memoryInitialized === true || (diskState == null ? void 0 : diskState.memoryInitialized) === true || (baseState == null ? void 0 : baseState.memoryInitialized) === true ? true : memState.memoryInitialized === false || (diskState == null ? void 0 : diskState.memoryInitialized) === false || (baseState == null ? void 0 : baseState.memoryInitialized) === false ? false : void 0;
   const state = {
     // 会话级字段（位置/筛选/displayOrder/memory 配额）一律内存优先
     ...memState,
@@ -7118,9 +7122,25 @@ var _QuizView = class _QuizView extends import_obsidian6.ItemView {
         if (useInMemory) {
           this.stateManager.setState(inMemoryState);
           this.restoreMetaFrom(inMemoryMeta);
-          await this.stateManager.saveStateImmediately(inMemoryState);
-          if (epoch !== this.loadEpoch) return;
-          effectiveState = inMemoryState;
+          await this.stateManager.saveStateImmediately(inMemoryState, {
+            forceMerge: true
+          });
+          if (this.isClosed || epoch !== this.loadEpoch) return;
+          const mergedLoad = await this.stateManager.loadSidecar(contentPath, {
+            favorite: settings.defaultFilterFavorite,
+            mastered: settings.defaultFilterMastered,
+            repeat: settings.defaultFilterRepeat,
+            wrong: settings.defaultFilterWrong
+          });
+          if (this.isClosed || epoch !== this.loadEpoch) return;
+          if (mergedLoad.status === "corrupt") {
+            this.canPersistState = false;
+            this.showError(
+              "\u72B6\u6001\u6587\u4EF6\u635F\u574F\uFF0C\u8BF7\u91CD\u7F6E\u5237\u9898\u8FDB\u5EA6\u6216\u5220\u9664\u72B6\u6001\u6587\u4EF6\u540E\u91CD\u8BD5"
+            );
+            return;
+          }
+          effectiveState = mergedLoad.state;
         }
       }
     }
@@ -7293,7 +7313,7 @@ ${message}`);
    * epoch 用于在弹窗/写盘 await 期间丢弃过期流程（对齐其它加载路径的 M2 守卫）。
    */
   async handleSidecarConflicts(epoch) {
-    var _a;
+    var _a, _b, _c;
     try {
       const conflicts = await this.stateManager.detectSidecarConflicts();
       if (this.isClosed || epoch !== this.loadEpoch) return;
@@ -7304,7 +7324,8 @@ ${message}`);
         new import_obsidian6.Notice("\u5DF2\u5FFD\u7565\u540C\u6B65\u51B2\u7A81\u526F\u672C\uFF0C\u4E0B\u6B21\u6253\u5F00\u65F6\u5C06\u518D\u6B21\u63D0\u9192");
         return;
       }
-      const outcome = await this.stateManager.mergeSidecarConflicts();
+      const metaFieldClears = (_b = (_a = this.plugin).getManifestMetaClears) == null ? void 0 : _b.call(_a, this.sourceAnchor);
+      const outcome = await this.stateManager.mergeSidecarConflicts(metaFieldClears);
       if (this.isClosed || epoch !== this.loadEpoch) return;
       if (outcome.status !== "merged") {
         if (outcome.unreadable) {
@@ -7312,7 +7333,7 @@ ${message}`);
         }
         return;
       }
-      this.addStatsForAnswers((_a = outcome.addedAnswerIds) != null ? _a : []);
+      this.addStatsForAnswers((_c = outcome.addedAnswerIds) != null ? _c : []);
       this.practiceStatsDirty = true;
       const parts = [
         `\u5DF2\u5408\u5E76 ${outcome.mergedSources} \u4E2A\u51B2\u7A81\u526F\u672C`,
@@ -8098,6 +8119,7 @@ ${message}`);
         this.selectedOptions = [];
         this.cancelAutoNext();
         if (this.canPersistState && this.stateManager.getState()) {
+          await this.markManifestReset();
           await this.stateManager.saveStateImmediately(
             this.buildCurrentState(),
             { authoritative: true }
@@ -9150,6 +9172,7 @@ ${message}`);
         if (choice === "order") {
           await this.stateManager.saveStateImmediately(state);
         } else {
+          await this.markManifestReset();
           await this.stateManager.saveStateImmediately(state, {
             authoritative: true
           });
@@ -9186,6 +9209,7 @@ ${message}`);
     if (this.filterPracticeActive) this.exitFilterPractice();
     if (this.memoryActive) this.exitMemoryPractice();
     if (choice === "all") {
+      await this.markManifestReset();
       await this.refresh();
       return;
     }
@@ -9211,6 +9235,7 @@ ${message}`);
     this.selectedOptions = [];
     this.cancelAutoNext();
     this.renderQuestion();
+    await this.markManifestReset();
     if (choice === "records") {
       await this.stateManager.saveStateImmediately(this.buildCurrentState(), {
         authoritative: true
@@ -10014,7 +10039,7 @@ ${message}`);
           });
         });
       } catch (e) {
-        const cleared2 = this.clearExportedMeta(meta, exported);
+        const cleared2 = await this.clearExportedMeta(meta, exported);
         if (cleared2 > 0) {
           this.stateManager.scheduleSave(this.buildCurrentState(), 0);
         }
@@ -10026,7 +10051,7 @@ ${message}`);
       }
       exported.push(...items);
     }
-    const cleared = this.clearExportedMeta(meta, exported);
+    const cleared = await this.clearExportedMeta(meta, exported);
     this.stateManager.scheduleSave(this.buildCurrentState(), 0);
     new import_obsidian6.Notice(
       `\u5DF2\u5BFC\u51FA ${cleared} \u9898\u7684\u4FEE\u6539\u5230 ${groups.size} \u4E2A CSV \u6587\u4EF6${skipNote}`
@@ -10041,17 +10066,41 @@ ${message}`);
     if (image > 0) parts.push(`\u8DF3\u8FC7\u56FE\u7247\u9898 ${image} \u9898`);
     return parts.length > 0 ? `\uFF08${parts.join("\u3001")}\uFF09` : "";
   }
-  /** 清除已成功导出条目的 B 类 meta（保留 C 类；除 ts 外无字段则删除整条），返回清理条数。 */
-  clearExportedMeta(meta, items) {
+  /**
+   * 清除已成功导出条目的 B 类 meta（保留 C 类；除 ts 外无字段则删除整条），返回清理条数。
+   * 先一次性把「已清除字段」记录到 settings.manifestMetaClears，再本地删除：
+   * manifest 组成 sidecar 合并时据此丢弃组件旧字段，避免被回填。
+   */
+  async clearExportedMeta(meta, items) {
+    var _a, _b;
+    const bFields = [
+      "repeat",
+      "tags",
+      "category1",
+      "category2",
+      "category3"
+    ];
+    const records = [];
+    for (const { id } of items) {
+      const entry = meta[id];
+      if (!entry) continue;
+      const present = bFields.filter((field) => entry[field] !== void 0);
+      if (present.length > 0) records.push({ id, fields: present });
+    }
+    if (records.length > 0) {
+      await ((_b = (_a = this.plugin).markManifestMetaCleared) == null ? void 0 : _b.call(_a, this.sourceAnchor, records));
+    }
     let cleared = 0;
     for (const { id } of items) {
       const entry = meta[id];
       if (!entry) continue;
-      delete entry.repeat;
-      delete entry.tags;
-      delete entry.category1;
-      delete entry.category2;
-      delete entry.category3;
+      const present = bFields.filter((field) => entry[field] !== void 0);
+      if (present.length > 0) {
+        this.stateManager.markMetaFieldsDeleted(id, present);
+      }
+      for (const field of bFields) {
+        delete entry[field];
+      }
       const remaining = Object.keys(entry).filter((key) => key !== "ts");
       if (remaining.length === 0) {
         delete meta[id];
@@ -10232,6 +10281,7 @@ ${summarizeBankRowErrors(rowErrors)}`
       this.contentMtimeMs = newMtime;
       if (epoch !== this.loadEpoch) return;
       if (!preserveState && !wasSwitching && this.stateManager.getContentPath() === contentPath) {
+        await this.markManifestReset();
         await this.stateManager.clearState();
         if (this.isClosed) {
           this.canPersistState = true;
@@ -10301,6 +10351,14 @@ ${summarizeBankRowErrors(rowErrors)}`
   /** 当前内容源锚点：manifest 复合题库为 <folder>/manifest；单一来源为内容路径。 */
   getContentPath() {
     return this.sourceAnchor;
+  }
+  /**
+   * 标记当前 manifest 锚点刚完成重置：组成 sidecar 合并时只并入此后的新进度，
+   * 避免重置后旧组件 sidecar 被自动并回复活。重置必须在保存/refresh 前调用。
+   */
+  async markManifestReset() {
+    var _a, _b;
+    await ((_b = (_a = this.plugin).markManifestReset) == null ? void 0 : _b.call(_a, this.sourceAnchor));
   }
   /** 应用解析结果到视图的读取路径。 */
   applyResolvedSource(source) {
@@ -10465,6 +10523,27 @@ function maxDailyAnswers(...sources) {
   }
   if (out.size === 0) return void 0;
   return Object.fromEntries(out);
+}
+function applyMetaFieldClears(meta, clears) {
+  var _a;
+  const entries = [];
+  for (const [id, entry] of Object.entries(meta)) {
+    if (!entry) continue;
+    const fieldClears = clears.get(id);
+    if (!fieldClears || fieldClears.size === 0) {
+      entries.push([id, { ...entry }]);
+      continue;
+    }
+    const next = { ...entry };
+    for (const [field, clearTs] of fieldClears) {
+      if (next[field] === void 0) continue;
+      if (((_a = next.ts) != null ? _a : 0) <= clearTs) delete next[field];
+    }
+    const remaining = Object.keys(next).filter((key) => key !== "ts");
+    if (remaining.length === 0) continue;
+    entries.push([id, next]);
+  }
+  return Object.fromEntries(entries);
 }
 function sortKeysDeep(value) {
   if (Array.isArray(value)) return value.map((item) => sortKeysDeep(item));
@@ -10820,6 +10899,40 @@ var StateManager = class {
     if (!this.addTombstones("meta", ids)) return;
     this.scheduleSave(this.currentState, SIDECAR_SAVE_DEBOUNCE_MS);
   }
+  /**
+   * 登记「本次会话显式删除了某题的这些 meta 字段」（字段级 tombstone）：
+   * 保存层三方合并时该字段一律不写回（即使磁盘仍有旧值），其余字段照常合并。
+   * 只登记 + 调度防抖保存；tombstone 在写盘成功后随空集合一起清空，失败则保留重试。
+   * contentPath/currentState 为空（题库未载入/兼容模式）时不登记。
+   */
+  markMetaFieldsDeleted(id, fields) {
+    const path = this.contentPath;
+    if (path === null || this.currentState === null) return;
+    if (typeof id !== "string" || id === "") return;
+    let tomb = this.tombstones.get(path);
+    if (!tomb) {
+      tomb = this.emptyTombstones();
+      this.tombstones.set(path, tomb);
+    }
+    let deleted = tomb.metaFields.get(id);
+    if (!deleted) {
+      deleted = /* @__PURE__ */ new Set();
+      tomb.metaFields.set(id, deleted);
+    }
+    let added = false;
+    for (const field of fields) {
+      if (typeof field !== "string" || field === "") continue;
+      if (!deleted.has(field)) {
+        deleted.add(field);
+        added = true;
+      }
+    }
+    if (!added) {
+      if (deleted.size === 0) tomb.metaFields.delete(id);
+      return;
+    }
+    this.scheduleSave(this.currentState, SIDECAR_SAVE_DEBOUNCE_MS);
+  }
   /** 把 id 加入当前内容源的指定 tombstone 集合。返回是否登记成功（未载入题库时 false）。 */
   addTombstones(kind, ids) {
     const path = this.contentPath;
@@ -10879,7 +10992,12 @@ var StateManager = class {
   }
   /** 空 tombstone 集合（每个内容源一份，写盘成功后清空）。 */
   emptyTombstones() {
-    return { answered: /* @__PURE__ */ new Set(), cards: /* @__PURE__ */ new Set(), meta: /* @__PURE__ */ new Set() };
+    return {
+      answered: /* @__PURE__ */ new Set(),
+      cards: /* @__PURE__ */ new Set(),
+      meta: /* @__PURE__ */ new Set(),
+      metaFields: /* @__PURE__ */ new Map()
+    };
   }
   /** 把 job 投入串行链（所有读-合并-写必须经此入口，避免并发穿插）。 */
   runExclusive(job) {
@@ -10924,7 +11042,7 @@ var StateManager = class {
       const st = await this.statSidecar(contentPath);
       if (this.sameStat(st, base)) {
         const out2 = cloneSidecarData(memory);
-        await this.commitGated(contentPath, out2, memory, baseline);
+        await this.commitGated(contentPath, out2, memory, baseline, false);
         return;
       }
       const r = await readSidecar(this.vault, contentPath);
@@ -10947,13 +11065,14 @@ var StateManager = class {
       statsBaseline: baseline,
       tombstones: tomb
     });
-    await this.commitGated(contentPath, out, memory, baseline);
+    const forceNextSlow = canonicalSidecarJson(out) !== canonicalSidecarJson(memory);
+    await this.commitGated(contentPath, out, memory, baseline, forceNextSlow);
   }
   /**
    * 落盘 out 并刷新保存层基准。写完比对文件字节数：与实际写入长度不符（写入被
    * 同步服务截断/追加等）则重读磁盘再合并一次（最多一次），避免直接信任损坏内容。
    */
-  async commitGated(contentPath, out, memory, baseline) {
+  async commitGated(contentPath, out, memory, baseline, forceNextSlow) {
     var _a, _b, _c;
     out.state.updatedAt = Date.now();
     await writeSidecar(this.vault, contentPath, out);
@@ -10964,20 +11083,23 @@ var StateManager = class {
       const disk = r.status === "ok" || r.status === "recovered" ? r.data : null;
       const retried = mergeSidecarForWrite({
         base: out,
-        memory,
+        memory: out,
         disk,
-        statsBaseline: baseline,
+        statsBaseline: countersOfSidecar(out),
         tombstones: this.emptyTombstones()
       });
       retried.state.updatedAt = Date.now();
       await writeSidecar(this.vault, contentPath, retried);
       out = retried;
       st = await this.statSidecar(contentPath);
+      forceNextSlow = forceNextSlow || canonicalSidecarJson(out) !== canonicalSidecarJson(memory);
     }
     this.sidecarBase.set(contentPath, {
       data: cloneSidecarData(out),
-      mtimeMs: (_a = st == null ? void 0 : st.mtimeMs) != null ? _a : 0,
-      size: (_b = st == null ? void 0 : st.size) != null ? _b : -1
+      // 慢路径合并了内存里没有的数据时，内存仍是旧子集；不能把 stat 标成
+      // “已同步”，否则下一次快路径会把它覆盖回去。
+      mtimeMs: forceNextSlow ? 0 : (_a = st == null ? void 0 : st.mtimeMs) != null ? _a : 0,
+      size: forceNextSlow ? -1 : (_b = st == null ? void 0 : st.size) != null ? _b : -1
     });
     this.statsBaseline.set(contentPath, countersOfSidecar(memory));
     this.currentSidecarUpdatedAt = (_c = out.state.updatedAt) != null ? _c : 0;
@@ -10988,16 +11110,14 @@ var StateManager = class {
    * 成功后 base/baseline 同步为写入内容，tombstone 清空。
    */
   async writeRaw(contentPath, data, opts = {}) {
-    var _a, _b;
     void opts;
     const out = cloneSidecarData(data);
     out.state.updatedAt = Date.now();
     await writeSidecar(this.vault, contentPath, out);
-    const st = await this.statSidecar(contentPath);
     this.sidecarBase.set(contentPath, {
       data: cloneSidecarData(out),
-      mtimeMs: (_a = st == null ? void 0 : st.mtimeMs) != null ? _a : 0,
-      size: (_b = st == null ? void 0 : st.size) != null ? _b : -1
+      mtimeMs: 0,
+      size: -1
     });
     this.statsBaseline.set(contentPath, countersOfSidecar(out));
     this.currentSidecarUpdatedAt = out.state.updatedAt;
@@ -11029,6 +11149,13 @@ var StateManager = class {
         () => this.writeRaw(path, memory, { authoritative: true })
       );
       return;
+    }
+    if (opts.forceMerge && path !== null) {
+      const base = this.sidecarBase.get(path);
+      if (base) {
+        base.mtimeMs = 0;
+        base.size = -1;
+      }
     }
     await this.persistNow();
   }
@@ -11190,7 +11317,7 @@ var StateManager = class {
    * 由调用方按 addedAnswerIds 为新并入的答案逐条补计）。
    * 整个「检测 → 读副本 → 合并 → 写回 → 归档」在串行链内完成，不会与门控保存穿插。
    */
-  async mergeSidecarConflicts() {
+  async mergeSidecarConflicts(metaFieldClears) {
     const path = this.contentPath;
     const state = this.currentState;
     if (path === null || state === null) {
@@ -11200,12 +11327,12 @@ var StateManager = class {
       if (this.contentPath !== path || this.currentState !== state) {
         return { status: "none" };
       }
-      return this.mergeSidecarConflictsImpl(path);
+      return this.mergeSidecarConflictsImpl(path, metaFieldClears);
     });
   }
   /** mergeSidecarConflicts 的实现体（须在 runExclusive 内调用，不可自行入队）。 */
-  async mergeSidecarConflictsImpl(path) {
-    var _a, _b;
+  async mergeSidecarConflictsImpl(path, metaFieldClears) {
+    var _a, _b, _c, _d;
     const state = this.currentState;
     if (state === null) return { status: "none" };
     const conflictPaths = await this.detectSidecarConflicts();
@@ -11239,6 +11366,30 @@ var StateManager = class {
       this.currentSidecarUpdatedAt,
       sources
     );
+    if (metaFieldClears && metaFieldClears.size > 0) {
+      const mergedBeforeClears = merge.data.meta;
+      merge.data.meta = applyMetaFieldClears(
+        mergedBeforeClears,
+        metaFieldClears
+      );
+      const tomb = (_b = this.tombstones.get(path)) != null ? _b : this.emptyTombstones();
+      for (const [id, fields] of metaFieldClears) {
+        if (fields.size === 0) continue;
+        const entry = Object.prototype.hasOwnProperty.call(mergedBeforeClears, id) ? mergedBeforeClears[id] : void 0;
+        if (!entry) continue;
+        let set = tomb.metaFields.get(id);
+        for (const [field, clearTs] of fields) {
+          if (entry[field] === void 0) continue;
+          if (((_c = entry.ts) != null ? _c : 0) > clearTs) continue;
+          if (!set) {
+            set = /* @__PURE__ */ new Set();
+            tomb.metaFields.set(id, set);
+          }
+          set.add(field);
+        }
+      }
+      if (tomb.metaFields.size > 0) this.tombstones.set(path, tomb);
+    }
     const mergedDaily = maxDailyAnswers(
       merge.data.state.dailyAnswers,
       ...sources.map((s) => s.data.state.dailyAnswers)
@@ -11253,7 +11404,7 @@ var StateManager = class {
     }
     Object.assign(st.answeredQuestions, merge.data.state.answeredQuestions);
     if (merge.data.state.memoryCards !== void 0) {
-      const merged = (_b = st.memoryCards) != null ? _b : {};
+      const merged = (_d = st.memoryCards) != null ? _d : {};
       for (const key of Object.keys(merged)) delete merged[key];
       Object.assign(merged, merge.data.state.memoryCards);
       st.memoryCards = merged;
@@ -11261,7 +11412,7 @@ var StateManager = class {
     st.dailyAnswers = mergedDaily;
     st.memoryInitialized = memoryInitialized;
     this.currentMeta = merge.data.meta;
-    await this.writeRaw(path, this.buildSidecarData(), { authoritative: true });
+    await this.writeGated(path, this.buildSidecarData());
     let archived = 0;
     let archiveFailed = 0;
     for (const conflictPath of conflictPaths) {
@@ -11451,11 +11602,25 @@ var StateManager = class {
    * - 会话字段（displayOrder/currentIndex/filter*）一律保留目标值（缺失时为空，后续由视图重建）
    * - 合并结果与目标规范化 JSON 完全一致 → skipped/no-change（不写盘）
    * - 不删除/不归档任何组成 sidecar（保留回退数据源）
+   * - metaFieldClears：导出清理记录（id → field → 清除时刻）。目标与组件的 B 类字段
+   *   若写入时间不晚于清除时刻则丢弃，避免导出到 CSV 后旧组件字段被回填。
    */
-  async mergeManifestComponentSidecars(targetAnchor, componentAnchors, defaultFilters) {
-    var _a, _b, _c;
+  async mergeManifestComponentSidecars(targetAnchor, componentAnchors, defaultFilters, componentCutoffMs = 0, metaFieldClears) {
     const target = targetAnchor.trim();
     if (target === "") return { status: "skipped" };
+    return this.runExclusive(
+      () => this.mergeManifestComponentSidecarsImpl(
+        target,
+        componentAnchors,
+        defaultFilters,
+        componentCutoffMs,
+        metaFieldClears
+      )
+    );
+  }
+  /** mergeManifestComponentSidecars 的实现体（须在 runExclusive 内调用，不可再入队）。 */
+  async mergeManifestComponentSidecarsImpl(target, componentAnchors, defaultFilters, componentCutoffMs, metaFieldClears) {
+    var _a, _b, _c;
     const targetResult = await readSidecar(this.vault, target);
     if (targetResult.status === "corrupt") {
       console.error(
@@ -11475,6 +11640,12 @@ var StateManager = class {
       targetData = targetResult.data;
       targetTs = await this.sidecarTimestampMs(target, targetResult.data);
     }
+    if (metaFieldClears && metaFieldClears.size > 0) {
+      targetData = {
+        ...targetData,
+        meta: applyMetaFieldClears(targetData.meta, metaFieldClears)
+      };
+    }
     const seen = /* @__PURE__ */ new Set();
     const components = [];
     for (const rawAnchor of componentAnchors) {
@@ -11492,10 +11663,19 @@ var StateManager = class {
         continue;
       }
       if (!this.sidecarHasProgress(result.data)) continue;
+      if (metaFieldClears && metaFieldClears.size > 0) {
+        result.data = {
+          ...result.data,
+          meta: applyMetaFieldClears(result.data.meta, metaFieldClears)
+        };
+        if (!this.sidecarHasProgress(result.data)) continue;
+      }
+      const tsMs = await this.sidecarTimestampMs(anchor, result.data);
+      if (componentCutoffMs > 0 && tsMs <= componentCutoffMs) continue;
       components.push({
         path: sidecarPathFor(anchor),
         data: result.data,
-        tsMs: await this.sidecarTimestampMs(anchor, result.data)
+        tsMs
       });
     }
     if (components.length === 0) {
@@ -11558,7 +11738,7 @@ var StateManager = class {
     }
     mergedData.state.updatedAt = Date.now();
     try {
-      await this.runExclusive(() => this.writeRaw(target, mergedData));
+      await this.writeRaw(target, mergedData);
     } catch (e) {
       console.error("CSV Quiz: \u5199\u5165 manifest \u5408\u5E76\u540E sidecar \u5931\u8D25", target, e);
       return { status: "error", reason: "write-failed" };
@@ -11584,7 +11764,7 @@ var StateManager = class {
    * - 合并结果与目标一致时不写盘（只改名归档）
    * - 写盘失败 → error/write-failed（不改名，保留归档待下次重试）
    */
-  async recoverMergedSidecars(targetAnchor, componentAnchors, defaultFilters) {
+  async recoverMergedSidecars(targetAnchor, componentAnchors, defaultFilters, metaFieldClears) {
     const target = targetAnchor.trim();
     if (target === "") return { status: "none" };
     return this.runExclusive(async () => {
@@ -11662,6 +11842,7 @@ var StateManager = class {
         }
       }
       const merge = mergeSidecarData(base, baseTs, sources);
+      const recoveredMeta = metaFieldClears && metaFieldClears.size > 0 ? applyMetaFieldClears(merge.data.meta, metaFieldClears) : merge.data.meta;
       const dailyAnswers = maxDailyAnswers(
         base.state.dailyAnswers,
         ...sources.map((source) => source.data.state.dailyAnswers)
@@ -11669,7 +11850,7 @@ var StateManager = class {
       const memoryInitialized = base.state.memoryInitialized === true || sources.some((source) => source.data.state.memoryInitialized === true);
       const merged = {
         version: 1,
-        meta: merge.data.meta,
+        meta: recoveredMeta,
         state: {
           ...merge.data.state,
           // 累计作答事件数无法从快照反推 → 保持目标当前值
@@ -11782,6 +11963,31 @@ function normalizeManifestMerged(raw) {
     const anchor = key.trim();
     if (anchor === "" || value !== true) continue;
     out[anchor] = true;
+  }
+  return out;
+}
+function normalizeManifestResetAt(raw) {
+  const out = {};
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [key, value] of Object.entries(raw)) {
+    const anchor = key.trim();
+    if (anchor === "") continue;
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+      continue;
+    }
+    out[anchor] = value;
+  }
+  return out;
+}
+function normalizeManifestMetaClears(raw) {
+  const out = {};
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [key, value] of Object.entries(raw)) {
+    if (key.split("\0").length !== 3) continue;
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+      continue;
+    }
+    out[key] = value;
   }
   return out;
 }
@@ -12189,12 +12395,81 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
       keyFavorite: toBinding(raw.keyFavorite, DEFAULT_SETTINGS.keyFavorite),
       keyMastered: toBinding(raw.keyMastered, DEFAULT_SETTINGS.keyMastered),
       keyRepeat: toBinding(raw.keyRepeat, DEFAULT_SETTINGS.keyRepeat),
-      manifestMerged: normalizeManifestMerged(raw.manifestMerged)
+      manifestMerged: normalizeManifestMerged(raw.manifestMerged),
+      manifestResetAt: normalizeManifestResetAt(raw.manifestResetAt),
+      manifestMetaClears: normalizeManifestMetaClears(raw.manifestMetaClears)
     };
   }
   async saveSettings() {
     this.updateMemoryReminder();
     await this.stateManager.saveSettings(this.settings);
+  }
+  /**
+   * 标记某个 manifest 锚点刚刚完成「重置进度」：组成 sidecar 合并时只并入
+   * 写入时间晚于此刻的组件进度，防止重置后旧组件 sidecar 被自动并回复活。
+   * anchor 省略时取当前解析出的内容源锚点；锚点为空则忽略。
+   */
+  async markManifestReset(anchor) {
+    const key = (anchor != null ? anchor : this.getContentPath()).trim();
+    if (key === "") return;
+    this.settings.manifestResetAt[key] = Date.now();
+    await this.saveSettings();
+    await this.flushSettingsSave();
+  }
+  /**
+   * 记录某些 B 类 meta 字段已被导出清理（写入时间戳 = 清除时刻）。
+   * manifest 组成 sidecar 合并时据此丢弃组件里不晚于该时刻的旧字段，
+   * 避免「导出到 CSV 并清除覆盖」后又被组件 sidecar 回填。
+   * anchor/id 为空或 fields 全为空时不做任何写入。
+   */
+  async markManifestMetaCleared(anchor, entries) {
+    var _a;
+    const key = (anchor != null ? anchor : "").trim();
+    if (key === "") return;
+    const ts = Date.now();
+    let changed = false;
+    for (const entry of entries) {
+      const id = typeof (entry == null ? void 0 : entry.id) === "string" ? entry.id : "";
+      if (id === "") continue;
+      for (const rawField of (_a = entry.fields) != null ? _a : []) {
+        if (typeof rawField !== "string" || rawField === "") continue;
+        this.settings.manifestMetaClears[`${key}\0${id}\0${rawField}`] = ts;
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    await this.saveSettings();
+    await this.flushSettingsSave();
+  }
+  /**
+   * 取出某 manifest 锚点的清理记录：id → field → 清除时刻。
+   * 供 mergeManifestComponentSidecars 过滤组件 sidecar 的旧 B 类字段。
+   */
+  getManifestMetaClears(anchor) {
+    var _a;
+    const out = /* @__PURE__ */ new Map();
+    const key = (anchor != null ? anchor : "").trim();
+    if (key === "") return out;
+    const prefix = `${key}\0`;
+    for (const [rawKey, ts] of Object.entries(
+      this.settings.manifestMetaClears
+    )) {
+      if (!rawKey.startsWith(prefix)) continue;
+      const rest = rawKey.slice(prefix.length);
+      const sep = rest.indexOf("\0");
+      if (sep <= 0) continue;
+      const id = rest.slice(0, sep);
+      const field = rest.slice(sep + 1);
+      if (id === "" || field === "" || field.includes("\0")) continue;
+      if (typeof ts !== "number" || !Number.isFinite(ts) || ts <= 0) continue;
+      let fields = out.get(id);
+      if (!fields) {
+        fields = /* @__PURE__ */ new Map();
+        out.set(id, fields);
+      }
+      fields.set(field, Math.max((_a = fields.get(field)) != null ? _a : 0, ts));
+    }
+    return out;
   }
   async flushSettingsSave() {
     await this.stateManager.flushSettingsSave();
@@ -12225,7 +12500,7 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
   }
   /** ensureManifestSidecarMerged 的实际执行体（结果只记录日志/提示，不抛出）。 */
   async runManifestSidecarMerge(source, key) {
-    var _a, _b, _c, _d, _e;
+    var _a, _b, _c, _d, _e, _f;
     const components = [];
     const seen = /* @__PURE__ */ new Set();
     const push = (anchor) => {
@@ -12256,12 +12531,14 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
           mastered: this.settings.defaultFilterMastered,
           repeat: this.settings.defaultFilterRepeat,
           wrong: this.settings.defaultFilterWrong
-        }
+        },
+        (_b = this.settings.manifestResetAt[key]) != null ? _b : 0,
+        this.getManifestMetaClears(key)
       );
       if (result.status === "merged") {
         await markMerged();
         console.info(
-          `CSV Quiz: \u5DF2\u628A ${(_b = result.mergedComponents) != null ? _b : 0} \u4E2A\u7EC4\u6210 sidecar \u5E76\u5165 manifest \u8FDB\u5EA6\uFF08\u65B0\u589E\u7B54\u9898 ${(_c = result.addedAnswers) != null ? _c : 0} \u6761\uFF0C\u2705${(_d = result.correctCount) != null ? _d : 0} / \u274C${(_e = result.wrongCount) != null ? _e : 0}\uFF09`
+          `CSV Quiz: \u5DF2\u628A ${(_c = result.mergedComponents) != null ? _c : 0} \u4E2A\u7EC4\u6210 sidecar \u5E76\u5165 manifest \u8FDB\u5EA6\uFF08\u65B0\u589E\u7B54\u9898 ${(_d = result.addedAnswers) != null ? _d : 0} \u6761\uFF0C\u2705${(_e = result.correctCount) != null ? _e : 0} / \u274C${(_f = result.wrongCount) != null ? _f : 0}\uFF09`
         );
         return;
       }
@@ -12345,6 +12622,7 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
           if (choice === "order") {
             await this.stateManager.saveStateImmediately(state);
           } else {
+            await this.markManifestReset();
             await this.stateManager.saveStateImmediately(state, {
               authoritative: true
             });
@@ -12361,6 +12639,7 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
       new import_obsidian8.Notice("\u65E0\u6CD5\u52A0\u8F7D\u9898\u5E93\u72B6\u6001\uFF1A\u8BF7\u5148\u8BBE\u7F6E\u9898\u5E93\u6765\u6E90\u5E76\u6253\u5F00\u5237\u9898\u9762\u677F");
       return;
     }
+    await this.markManifestReset();
     await this.stateManager.clearState();
     this.refreshMemoryReminder();
     this.refreshQuiz();
@@ -12483,7 +12762,8 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
       result = await this.stateManager.recoverMergedSidecars(
         res.source.anchor,
         components,
-        defaults
+        defaults,
+        this.getManifestMetaClears(res.source.anchor)
       );
     } catch (e) {
       console.error("CSV Quiz: \u4ECE .merged \u5F52\u6863\u6062\u590D\u8FDB\u5EA6\u5931\u8D25", e);

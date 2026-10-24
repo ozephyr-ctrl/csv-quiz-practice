@@ -833,6 +833,8 @@ export interface SidecarTombstones {
   answered: Set<string>;
   cards: Set<string>;
   meta: Set<string>;
+  /** 字段级 meta tombstone：题 id → 被显式删除的 B 类字段名（其余字段仍可合并）。 */
+  metaFields: Map<string, Set<string>>;
 }
 
 /** 取 own 属性值：区分「键缺失」与「键存在但值为空字符串」，且不受原型链干扰。 */
@@ -996,17 +998,22 @@ export function mergeSidecarForWrite(args: {
     const diskEntry = ownProp(diskMeta, id);
     const baseEntry = ownProp(baseMeta, id);
     const memHasEntry = memEntry !== undefined;
+    const deletedFields = tombstones.metaFields.get(id);
     const entry: SidecarMeta = {};
     let maxTs: number | undefined;
     let hasField = false;
     for (const field of META_MERGE_FIELDS) {
+      // 字段级 tombstone：本次会话显式删除了该字段 → 无论磁盘/内存如何都不写回。
+      if (deletedFields?.has(field)) continue;
       const mv = memHasEntry ? memEntry[field] : undefined;
       const bv = baseEntry?.[field];
       const dv = diskEntry?.[field];
       let value: string | undefined;
       let primaryTs: number | undefined;
-      if (memHasEntry && mv !== bv) {
-        // 内存相对 base 有变化（含内存缺失 = 用户清空该字段）→ 内存胜
+      if (memHasEntry && mv !== undefined && mv !== bv) {
+        // 内存显式改了该字段（包括改为空串）→ 内存胜。
+        // 注意：内存缺字段不等于删除——旧视图可能是磁盘全量的子集，
+        // 真正的删除必须走 meta tombstone（clearQuestionMeta/pruneMetaEntries）。
         value = mv;
         primaryTs = memEntry.ts;
       } else if (dv !== undefined) {
@@ -1018,7 +1025,7 @@ export function mergeSidecarForWrite(args: {
         value = mv ?? bv;
         primaryTs = memHasEntry ? memEntry.ts : baseEntry?.ts;
       }
-      if (value === undefined) continue; // 内存删除的字段不写入
+      if (value === undefined) continue;
       entry[field] = value;
       hasField = true;
       const ts = finiteTs(primaryTs);
@@ -1107,7 +1114,13 @@ export function mergeSidecarForWrite(args: {
   const memoryInitialized =
     memState.memoryInitialized === true ||
     diskState?.memoryInitialized === true ||
-    baseState?.memoryInitialized === true;
+    baseState?.memoryInitialized === true
+      ? true
+      : memState.memoryInitialized === false ||
+          diskState?.memoryInitialized === false ||
+          baseState?.memoryInitialized === false
+        ? false
+        : undefined;
 
   const state: SidecarState = {
     // 会话级字段（位置/筛选/displayOrder/memory 配额）一律内存优先

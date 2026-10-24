@@ -147,6 +147,17 @@ export interface PluginSettings {
   keyRepeat: string;
   /** 已执行过「manifest 组成 sidecar 合并」的 manifest 锚点集合（一次性迁移标记）。 */
   manifestMerged: Record<string, boolean>;
+  /**
+   * 每个 manifest 锚点最近一次「重置进度」的时间戳（epoch ms）。组成 sidecar 合并时
+   * 只并入写入时间晚于该闸门的组件进度，避免重置后旧组件 sidecar 被自动并回复活。
+   */
+  manifestResetAt: Record<string, number>;
+  /**
+   * 导出合并后已清除的 B 类 meta 字段：key=`${anchor}\u0000${id}\u0000${field}`，
+   * value=清除时刻（epoch ms）。manifest 组成侧合并时据此过滤组件 sidecar 的旧字段，
+   * 避免导出清理后被旧组件 sidecar 回填。
+   */
+  manifestMetaClears: Record<string, number>;
 }
 
 export interface PluginData {
@@ -189,4 +200,6 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   sourceType: "",
   sourcePath: "",
   manifestMerged: {},
+  manifestResetAt: {},
+  manifestMetaClears: {},
 };

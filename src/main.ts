@@ -61,6 +61,42 @@ function normalizeManifestMerged(raw: unknown): Record<string, boolean> {
 }
 
 /**
+ * 归一化「manifest 重置闸门」：只保留 key trim 非空、value 为有限正数的项；
+ * 类型不对返回 {}。闸门值用于过滤重置前写入的组成 sidecar 进度。
+ */
+function normalizeManifestResetAt(raw: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    const anchor = key.trim();
+    if (anchor === "") continue;
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+      continue;
+    }
+    out[anchor] = value;
+  }
+  return out;
+}
+
+/**
+ * 归一化「导出清理的 B 类 meta 字段」记录：key 必须是
+ * `${anchor}\u0000${id}\u0000${field}`（含两个分隔符），value 为有限正数；
+ * 其余丢弃。用于 manifest 合并时过滤组件 sidecar 的旧字段。
+ */
+function normalizeManifestMetaClears(raw: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (key.split("\u0000").length !== 3) continue;
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+      continue;
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+/**
  * 归一化来源路径：
  * - csv：文件路径 trim / 反斜杠转 `/` / 去掉前导 `/`；
  * - image、manifest：文件夹路径（允许 `/` 表示 vault 根）；
@@ -601,12 +637,92 @@ export default class CSVQuizPlugin extends Plugin {
       keyMastered: toBinding(raw.keyMastered, DEFAULT_SETTINGS.keyMastered),
       keyRepeat: toBinding(raw.keyRepeat, DEFAULT_SETTINGS.keyRepeat),
       manifestMerged: normalizeManifestMerged(raw.manifestMerged),
+      manifestResetAt: normalizeManifestResetAt(raw.manifestResetAt),
+      manifestMetaClears: normalizeManifestMetaClears(raw.manifestMetaClears),
     };
   }
 
   async saveSettings(): Promise<void> {
     this.updateMemoryReminder();
     await this.stateManager.saveSettings(this.settings);
+  }
+
+  /**
+   * 标记某个 manifest 锚点刚刚完成「重置进度」：组成 sidecar 合并时只并入
+   * 写入时间晚于此刻的组件进度，防止重置后旧组件 sidecar 被自动并回复活。
+   * anchor 省略时取当前解析出的内容源锚点；锚点为空则忽略。
+   */
+  async markManifestReset(anchor?: string): Promise<void> {
+    const key = (anchor ?? this.getContentPath()).trim();
+    if (key === "") return;
+    this.settings.manifestResetAt[key] = Date.now();
+    await this.saveSettings();
+    // 重置闸门必须在关闭/崩溃前真正落盘，否则下次启动旧组成 sidecar 会复活。
+    await this.flushSettingsSave();
+  }
+
+  /**
+   * 记录某些 B 类 meta 字段已被导出清理（写入时间戳 = 清除时刻）。
+   * manifest 组成 sidecar 合并时据此丢弃组件里不晚于该时刻的旧字段，
+   * 避免「导出到 CSV 并清除覆盖」后又被组件 sidecar 回填。
+   * anchor/id 为空或 fields 全为空时不做任何写入。
+   */
+  async markManifestMetaCleared(
+    anchor: string,
+    entries: Array<{ id: string; fields: string[] }>
+  ): Promise<void> {
+    const key = (anchor ?? "").trim();
+    if (key === "") return;
+    const ts = Date.now();
+    let changed = false;
+    for (const entry of entries) {
+      const id = typeof entry?.id === "string" ? entry.id : "";
+      if (id === "") continue;
+      for (const rawField of entry.fields ?? []) {
+        if (typeof rawField !== "string" || rawField === "") continue;
+        this.settings.manifestMetaClears[
+          `${key}\u0000${id}\u0000${rawField}`
+        ] = ts;
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    await this.saveSettings();
+    // 导出清理记录跨会话生效，必须显式 flush，避免导出后立刻关闭导致旧字段回填。
+    await this.flushSettingsSave();
+  }
+
+  /**
+   * 取出某 manifest 锚点的清理记录：id → field → 清除时刻。
+   * 供 mergeManifestComponentSidecars 过滤组件 sidecar 的旧 B 类字段。
+   */
+  getManifestMetaClears(
+    anchor: string
+  ): Map<string, Map<string, number>> {
+    const out = new Map<string, Map<string, number>>();
+    const key = (anchor ?? "").trim();
+    if (key === "") return out;
+    const prefix = `${key}\u0000`;
+    for (const [rawKey, ts] of Object.entries(
+      this.settings.manifestMetaClears
+    )) {
+      if (!rawKey.startsWith(prefix)) continue;
+      const rest = rawKey.slice(prefix.length);
+      const sep = rest.indexOf("\u0000");
+      if (sep <= 0) continue;
+      const id = rest.slice(0, sep);
+      const field = rest.slice(sep + 1);
+      if (id === "" || field === "" || field.includes("\u0000")) continue;
+      if (typeof ts !== "number" || !Number.isFinite(ts) || ts <= 0) continue;
+      let fields = out.get(id);
+      if (!fields) {
+        fields = new Map<string, number>();
+        out.set(id, fields);
+      }
+      // 同一字段多次导出清理：保留最新（最大）时间戳
+      fields.set(field, Math.max(fields.get(field) ?? 0, ts));
+    }
+    return out;
   }
 
   async flushSettingsSave(): Promise<void> {
@@ -677,7 +793,9 @@ export default class CSVQuizPlugin extends Plugin {
           mastered: this.settings.defaultFilterMastered,
           repeat: this.settings.defaultFilterRepeat,
           wrong: this.settings.defaultFilterWrong,
-        }
+        },
+        this.settings.manifestResetAt[key] ?? 0,
+        this.getManifestMetaClears(key)
       );
       if (result.status === "merged") {
         await markMerged();
@@ -788,6 +906,8 @@ export default class CSVQuizPlugin extends Plugin {
           } else {
             // L2: records/cards 是用户显式重置且无视图（无 tombstone）：
             // 权威写直接覆盖磁盘，避免读改写合并把旧记录并回来。
+            // 同时写入 manifest 重置闸门：重置前写入的组成 sidecar 不得再被并回。
+            await this.markManifestReset();
             await this.stateManager.saveStateImmediately(state, {
               authoritative: true,
             });
@@ -815,6 +935,8 @@ export default class CSVQuizPlugin extends Plugin {
       new Notice("无法加载题库状态：请先设置题库来源并打开刷题面板");
       return;
     }
+    // 重置闸门必须在 clearState 前写入：否则下次载入会自动把旧组成 sidecar 并回复活。
+    await this.markManifestReset();
     await this.stateManager.clearState();
     this.refreshMemoryReminder();
     this.refreshQuiz();
@@ -950,7 +1072,8 @@ export default class CSVQuizPlugin extends Plugin {
       result = await this.stateManager.recoverMergedSidecars(
         res.source.anchor,
         components,
-        defaults
+        defaults,
+        this.getManifestMetaClears(res.source.anchor)
       );
     } catch (e: unknown) {
       console.error("CSV Quiz: 从 .merged 归档恢复进度失败", e);

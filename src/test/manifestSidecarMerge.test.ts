@@ -377,4 +377,200 @@ describe("mergeManifestComponentSidecars", () => {
     expect(merged.state.wrongCount).toBe(1);
     expect(merged.state.dailyAnswers).toEqual({ "2026-10-01": 2 });
   });
+
+  it("重置闸门：重置前写入的组件 sidecar 不并回，重置后新进度仍并入", async () => {
+    const CUTOFF = 2_000_000;
+    const { files, manager } = setup({
+      [sidecarPathFor(TARGET)]: emptyTargetSidecar(),
+      [sidecarPathFor(CQV)]: componentSidecar({
+        correctCount: 2,
+        answered: { q1: "A" },
+        updatedAt: 1_000_000, // 重置前
+      }),
+    });
+
+    const skipped = await manager.mergeManifestComponentSidecars(
+      TARGET,
+      [CQV],
+      DEFAULT_FILTERS,
+      CUTOFF
+    );
+    expect(skipped.status).toBe("skipped");
+    expect(skipped.reason).toBe("no-component-progress");
+    // 目标未被旧组件复活
+    expect(readJson(files, sidecarPathFor(TARGET)).state.answeredQuestions).toEqual(
+      {}
+    );
+
+    // 重置后单独使用组件来源产生新进度 → 时间戳晚于闸门，仍可并入
+    files[sidecarPathFor(CQV)] = JSON.stringify(
+      componentSidecar({
+        correctCount: 1,
+        answered: { q9: "D" },
+        updatedAt: CUTOFF + 1,
+      })
+    );
+    const merged = await manager.mergeManifestComponentSidecars(
+      TARGET,
+      [CQV],
+      DEFAULT_FILTERS,
+      CUTOFF
+    );
+    expect(merged.status).toBe("merged");
+    expect(readJson(files, sidecarPathFor(TARGET)).state.answeredQuestions).toEqual(
+      { q9: "D" }
+    );
+  });
+
+  it("重置闸门：全部组件被跳过 → no-component-progress，不创建目标文件", async () => {
+    const { files, manager } = setup({
+      [sidecarPathFor(CQV)]: componentSidecar({
+        correctCount: 2,
+        answered: { q1: "A" },
+        updatedAt: 1_000_000,
+      }),
+      [sidecarPathFor(CSV)]: componentSidecar({
+        correctCount: 1,
+        answered: { q2: "B" },
+        updatedAt: 1_500_000,
+      }),
+    });
+
+    const result = await manager.mergeManifestComponentSidecars(
+      TARGET,
+      [CQV, CSV],
+      DEFAULT_FILTERS,
+      2_000_000
+    );
+    expect(result.status).toBe("skipped");
+    expect(result.reason).toBe("no-component-progress");
+    expect(files[sidecarPathFor(TARGET)]).toBeUndefined();
+  });
+});
+
+describe("mergeManifestComponentSidecars：导出清理字段过滤（metaFieldClears）", () => {
+  const TARGET = "bank/复合题库/manifest";
+  const CQV = "bank/复合题库/执照认证.cqv";
+  const CLEAR_TS = 2_000_000;
+
+  function clearsFor(
+    entries: Record<string, string[]>
+  ): Map<string, Map<string, number>> {
+    const out = new Map<string, Map<string, number>>();
+    for (const [id, fields] of Object.entries(entries)) {
+      out.set(id, new Map(fields.map((field) => [field, CLEAR_TS])));
+    }
+    return out;
+  }
+
+  it("target/component 的旧 tags 都被清除记录覆盖 → 合并后无 tags", async () => {
+    const { files, manager } = setup({
+      [sidecarPathFor(TARGET)]: {
+        ...emptyTargetSidecar(),
+        meta: { q1: { tags: "#target-old", ts: 1_000_000 } },
+        state: {
+          ...emptyTargetSidecar().state,
+          answeredQuestions: { q1: "A" },
+        },
+      },
+      [sidecarPathFor(CQV)]: componentSidecar({
+        correctCount: 1,
+        answered: { q1: "A" },
+        meta: {
+          q1: { tags: "#component-old", ts: 1_000_000 },
+          q2: { tags: "#component-q2", ts: 1_000_000 },
+        },
+      }),
+    });
+
+    const result = await manager.mergeManifestComponentSidecars(
+      TARGET,
+      [CQV],
+      DEFAULT_FILTERS,
+      0,
+      clearsFor({ q1: ["tags"], q2: ["tags"] })
+    );
+
+    expect(result.status).toBe("merged");
+    const merged = readJson(files, sidecarPathFor(TARGET));
+    expect(merged.meta).toEqual({});
+    expect(Object.keys(merged.state.answeredQuestions)).toEqual(["q1"]);
+  });
+
+  it("component 条目 ts 晚于清除时刻 → 保留导出后重新编辑的新字段", async () => {
+    const { files, manager } = setup({
+      [sidecarPathFor(TARGET)]: emptyTargetSidecar(),
+      [sidecarPathFor(CQV)]: componentSidecar({
+        correctCount: 1,
+        answered: { q1: "A" },
+        meta: { q1: { tags: "#new", ts: CLEAR_TS + 1 } },
+      }),
+    });
+
+    const result = await manager.mergeManifestComponentSidecars(
+      TARGET,
+      [CQV],
+      DEFAULT_FILTERS,
+      0,
+      clearsFor({ q1: ["tags"] })
+    );
+
+    expect(result.status).toBe("merged");
+    expect(readJson(files, sidecarPathFor(TARGET)).meta.q1?.tags).toBe("#new");
+  });
+
+  it("target 重新编辑（ts 晚于清除） → 保留 target 新字段", async () => {
+    const { files, manager } = setup({
+      [sidecarPathFor(TARGET)]: {
+        ...emptyTargetSidecar(),
+        meta: {
+          q1: {
+            tags: "#target-new",
+            category1: "保留分类",
+            ts: CLEAR_TS + 1,
+          },
+        },
+      },
+      [sidecarPathFor(CQV)]: componentSidecar({
+        correctCount: 1,
+        answered: { q1: "A" },
+      }),
+    });
+
+    const result = await manager.mergeManifestComponentSidecars(
+      TARGET,
+      [CQV],
+      DEFAULT_FILTERS,
+      0,
+      clearsFor({ q1: ["tags"] })
+    );
+
+    expect(result.status).toBe("merged");
+    const merged = readJson(files, sidecarPathFor(TARGET));
+    // 条目整体 ts 晚于清除时刻 → tags 判定为导出后重新编辑，保留
+    expect(merged.meta.q1?.tags).toBe("#target-new");
+    expect(merged.meta.q1?.category1).toBe("保留分类");
+  });
+
+  it("仅剩已清理字段的组件不计入合并 → no-component-progress", async () => {
+    const { files, manager } = setup({
+      [sidecarPathFor(TARGET)]: emptyTargetSidecar(),
+      [sidecarPathFor(CQV)]: componentSidecar({
+        meta: { q1: { tags: "#old", ts: 1_000_000 } },
+      }),
+    });
+
+    const result = await manager.mergeManifestComponentSidecars(
+      TARGET,
+      [CQV],
+      DEFAULT_FILTERS,
+      0,
+      clearsFor({ q1: ["tags"] })
+    );
+
+    expect(result.status).toBe("skipped");
+    expect(result.reason).toBe("no-component-progress");
+    // 目标文件未被改写（setup 中已存在空目标 sidecar）
+    expect(readJson(files, sidecarPathFor(TARGET)).meta).toEqual({});
+  });
 });

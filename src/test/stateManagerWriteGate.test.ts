@@ -72,7 +72,15 @@ function dayKey(offsetDays: number, from: Date = new Date()): string {
 interface GateInternals {
   sidecarBase: Map<string, { data: SidecarData; mtimeMs: number; size: number }>;
   statsBaseline: Map<string, { correct: number; wrong: number; daily: object }>;
-  tombstones: Map<string, { answered: Set<string>; cards: Set<string>; meta: Set<string> }>;
+  tombstones: Map<
+    string,
+    {
+      answered: Set<string>;
+      cards: Set<string>;
+      meta: Set<string>;
+      metaFields: Map<string, Set<string>>;
+    }
+  >;
 }
 
 function internals(sm: StateManager): GateInternals {
@@ -165,6 +173,87 @@ describe("StateManager 门控写：磁盘变化慢路径", () => {
     expect(disk.meta.q4.favorite).toBe("1");
     expect(disk.state.dailyAnswers).toEqual({ [today]: 5, [yesterday]: 1 });
     expect(disk.state.correctCount).toBe(105);
+
+    // 视图内存仍是旧子集；下一次普通保存不得走快路径覆盖刚合并的全量。
+    await sm.saveStateImmediately(sm.getState()!);
+    const diskAfterSecondSave = written(fake);
+    expect(Object.keys(diskAfterSecondSave.state.answeredQuestions).sort()).toEqual([
+      "q1",
+      "q2",
+      "q3",
+      "q4",
+      "q5",
+    ]);
+    expect(Object.keys(diskAfterSecondSave.state.memoryCards ?? {}).sort()).toEqual([
+      "q1",
+      "q3",
+    ]);
+    expect(diskAfterSecondSave.state.correctCount).toBe(105);
+  });
+
+  it("forceMerge：3A「使用当前」的旧子集不覆盖磁盘全量/每日", async () => {
+    const today = dayKey(0);
+    const full = makeSidecar(
+      {
+        correctCount: 10,
+        wrongCount: 3,
+        answeredQuestions: { q1: "A", q2: "B", q3: "C" },
+        memoryCards: {
+          q1: cardFor({ lastReview: "2026-01-01T00:00:00.000Z" }),
+          q2: cardFor({ lastReview: "2026-02-01T00:00:00.000Z" }),
+        },
+        dailyAnswers: { [today]: 4 },
+      },
+      { q1: { tags: "#a" }, q2: { favorite: "1" } }
+    );
+    const fake = new FakeVault({ [SIDECAR]: JSON.stringify(full) });
+    const sm = await load(fake);
+
+    // 3A：内存是旧子集（仅 q1），磁盘/刚合并的 base 是全量
+    const subset = {
+      ...sm.getState()!,
+      correctCount: 2,
+      wrongCount: 1,
+      answeredQuestions: { q1: "A" },
+      memoryCards: {
+        q1: cardFor({ lastReview: "2026-01-01T00:00:00.000Z" }),
+      },
+      dailyAnswers: { [today]: 1 },
+    };
+    await sm.saveStateImmediately(subset, { forceMerge: true });
+
+    const disk = written(fake);
+    expect(Object.keys(disk.state.answeredQuestions).sort()).toEqual([
+      "q1",
+      "q2",
+      "q3",
+    ]);
+    expect(Object.keys(disk.state.memoryCards ?? {}).sort()).toEqual([
+      "q1",
+      "q2",
+    ]);
+    expect(disk.meta.q1.tags).toBe("#a");
+    expect(disk.meta.q2.favorite).toBe("1");
+    expect(disk.state.dailyAnswers).toEqual({ [today]: 4 });
+    expect(disk.state.correctCount).toBe(10);
+
+    // 3A 修法：forceMerge 写盘后重新 loadSidecar，内存/视图拿到的是合并后全量
+    const reloaded = await sm.loadSidecar(CONTENT, FILTERS);
+    expect(reloaded.status).toBe("ok");
+    if (reloaded.status === "corrupt") throw new Error(reloaded.reason);
+    expect(Object.keys(reloaded.state.answeredQuestions).sort()).toEqual([
+      "q1",
+      "q2",
+      "q3",
+    ]);
+    expect(Object.keys(reloaded.state.memoryCards ?? {}).sort()).toEqual([
+      "q1",
+      "q2",
+    ]);
+    expect(reloaded.state.correctCount).toBe(10);
+    expect(reloaded.state.dailyAnswers).toEqual({ [today]: 4 });
+    expect(reloaded.meta.q1.tags).toBe("#a");
+    expect(reloaded.meta.q2.favorite).toBe("1");
   });
 
   it("计数增量叠加：disk=105/S=100/M=101 → 106；M=90 → 105", async () => {
@@ -292,7 +381,14 @@ describe("StateManager 门控写：快照隔离与写入校验", () => {
 
   it("写后字节数与期望不符 → 重读磁盘再合并一次后重写", async () => {
     const fake = new FakeVault({
-      [SIDECAR]: JSON.stringify(makeSidecar({ answeredQuestions: { q1: "A" } })),
+      [SIDECAR]: JSON.stringify(
+        makeSidecar({
+          answeredQuestions: { q1: "A" },
+          correctCount: 2,
+          wrongCount: 1,
+          dailyAnswers: { "2026-10-24": 2 },
+        })
+      ),
     });
     const sm = await load(fake);
     fake.readCalls.length = 0;
@@ -310,6 +406,10 @@ describe("StateManager 门控写：快照隔离与写入校验", () => {
       fake.writeCalls.filter((p) => p === SIDECAR + ".tmp")
     ).toHaveLength(2);
     expect(written(fake).state.answeredQuestions).toEqual({ q1: "A" });
+    // 重试不能把计数/每日增量重复叠加
+    expect(written(fake).state.correctCount).toBe(2);
+    expect(written(fake).state.wrongCount).toBe(1);
+    expect(written(fake).state.dailyAnswers).toEqual({ "2026-10-24": 2 });
     // base 快照按最终落盘结果刷新（可判定为「已同步」）
     const base = internals(sm).sidecarBase.get(CONTENT)!;
     expect(base.size).toBe(fake.sizeOf(SIDECAR));
@@ -532,6 +632,35 @@ describe("StateManager.transferSidecar：计数/每日 max 幂等", () => {
   });
 });
 
+describe("StateManager 权威直写后的下一次普通保存", () => {
+  it("manifest 组成合并写入目标后，旧内存子集保存不能覆盖刚并入的数据", async () => {
+    const fake = new FakeVault({
+      [SIDECAR]: JSON.stringify(
+        makeSidecar({ answeredQuestions: { q1: "A" }, correctCount: 1 })
+      ),
+      [sidecarPathFor("comp.csv")]: JSON.stringify(
+        makeSidecar({ answeredQuestions: { q2: "B" }, correctCount: 1 })
+      ),
+    });
+    const sm = await load(fake);
+
+    const merged = await sm.mergeManifestComponentSidecars(
+      CONTENT,
+      ["comp.csv"],
+      FILTERS
+    );
+    expect(merged.status).toBe("merged");
+
+    // 视图 currentState 仍是合并前的 q1 子集；下一次普通保存必须走慢路径，
+    // 不能因为 writeRaw 把 base 标成“已同步”而直接写回 q1。
+    await sm.saveStateImmediately(sm.getState()!);
+
+    const out = written(fake);
+    expect(out.state.answeredQuestions).toMatchObject({ q1: "A", q2: "B" });
+    expect(out.state.correctCount).toBe(1);
+  });
+});
+
 describe("StateManager.mergeManifestComponentSidecars：求和后取 max 幂等", () => {
   const TARGET = "bank/复合题库/manifest";
   const CQV = "bank/复合题库/执照认证.cqv";
@@ -652,6 +781,45 @@ describe("StateManager tombstone（权威删除记忆卡片/整条 meta）", () 
       // 写盘成功后 tombstone 清空
       expect(internals(sm).tombstones.get(CONTENT)!.cards.size).toBe(0);
       expect(internals(sm).tombstones.get(CONTENT)!.meta.size).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("markMetaFieldsDeleted：字段级 tombstone 阻止磁盘旧字段复活，未标记字段保留", async () => {
+    vi.stubGlobal("window", {
+      setTimeout: (fn: () => void, ms?: number) => globalThis.setTimeout(fn, ms),
+      clearTimeout: (id: number) => globalThis.clearTimeout(id),
+    });
+    try {
+      const original = makeSidecar({}, {
+        q1: { repeat: "1", tags: "#t", favorite: "1", ts: 10 },
+      });
+      const fake = new FakeVault({ [SIDECAR]: JSON.stringify(original) });
+      const sm = await load(fake);
+
+      sm.markMetaFieldsDeleted("q1", ["repeat", "tags"]);
+      expect(
+        internals(sm).tombstones.get(CONTENT)!.metaFields.get("q1")
+      ).toEqual(new Set(["repeat", "tags"]));
+
+      // 内存同步删除被 tombstone 的字段
+      const entry = sm.getMeta().q1;
+      delete entry.repeat;
+      delete entry.tags;
+      // 强制走慢路径：磁盘被外部改动，旧字段仍存在
+      fake.foreignWrite(SIDECAR, JSON.stringify(original));
+      await sm.saveStateImmediately(sm.getState()!);
+
+      const disk = written(fake);
+      expect(disk.meta.q1.repeat).toBeUndefined();
+      expect(disk.meta.q1.tags).toBeUndefined();
+      // 未标记的 C 类字段仍保留
+      expect(disk.meta.q1.favorite).toBe("1");
+      // 写盘成功后字段 tombstone 清空
+      expect(
+        internals(sm).tombstones.get(CONTENT)!.metaFields.size
+      ).toBe(0);
     } finally {
       vi.unstubAllGlobals();
     }

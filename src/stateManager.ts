@@ -81,6 +81,37 @@ function maxDailyAnswers(
   return Object.fromEntries(out);
 }
 
+/**
+ * 应用「导出已清理字段」记录：返回过滤后的新 meta（不修改入参）。
+ * 对每个 id 的每个字段：条目存在该字段且条目写入时间不晚于清除时刻
+ * （entry.ts ?? 0 <= clearTs）→ 丢弃该字段；条目无剩余字段（ts 除外）→ 丢弃整条。
+ * 条目 ts 晚于清除时刻说明导出后又被重新编辑，保留新值。
+ */
+function applyMetaFieldClears(
+  meta: Record<string, SidecarMeta>,
+  clears: Map<string, Map<string, number>>
+): Record<string, SidecarMeta> {
+  const entries: Array<[string, SidecarMeta]> = [];
+  for (const [id, entry] of Object.entries(meta)) {
+    if (!entry) continue;
+    const fieldClears = clears.get(id);
+    if (!fieldClears || fieldClears.size === 0) {
+      entries.push([id, { ...entry }]);
+      continue;
+    }
+    const next = { ...entry } as SidecarMeta & Record<string, unknown>;
+    for (const [field, clearTs] of fieldClears) {
+      if (next[field] === undefined) continue;
+      if ((next.ts ?? 0) <= clearTs) delete next[field];
+    }
+    const remaining = Object.keys(next).filter((key) => key !== "ts");
+    if (remaining.length === 0) continue;
+    entries.push([id, next]);
+  }
+  // 用 fromEntries 生成自有键，避免题号 "__proto__"/"constructor" 改写原型丢失
+  return Object.fromEntries(entries);
+}
+
 /** 递归按对象键排序（数组保持顺序），用于生成与键顺序无关的 JSON 比较基准。 */
 function sortKeysDeep(value: unknown): unknown {
   if (Array.isArray(value)) return value.map((item) => sortKeysDeep(item));
@@ -638,6 +669,42 @@ export class StateManager {
     this.scheduleSave(this.currentState!, SIDECAR_SAVE_DEBOUNCE_MS);
   }
 
+  /**
+   * 登记「本次会话显式删除了某题的这些 meta 字段」（字段级 tombstone）：
+   * 保存层三方合并时该字段一律不写回（即使磁盘仍有旧值），其余字段照常合并。
+   * 只登记 + 调度防抖保存；tombstone 在写盘成功后随空集合一起清空，失败则保留重试。
+   * contentPath/currentState 为空（题库未载入/兼容模式）时不登记。
+   */
+  markMetaFieldsDeleted(id: string, fields: Iterable<string>): void {
+    const path = this.contentPath;
+    if (path === null || this.currentState === null) return;
+    if (typeof id !== "string" || id === "") return;
+    let tomb = this.tombstones.get(path);
+    if (!tomb) {
+      tomb = this.emptyTombstones();
+      this.tombstones.set(path, tomb);
+    }
+    let deleted = tomb.metaFields.get(id);
+    if (!deleted) {
+      deleted = new Set();
+      tomb.metaFields.set(id, deleted);
+    }
+    let added = false;
+    for (const field of fields) {
+      if (typeof field !== "string" || field === "") continue;
+      if (!deleted.has(field)) {
+        deleted.add(field);
+        added = true;
+      }
+    }
+    if (!added) {
+      // 未新增任何字段：避免留下空集合
+      if (deleted.size === 0) tomb.metaFields.delete(id);
+      return;
+    }
+    this.scheduleSave(this.currentState, SIDECAR_SAVE_DEBOUNCE_MS);
+  }
+
   /** 把 id 加入当前内容源的指定 tombstone 集合。返回是否登记成功（未载入题库时 false）。 */
   private addTombstones(
     kind: "cards" | "meta",
@@ -704,7 +771,12 @@ export class StateManager {
 
   /** 空 tombstone 集合（每个内容源一份，写盘成功后清空）。 */
   private emptyTombstones(): SidecarTombstones {
-    return { answered: new Set(), cards: new Set(), meta: new Set() };
+    return {
+      answered: new Set(),
+      cards: new Set(),
+      meta: new Set(),
+      metaFields: new Map(),
+    };
   }
 
   /** 把 job 投入串行链（所有读-合并-写必须经此入口，避免并发穿插）。 */
@@ -773,7 +845,7 @@ export class StateManager {
       const st = await this.statSidecar(contentPath);
       if (this.sameStat(st, base)) {
         const out = cloneSidecarData(memory);
-        await this.commitGated(contentPath, out, memory, baseline);
+        await this.commitGated(contentPath, out, memory, baseline, false);
         return;
       }
       const r = await readSidecar(this.vault, contentPath);
@@ -796,7 +868,12 @@ export class StateManager {
       statsBaseline: baseline,
       tombstones: tomb,
     });
-    await this.commitGated(contentPath, out, memory, baseline);
+    // 如果慢路径把磁盘上比内存更多的数据并了进来，视图 currentState 仍是旧子集；
+    // 不能让下一次保存走快路径把它覆盖回去。标记 stat 未知，后续保存继续慢路径，
+    // 直到视图重载/内存补齐后 out 与 memory 一致。
+    const forceNextSlow =
+      canonicalSidecarJson(out) !== canonicalSidecarJson(memory);
+    await this.commitGated(contentPath, out, memory, baseline, forceNextSlow);
   }
 
   /**
@@ -807,7 +884,8 @@ export class StateManager {
     contentPath: string,
     out: SidecarData,
     memory: SidecarData,
-    baseline: StatsBaseline
+    baseline: StatsBaseline,
+    forceNextSlow: boolean
   ): Promise<void> {
     out.state.updatedAt = Date.now();
     await writeSidecar(this.vault, contentPath, out);
@@ -817,22 +895,31 @@ export class StateManager {
       // 写后大小不符：重读磁盘合并一次后重写（不再校验第二次，避免死循环）
       const r = await readSidecar(this.vault, contentPath);
       const disk = r.status === "ok" || r.status === "recovered" ? r.data : null;
+      // 重试时 out 已经是本次写入的完整结果；不能再拿原始 memory 的增量叠加，
+      // 否则 correct/wrong/daily 会被重复计算。以 out 同时作为 base 和 memory，
+      // 计数增量归零，只把写入窗口内出现的磁盘差异并进来。
       const retried = mergeSidecarForWrite({
         base: out,
-        memory,
+        memory: out,
         disk,
-        statsBaseline: baseline,
+        statsBaseline: countersOfSidecar(out),
         tombstones: this.emptyTombstones(),
       });
       retried.state.updatedAt = Date.now();
       await writeSidecar(this.vault, contentPath, retried);
       out = retried;
       st = await this.statSidecar(contentPath);
+      // 重试若又并入了磁盘差异，同样要让后续保存继续走慢路径
+      forceNextSlow =
+        forceNextSlow ||
+        canonicalSidecarJson(out) !== canonicalSidecarJson(memory);
     }
     this.sidecarBase.set(contentPath, {
       data: cloneSidecarData(out),
-      mtimeMs: st?.mtimeMs ?? 0,
-      size: st?.size ?? -1,
+      // 慢路径合并了内存里没有的数据时，内存仍是旧子集；不能把 stat 标成
+      // “已同步”，否则下一次快路径会把它覆盖回去。
+      mtimeMs: forceNextSlow ? 0 : st?.mtimeMs ?? 0,
+      size: forceNextSlow ? -1 : st?.size ?? -1,
     });
     // 基线取 memory 的计数（= 本次已确认写入的会话累计值），下次保存才算增量
     this.statsBaseline.set(contentPath, countersOfSidecar(memory));
@@ -855,11 +942,15 @@ export class StateManager {
     const out = cloneSidecarData(data);
     out.state.updatedAt = Date.now();
     await writeSidecar(this.vault, contentPath, out);
-    const st = await this.statSidecar(contentPath);
+    // 权威直写可能不是当前视图内存状态的完整投影（例如 manifest 组成合并
+    // 刚把组件进度写进目标 sidecar，而视图 currentState 仍是旧子集）。
+    // 不能把这里的磁盘 stat 当成“下一次快路径可直接写内存”的依据，
+    // 否则下一次普通保存会把刚写入的数据覆盖回去。标记 stat 未知，
+    // 强制下一次保存走慢路径：以本次 out 为 base、旧内存为 memory 做三方合并。
     this.sidecarBase.set(contentPath, {
       data: cloneSidecarData(out),
-      mtimeMs: st?.mtimeMs ?? 0,
-      size: st?.size ?? -1,
+      mtimeMs: 0,
+      size: -1,
     });
     this.statsBaseline.set(contentPath, countersOfSidecar(out));
     this.currentSidecarUpdatedAt = out.state.updatedAt;
@@ -885,7 +976,7 @@ export class StateManager {
 
   async saveStateImmediately(
     state: QuizSessionState,
-    opts: { authoritative?: boolean } = {}
+    opts: { authoritative?: boolean; forceMerge?: boolean } = {}
   ): Promise<void> {
     this.cancelScheduledSave();
     this.currentState = state;
@@ -898,6 +989,16 @@ export class StateManager {
         this.writeRaw(path, memory, { authoritative: true })
       );
       return;
+    }
+    // 3A「使用当前进度」：内存可能是磁盘全量的旧子集（loadSidecar 后 base 是磁盘
+    // 真实值），此时快路径会把合并结果覆盖回子集。标记该路径 stat 未知（保留 base
+    // data），强制 persistNow 走慢路径做三方合并，把磁盘/合并结果保留下来。
+    if (opts.forceMerge && path !== null) {
+      const base = this.sidecarBase.get(path);
+      if (base) {
+        base.mtimeMs = 0;
+        base.size = -1;
+      }
     }
     await this.persistNow();
   }
@@ -1124,7 +1225,9 @@ export class StateManager {
    * 由调用方按 addedAnswerIds 为新并入的答案逐条补计）。
    * 整个「检测 → 读副本 → 合并 → 写回 → 归档」在串行链内完成，不会与门控保存穿插。
    */
-  async mergeSidecarConflicts(): Promise<SidecarMergeOutcome> {
+  async mergeSidecarConflicts(
+    metaFieldClears?: Map<string, Map<string, number>>
+  ): Promise<SidecarMergeOutcome> {
     const path = this.contentPath;
     const state = this.currentState;
     if (path === null || state === null) {
@@ -1136,13 +1239,14 @@ export class StateManager {
       if (this.contentPath !== path || this.currentState !== state) {
         return { status: "none" };
       }
-      return this.mergeSidecarConflictsImpl(path);
+      return this.mergeSidecarConflictsImpl(path, metaFieldClears);
     });
   }
 
   /** mergeSidecarConflicts 的实现体（须在 runExclusive 内调用，不可自行入队）。 */
   private async mergeSidecarConflictsImpl(
-    path: string
+    path: string,
+    metaFieldClears?: Map<string, Map<string, number>>
   ): Promise<SidecarMergeOutcome> {
     const state = this.currentState;
     if (state === null) return { status: "none" };
@@ -1185,6 +1289,40 @@ export class StateManager {
       this.currentSidecarUpdatedAt,
       sources
     );
+    // 冲突副本可能包含导出时已清理的旧 B 类字段；在写回前按持久化清理记录丢掉，
+    // 否则下一次 writeGated 会把它写回磁盘，遮蔽导出的 CSV 值。
+    if (metaFieldClears && metaFieldClears.size > 0) {
+      const mergedBeforeClears = merge.data.meta;
+      merge.data.meta = applyMetaFieldClears(
+        mergedBeforeClears,
+        metaFieldClears
+      );
+      // 仅过滤内存不够：writeGated 慢路径会用 base/disk 的三方合并把旧字段
+      // 重新物化。这里同时登记字段级 tombstone，确保本次写入真正删除。
+      // 只登记「合并结果中确实还是旧值」的字段；导出后用户重新编辑的新值
+      //（entry.ts > clearTs）不能被 tombstone 删掉。
+      const tomb = this.tombstones.get(path) ?? this.emptyTombstones();
+      for (const [id, fields] of metaFieldClears) {
+        if (fields.size === 0) continue;
+        const entry = (
+          Object.prototype.hasOwnProperty.call(mergedBeforeClears, id)
+            ? mergedBeforeClears[id]
+            : undefined
+        ) as (SidecarMeta & Record<string, unknown>) | undefined;
+        if (!entry) continue;
+        let set = tomb.metaFields.get(id);
+        for (const [field, clearTs] of fields) {
+          if (entry[field] === undefined) continue;
+          if ((entry.ts ?? 0) > clearTs) continue;
+          if (!set) {
+            set = new Set();
+            tomb.metaFields.set(id, set);
+          }
+          set.add(field);
+        }
+      }
+      if (tomb.metaFields.size > 0) this.tombstones.set(path, tomb);
+    }
 
     // 每日答题量：按日期取 max(current, 各冲突副本)，不求和——重复合并不会翻倍，
     // 也不会丢掉另一分支独有的日期计数；当前缺失的日期由副本补入。
@@ -1218,12 +1356,11 @@ export class StateManager {
     st.memoryInitialized = memoryInitialized;
     this.currentMeta = merge.data.meta;
 
-    // 合并属关键操作：绕过防抖直接落盘。这里用 writeRaw 权威覆盖而非 writeGated：
-    // 本方法已在串行链内，合并结果已是「base ∪ 副本（daily 取 max）」；writeGated 的
-    // 增量语义会再叠加一次每日/计数导致翻倍。代价是：从读 base 到写盘之间若磁盘被外部
-    // 改动，这些改动会被覆盖（窗口极短，且冲突合并本身即权威操作）。
-    // writeRaw 成功后同步刷新 base/baseline，tombstone 清空。
-    await this.writeRaw(path, this.buildSidecarData(), { authoritative: true });
+    // 合并结果已是「base ∪ 冲突副本（daily 取 max）」。用门控写而不是权威写：
+    // 本方法已在串行链内，writeGated 会再吸收读副本期间 canonical 的外部变化；
+    // statsBaseline 仍是合并前的内存计数，daily 增量只会叠加冲突副本新增部分，
+    // 不会把 base 计数重复加一次。写成功后 base/baseline 同步刷新。
+    await this.writeGated(path, this.buildSidecarData());
 
     // 归档冲突副本（改名保留备查；单个失败不阻塞其余）
     let archived = 0;
@@ -1466,15 +1603,39 @@ export class StateManager {
    * - 会话字段（displayOrder/currentIndex/filter*）一律保留目标值（缺失时为空，后续由视图重建）
    * - 合并结果与目标规范化 JSON 完全一致 → skipped/no-change（不写盘）
    * - 不删除/不归档任何组成 sidecar（保留回退数据源）
+   * - metaFieldClears：导出清理记录（id → field → 清除时刻）。目标与组件的 B 类字段
+   *   若写入时间不晚于清除时刻则丢弃，避免导出到 CSV 后旧组件字段被回填。
    */
   async mergeManifestComponentSidecars(
     targetAnchor: string,
     componentAnchors: string[],
-    defaultFilters: { favorite: string; mastered: string; repeat: string; wrong: string }
+    defaultFilters: { favorite: string; mastered: string; repeat: string; wrong: string },
+    componentCutoffMs = 0,
+    metaFieldClears?: Map<string, Map<string, number>>
   ): Promise<ManifestSidecarMergeResult> {
     const target = targetAnchor.trim();
     if (target === "") return { status: "skipped" };
+    // 读 target/组件、合并、写盘必须在同一个串行 job 内，否则普通保存可能
+    // 在读取和权威写之间插入，随后被 manifest 合并结果覆盖。
+    return this.runExclusive(() =>
+      this.mergeManifestComponentSidecarsImpl(
+        target,
+        componentAnchors,
+        defaultFilters,
+        componentCutoffMs,
+        metaFieldClears
+      )
+    );
+  }
 
+  /** mergeManifestComponentSidecars 的实现体（须在 runExclusive 内调用，不可再入队）。 */
+  private async mergeManifestComponentSidecarsImpl(
+    target: string,
+    componentAnchors: string[],
+    defaultFilters: { favorite: string; mastered: string; repeat: string; wrong: string },
+    componentCutoffMs: number,
+    metaFieldClears?: Map<string, Map<string, number>>
+  ): Promise<ManifestSidecarMergeResult> {
     const targetResult = await readSidecar(this.vault, target);
     if (targetResult.status === "corrupt") {
       console.error(
@@ -1498,6 +1659,14 @@ export class StateManager {
       targetTs = await this.sidecarTimestampMs(target, targetResult.data);
     }
 
+    // 导出清理记录：目标侧同样过滤（目标若在导出后重新编辑，entry.ts 更新会保留）
+    if (metaFieldClears && metaFieldClears.size > 0) {
+      targetData = {
+        ...targetData,
+        meta: applyMetaFieldClears(targetData.meta, metaFieldClears),
+      };
+    }
+
     // 组成去重（排除空与 target 自身），只收「有进度」的 sidecar
     const seen = new Set<string>();
     const components: SidecarConflictSource[] = [];
@@ -1517,10 +1686,22 @@ export class StateManager {
         continue;
       }
       if (!this.sidecarHasProgress(result.data)) continue;
+      // 组件侧旧 B 类字段过滤（先过滤再判进度，避免只剩已清理字段的组件被并回）
+      if (metaFieldClears && metaFieldClears.size > 0) {
+        result.data = {
+          ...result.data,
+          meta: applyMetaFieldClears(result.data.meta, metaFieldClears),
+        };
+        if (!this.sidecarHasProgress(result.data)) continue;
+      }
+      const tsMs = await this.sidecarTimestampMs(anchor, result.data);
+      // 重置闸门：重置前写入的组件 sidecar 不得被自动并回（否则重置后进度复活）。
+      // 重置后单独使用组件来源产生的新进度（ts > cutoff）仍可并入。
+      if (componentCutoffMs > 0 && tsMs <= componentCutoffMs) continue;
       components.push({
         path: sidecarPathFor(anchor),
         data: result.data,
-        tsMs: await this.sidecarTimestampMs(anchor, result.data),
+        tsMs,
       });
     }
     if (components.length === 0) {
@@ -1603,7 +1784,8 @@ export class StateManager {
     mergedData.state.updatedAt = Date.now();
 
     try {
-      await this.runExclusive(() => this.writeRaw(target, mergedData));
+      // 已在 mergeManifestComponentSidecars 的 runExclusive job 内，不能再次入队。
+      await this.writeRaw(target, mergedData);
     } catch (e: unknown) {
       console.error("CSV Quiz: 写入 manifest 合并后 sidecar 失败", target, e);
       return { status: "error", reason: "write-failed" };
@@ -1634,7 +1816,8 @@ export class StateManager {
   async recoverMergedSidecars(
     targetAnchor: string,
     componentAnchors: string[],
-    defaultFilters: { favorite: string; mastered: string; repeat: string; wrong: string }
+    defaultFilters: { favorite: string; mastered: string; repeat: string; wrong: string },
+    metaFieldClears?: Map<string, Map<string, number>>
   ): Promise<MergedArchiveRecoveryResult> {
     const target = targetAnchor.trim();
     if (target === "") return { status: "none" };
@@ -1731,6 +1914,11 @@ export class StateManager {
 
       // 4. 合并：answered/meta/cards 并集；correct/wrong 保持目标；daily 取 max
       const merge = mergeSidecarData(base, baseTs, sources);
+      // 归档可能包含导出时已清理的旧 B 类字段；恢复后同样不能让它回填。
+      const recoveredMeta =
+        metaFieldClears && metaFieldClears.size > 0
+          ? applyMetaFieldClears(merge.data.meta, metaFieldClears)
+          : merge.data.meta;
       const dailyAnswers = maxDailyAnswers(
         base.state.dailyAnswers,
         ...sources.map((source) => source.data.state.dailyAnswers)
@@ -1740,7 +1928,7 @@ export class StateManager {
         sources.some((source) => source.data.state.memoryInitialized === true);
       const merged: SidecarData = {
         version: 1,
-        meta: merge.data.meta,
+        meta: recoveredMeta,
         state: {
           ...merge.data.state,
           // 累计作答事件数无法从快照反推 → 保持目标当前值

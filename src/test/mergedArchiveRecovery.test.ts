@@ -241,4 +241,32 @@ describe("StateManager.recoverMergedSidecars", () => {
     expect(result.status).toBe("none");
     expect(fake.readText(sidecarPathFor(TARGET))).toBeUndefined();
   });
+
+  it("恢复时应用导出清理记录，旧 tags 不回填", async () => {
+    const { fake, manager } = setup();
+    fake.putJson(
+      sidecarPathFor(TARGET),
+      sidecar({
+        answered: { q1: "A" },
+        meta: { q1: { tags: "#base", ts: 10 } },
+      })
+    );
+    fake.putJson(
+      `${TARGET}.sidecar 2.json.merged`,
+      sidecar({
+        answered: { q1: "A", q2: "B" },
+        meta: { q1: { tags: "#old", ts: 20 } },
+      })
+    );
+    const result = await manager.recoverMergedSidecars(
+      TARGET,
+      [],
+      DEFAULT_FILTERS,
+      new Map([["q1", new Map([["tags", 1000]])]])
+    );
+    expect(result.status).toBe("merged");
+    const merged = fake.readJson<SidecarData>(sidecarPathFor(TARGET));
+    expect(merged.meta.q1?.tags).toBeUndefined();
+    expect(merged.state.answeredQuestions.q2).toBe("B");
+  });
 });
