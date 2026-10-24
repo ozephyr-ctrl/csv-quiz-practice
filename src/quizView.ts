@@ -731,12 +731,12 @@ export class QuizView extends ItemView {
   private pruneMetaEntries(): void {
     const ids = new Set(this.allQuestions.map((q) => metaKeyFor(q)));
     const meta = this.stateManager.getMeta();
-    let changed = false;
-    for (const k of Object.keys(meta)) {
-      if (!ids.has(k)) {
-        delete meta[k];
-        changed = true;
-      }
+    const deadKeys = Object.keys(meta).filter((k) => !ids.has(k));
+    const changed = deadKeys.length > 0;
+    if (changed) {
+      // 先登记 meta tombstone（否则保存层读改写合并会把磁盘上的旧 meta 并回来）
+      this.stateManager.markMetaDeleted(deadKeys);
+      for (const k of deadKeys) delete meta[k];
     }
     if (changed) {
       const st = this.stateManager.getState();
@@ -1013,14 +1013,12 @@ export class QuizView extends ItemView {
   /** 清理题库中已不存在的僵尸记忆卡片（CSV 删题后保持计数一致）。 */
   private pruneMemoryCards(): void {
     const ids = new Set(this.allQuestions.map((q) => q.id));
-    let changed = false;
-    for (const k of Object.keys(this.memoryCards)) {
-      if (!ids.has(k)) {
-        delete this.memoryCards[k];
-        changed = true;
-      }
-    }
+    const deadIds = Object.keys(this.memoryCards).filter((k) => !ids.has(k));
+    const changed = deadIds.length > 0;
     if (changed) {
+      // 先登记 card tombstone（否则读改写合并会把磁盘上的旧卡并回来）
+      this.stateManager.markCardsDeleted(deadIds);
+      for (const k of deadIds) delete this.memoryCards[k];
       void this.stateManager.saveStateImmediately(this.buildCurrentState());
       // A2: 清理僵尸卡后立即刷新状态栏提醒（实际实例为 CSVQuizPlugin，故 cast 调用）
       (this.plugin as unknown as { refreshMemoryReminder?: () => void })
@@ -1837,6 +1835,14 @@ export class QuizView extends ItemView {
         this.selectedOption = null;
         this.selectedOptions = [];
         this.cancelAutoNext();
+        // L2: 「重置并开始」是显式重置，必须权威覆盖磁盘旧记录，
+        // 否则读改写合并会把刚清掉的进度并回来。
+        if (this.canPersistState && this.stateManager.getState()) {
+          await this.stateManager.saveStateImmediately(
+            this.buildCurrentState(),
+            { authoritative: true }
+          );
+        }
       }
 
       // 记忆练习范围忽略「未答/已答」筛选：到期题与新题都按记忆卡片调度选取
@@ -3162,7 +3168,15 @@ export class QuizView extends ItemView {
             state.memoryInitialized = false;
           }
         }
-        await this.stateManager.saveStateImmediately(state);
+        if (choice === "order") {
+          await this.stateManager.saveStateImmediately(state);
+        } else {
+          // L2: records/cards/all 是用户显式重置且无视图（无 tombstone 可用）：
+          // 权威写直接覆盖磁盘，避免读改写合并把旧记录并回来。
+          await this.stateManager.saveStateImmediately(state, {
+            authoritative: true,
+          });
+        }
       }
       new Notice(
         choice === "all"
@@ -3228,6 +3242,9 @@ export class QuizView extends ItemView {
       // 已忽略「未答/已答」筛选，避免清空答题记录后已答过的到期卡片突然全部涌入。
     }
     if (choice !== "records") {
+      // L2: 删除前登记 card tombstone，避免读改写合并把磁盘上的旧卡并回来
+      const deletedIds = Object.keys(this.memoryCards);
+      this.stateManager.markCardsDeleted(deletedIds);
       this.memoryCards = {};
       this.memoryNewDate = "";
       this.memoryNewCountToday = 0;
@@ -3242,7 +3259,16 @@ export class QuizView extends ItemView {
     this.selectedOptions = [];
     this.cancelAutoNext();
     this.renderQuestion();
-    this.saveState();
+    if (choice === "records") {
+      // L2: 显式清理刷题记录（保留 memoryCards）→ 权威写覆盖磁盘旧记录，
+      // 否则读改写合并会把刚清掉的记录并回来。
+      await this.stateManager.saveStateImmediately(this.buildCurrentState(), {
+        authoritative: true,
+      });
+    } else {
+      // L2: cards 走普通写，由 card tombstone 阻止磁盘旧卡复活，外部新卡不丢
+      this.saveState();
+    }
     // 清理卡片后立即刷新状态栏提醒
     (this.plugin as unknown as { refreshMemoryReminder?: () => void })
       .refreshMemoryReminder?.();

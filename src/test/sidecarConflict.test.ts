@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { Vault, Plugin } from "obsidian";
 import {
+  findMergedSidecarPaths,
   findSidecarConflictPaths,
   mergeSidecarData,
   normalizeSidecar,
@@ -50,6 +51,34 @@ describe("findSidecarConflictPaths", () => {
     expect(
       findSidecarConflictPaths(["b.cqv.sidecar(1).json"], "b.cqv")
     ).toEqual(["b.cqv.sidecar(1).json"]);
+  });
+});
+
+describe("findMergedSidecarPaths", () => {
+  const content = "vault/执照认证2026去重.cqv";
+
+  it("匹配规范 sidecar 归档与两类冲突命名归档（仅 .merged 后缀）", () => {
+    const files = [
+      "vault/执照认证2026去重.cqv.sidecar.json.merged",
+      "vault/执照认证2026去重.cqv.sidecar 2.json.merged",
+      "vault/执照认证2026去重.cqv 2.sidecar.json.merged",
+      "vault/执照认证2026去重.cqv.sidecar(1).json.merged",
+    ];
+    expect(findMergedSidecarPaths(files, content)).toEqual(files);
+  });
+
+  it("不匹配 .merged.recovered、未归档的冲突副本、tmp/bak 与其它题库", () => {
+    const files = [
+      "vault/执照认证2026去重.cqv.sidecar.json.merged.recovered", // 已恢复过
+      "vault/执照认证2026去重.cqv.sidecar 2.json.merged.recovered.1700000000000",
+      "vault/执照认证2026去重.cqv.sidecar 2.json", // 仍待合并的冲突副本
+      "vault/执照认证2026去重.cqv.sidecar.json", // 规范 sidecar
+      "vault/执照认证2026去重.cqv.sidecar.json.tmp",
+      "vault/执照认证2026去重.cqv.sidecar.json.bak",
+      "vault/其它题库.cqv.sidecar.json.merged",
+      "vault/执照认证2026去重.cqv.sidecar 1.json.merged", // 空格序号 1 = 用户命名
+    ];
+    expect(findMergedSidecarPaths(files, content)).toEqual([]);
   });
 });
 

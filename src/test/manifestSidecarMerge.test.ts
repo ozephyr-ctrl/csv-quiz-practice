@@ -196,21 +196,29 @@ describe("mergeManifestComponentSidecars", () => {
     expect(files[sidecarPathFor(CSV)]).toBeDefined();
   });
 
-  it("目标已有答题进度 → skipped/target-has-progress，文件内容不变", async () => {
-    const existing = componentSidecar({
-      correctCount: 9,
-      wrongCount: 9,
-      answered: { old: "A" },
-    });
+  it("目标已有普通题进度：仍并入组件（图片/简答）补全，计数/每日取 max、会话字段保留", async () => {
+    const existing: SidecarData = {
+      ...emptyTargetSidecar(),
+      meta: {},
+      state: {
+        ...emptyTargetSidecar().state,
+        correctCount: 5,
+        wrongCount: 0,
+        answeredQuestions: { own: "A" },
+        dailyAnswers: { "2026-10-01": 1 },
+      },
+    };
     const { files, manager } = setup({
       [sidecarPathFor(TARGET)]: existing,
       [sidecarPathFor(CQV)]: componentSidecar({
         correctCount: 2,
         wrongCount: 1,
         answered: { q1: "A" },
+        meta: { q1: { favorite: "1" } },
+        memoryCards: { q1: cardFor() },
+        dailyAnswers: { "2026-10-01": 2, "2026-10-02": 1 },
       }),
     });
-    const before = files[sidecarPathFor(TARGET)];
 
     const result = await manager.mergeManifestComponentSidecars(
       TARGET,
@@ -218,9 +226,72 @@ describe("mergeManifestComponentSidecars", () => {
       DEFAULT_FILTERS
     );
 
-    expect(result.status).toBe("skipped");
-    expect(result.reason).toBe("target-has-progress");
-    expect(files[sidecarPathFor(TARGET)]).toBe(before);
+    expect(result.status).toBe("merged");
+    expect(result.mergedComponents).toBe(1);
+    expect(result.correctCount).toBe(5); // max(target 5, 组件 2)
+    expect(result.wrongCount).toBe(1); // max(target 0, 组件 1)
+
+    const merged = readJson(files, sidecarPathFor(TARGET));
+    expect(Object.keys(merged.state.answeredQuestions).sort()).toEqual([
+      "own",
+      "q1",
+    ]);
+    expect(Object.keys(merged.state.memoryCards ?? {})).toEqual(["q1"]);
+    expect(merged.meta.q1?.favorite).toBe("1");
+    expect(merged.state.dailyAnswers).toEqual({
+      "2026-10-01": 2,
+      "2026-10-02": 1,
+    });
+    // 会话字段与目标普通题进度都不被组件覆盖
+    expect(merged.state.displayOrder).toEqual(["t1", "t2"]);
+    expect(merged.state.currentIndex).toBe(1);
+    expect(merged.state.filterText).toBe("abc");
+  });
+
+  it("重复运行 → skipped/no-change，不写盘、计数不翻倍", async () => {
+    const { files, manager } = setup({
+      [sidecarPathFor(TARGET)]: {
+        ...emptyTargetSidecar(),
+        state: {
+          ...emptyTargetSidecar().state,
+          correctCount: 5,
+          answeredQuestions: { own: "A" },
+        },
+      },
+      [sidecarPathFor(CQV)]: componentSidecar({
+        correctCount: 2,
+        wrongCount: 1,
+        answered: { q1: "A" },
+        dailyAnswers: { "2026-10-01": 2 },
+      }),
+    });
+
+    const first = await manager.mergeManifestComponentSidecars(
+      TARGET,
+      [CQV],
+      DEFAULT_FILTERS
+    );
+    expect(first.status).toBe("merged");
+    const afterFirst = files[sidecarPathFor(TARGET)];
+
+    const second = await manager.mergeManifestComponentSidecars(
+      TARGET,
+      [CQV],
+      DEFAULT_FILTERS
+    );
+    expect(second.status).toBe("skipped");
+    expect(second.reason).toBe("no-change");
+    // 无变化不写盘（内容逐字节相同）
+    expect(files[sidecarPathFor(TARGET)]).toBe(afterFirst);
+
+    const merged = readJson(files, sidecarPathFor(TARGET));
+    expect(merged.state.correctCount).toBe(5);
+    expect(merged.state.wrongCount).toBe(1);
+    expect(merged.state.dailyAnswers).toEqual({ "2026-10-01": 2 });
+    expect(Object.keys(merged.state.answeredQuestions).sort()).toEqual([
+      "own",
+      "q1",
+    ]);
   });
 
   it("组成 sidecar 均无进度 → skipped/no-component-progress，不创建目标文件", async () => {
@@ -276,7 +347,7 @@ describe("mergeManifestComponentSidecars", () => {
     ]);
   });
 
-  it("重复调用（目标已非空）→ skipped，计数不翻倍", async () => {
+  it("重复调用（目标已非空）→ skipped/no-change，计数不翻倍", async () => {
     const { files, manager } = setup({
       [sidecarPathFor(CQV)]: componentSidecar({
         correctCount: 2,
@@ -299,7 +370,7 @@ describe("mergeManifestComponentSidecars", () => {
 
     expect(first.status).toBe("merged");
     expect(second.status).toBe("skipped");
-    expect(second.reason).toBe("target-has-progress");
+    expect(second.reason).toBe("no-change");
 
     const merged = readJson(files, sidecarPathFor(TARGET));
     expect(merged.state.correctCount).toBe(2);

@@ -1354,7 +1354,12 @@ function normalizeSidecar(raw) {
   if (r.meta && typeof r.meta === "object") {
     for (const [id, value] of Object.entries(r.meta)) {
       if (value && typeof value === "object") {
-        meta[id] = normalizeMeta(value);
+        Object.defineProperty(meta, id, {
+          value: normalizeMeta(value),
+          enumerable: true,
+          configurable: true,
+          writable: true
+        });
       }
     }
   }
@@ -1412,55 +1417,25 @@ function normalizeMeta(raw) {
   return result;
 }
 var SidecarWriteQueue = class {
-  constructor(vault) {
-    this.queue = [];
-    this.processing = false;
-    this.vault = vault;
+  constructor() {
+    this.tail = Promise.resolve();
+    this.depth = 0;
   }
-  /** 入队一次 sidecar 全量写。同内容源连续入队时合并（只保留最后一次数据，写一次）。 */
-  enqueue(contentPath, data) {
-    const existing = this.queue.find(
-      (item) => item.contentPath === contentPath
-    );
-    if (existing) {
-      existing.data = data;
-      return new Promise((resolve, reject) => {
-        existing.resolves.push(resolve);
-        existing.rejects.push(reject);
-      });
-    }
-    return new Promise((resolve, reject) => {
-      this.queue.push({
-        contentPath,
-        data,
-        resolves: [resolve],
-        rejects: [reject]
-      });
-      void this.processNext();
+  enqueue(job) {
+    this.depth++;
+    const run = this.tail.then(job, job);
+    this.tail = run.catch(() => {
+    }).finally(() => {
+      this.depth--;
     });
-  }
-  async processNext() {
-    if (this.processing || this.queue.length === 0) return;
-    this.processing = true;
-    const item = this.queue.shift();
-    try {
-      await writeSidecar(this.vault, item.contentPath, item.data);
-      for (const resolve of item.resolves) resolve();
-    } catch (e) {
-      for (const reject of item.rejects) reject(e);
-    } finally {
-      this.processing = false;
-      void this.processNext();
-    }
+    return run;
   }
   get pending() {
-    return this.queue.length;
+    return this.depth;
   }
-  /** 等待队列清空（参考 CSVWriteQueue.drain 的轮询实现）。 */
+  /** 等待队列清空（含等待期间新入队的任务）。 */
   async drain() {
-    while (this.processing || this.queue.length > 0) {
-      await new Promise((resolve) => window.setTimeout(resolve, 10));
-    }
+    while (this.depth > 0) await this.tail;
   }
 };
 var DEFAULT_BACKUP_INTERVAL_MS = 30 * 60 * 1e3;
@@ -1501,6 +1476,27 @@ function findSidecarConflictPaths(allFiles, contentPath) {
     const mainSuffix = m[1];
     const sidecarSuffix = m[2];
     if (!mainSuffix && !sidecarSuffix) continue;
+    const spaceNums = [
+      ...(_a = mainSuffix == null ? void 0 : mainSuffix.match(/ \d+/g)) != null ? _a : [],
+      ...(_b = sidecarSuffix == null ? void 0 : sidecarSuffix.match(/ \d+/g)) != null ? _b : []
+    ];
+    if (spaceNums.some((n) => Number(n.trim()) < 2)) continue;
+    result.push(file);
+  }
+  return result;
+}
+function findMergedSidecarPaths(allFiles, contentPath) {
+  var _a, _b;
+  const suffixGroup = "((?: \\d+| ?\\(\\d+\\))+)?";
+  const re = new RegExp(
+    "^" + escapeRegExp(contentPath) + suffixGroup + "\\.sidecar" + suffixGroup + "\\.json" + escapeRegExp(SIDECAR_MERGED_SUFFIX) + "$"
+  );
+  const result = [];
+  for (const file of allFiles) {
+    const m = re.exec(file);
+    if (!m) continue;
+    const mainSuffix = m[1];
+    const sidecarSuffix = m[2];
     const spaceNums = [
       ...(_a = mainSuffix == null ? void 0 : mainSuffix.match(/ \d+/g)) != null ? _a : [],
       ...(_b = sidecarSuffix == null ? void 0 : sidecarSuffix.match(/ \d+/g)) != null ? _b : []
@@ -1613,6 +1609,211 @@ function mergeSidecarData(base, baseTsMs, others) {
     addedAnswerIds,
     mergedSources: others.length
   };
+}
+function ownProp(record, key) {
+  if (!record) return void 0;
+  return Object.prototype.hasOwnProperty.call(record, key) ? record[key] : void 0;
+}
+function finiteTs(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : void 0;
+}
+function safeCount(value) {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+function cloneSidecarData(data) {
+  const metaEntries = Object.entries(data.meta).map(
+    ([id, entry]) => [id, entry ? { ...entry } : entry]
+  );
+  const state = data.state;
+  const cardEntries = state.memoryCards === void 0 ? void 0 : Object.entries(state.memoryCards).map(([id, card]) => [
+    id,
+    card ? { ...card } : card
+  ]);
+  return {
+    version: 1,
+    meta: Object.fromEntries(metaEntries),
+    state: {
+      ...state,
+      displayOrder: state.displayOrder.slice(),
+      answeredQuestions: { ...state.answeredQuestions },
+      memoryCards: cardEntries === void 0 ? void 0 : Object.fromEntries(cardEntries),
+      memoryPendingNew: state.memoryPendingNew === void 0 ? void 0 : state.memoryPendingNew.slice(),
+      dailyAnswers: state.dailyAnswers === void 0 ? void 0 : { ...state.dailyAnswers }
+    }
+  };
+}
+function countersOfSidecar(data) {
+  var _a;
+  if (!data) return { correct: 0, wrong: 0, daily: {} };
+  return {
+    correct: safeCount(data.state.correctCount),
+    wrong: safeCount(data.state.wrongCount),
+    daily: { ...(_a = data.state.dailyAnswers) != null ? _a : {} }
+  };
+}
+function cardFreshness(card) {
+  var _a;
+  const parsed = typeof card.lastReview === "string" && card.lastReview !== "" ? Date.parse(card.lastReview) : NaN;
+  return {
+    review: Number.isFinite(parsed) ? parsed : -Infinity,
+    ts: (_a = finiteTs(card.ts)) != null ? _a : -Infinity
+  };
+}
+function isCardNewer(diskCard, memCard) {
+  const d = cardFreshness(diskCard);
+  const m = cardFreshness(memCard);
+  if (d.review !== m.review) return d.review > m.review;
+  return d.ts > m.ts;
+}
+function mergeSidecarForWrite(args) {
+  var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j;
+  const { base, memory, disk, statsBaseline, tombstones } = args;
+  const memState = memory.state;
+  const baseState = base == null ? void 0 : base.state;
+  const diskLike = disk != null ? disk : base;
+  const diskState = diskLike == null ? void 0 : diskLike.state;
+  const diskMeta = (_a = diskLike == null ? void 0 : diskLike.meta) != null ? _a : {};
+  const baseMeta = (_b = base == null ? void 0 : base.meta) != null ? _b : {};
+  const answeredIds = /* @__PURE__ */ new Set([
+    ...Object.keys(memState.answeredQuestions),
+    ...Object.keys((_c = diskState == null ? void 0 : diskState.answeredQuestions) != null ? _c : {}),
+    ...Object.keys((_d = baseState == null ? void 0 : baseState.answeredQuestions) != null ? _d : {})
+  ]);
+  const answeredEntries = [];
+  for (const id of answeredIds) {
+    if (tombstones.answered.has(id)) continue;
+    const m = ownProp(memState.answeredQuestions, id);
+    const d = ownProp(diskState == null ? void 0 : diskState.answeredQuestions, id);
+    const b = ownProp(baseState == null ? void 0 : baseState.answeredQuestions, id);
+    let value;
+    if (m === void 0) {
+      value = d != null ? d : b;
+    } else if (d !== void 0 && (b === void 0 || m === b)) {
+      value = d;
+    } else {
+      value = m;
+    }
+    if (value !== void 0) answeredEntries.push([id, value]);
+  }
+  const answered = Object.fromEntries(answeredEntries);
+  const metaIds = /* @__PURE__ */ new Set([
+    ...Object.keys(memory.meta),
+    ...Object.keys(diskMeta),
+    ...Object.keys(baseMeta)
+  ]);
+  const metaEntries = [];
+  for (const id of metaIds) {
+    if (tombstones.meta.has(id)) continue;
+    const memEntry = ownProp(memory.meta, id);
+    const diskEntry = ownProp(diskMeta, id);
+    const baseEntry = ownProp(baseMeta, id);
+    const memHasEntry = memEntry !== void 0;
+    const entry = {};
+    let maxTs;
+    let hasField = false;
+    for (const field of META_MERGE_FIELDS) {
+      const mv = memHasEntry ? memEntry[field] : void 0;
+      const bv = baseEntry == null ? void 0 : baseEntry[field];
+      const dv = diskEntry == null ? void 0 : diskEntry[field];
+      let value;
+      let primaryTs;
+      if (memHasEntry && mv !== bv) {
+        value = mv;
+        primaryTs = memEntry.ts;
+      } else if (dv !== void 0) {
+        value = dv;
+        primaryTs = diskEntry == null ? void 0 : diskEntry.ts;
+      } else {
+        value = mv != null ? mv : bv;
+        primaryTs = memHasEntry ? memEntry.ts : baseEntry == null ? void 0 : baseEntry.ts;
+      }
+      if (value === void 0) continue;
+      entry[field] = value;
+      hasField = true;
+      const ts = finiteTs(primaryTs);
+      if (ts !== void 0) maxTs = maxTs === void 0 ? ts : Math.max(maxTs, ts);
+    }
+    if (!hasField) continue;
+    if (maxTs !== void 0) entry.ts = maxTs;
+    metaEntries.push([id, entry]);
+  }
+  const meta = Object.fromEntries(metaEntries);
+  const cardIds = /* @__PURE__ */ new Set([
+    ...Object.keys((_e = memState.memoryCards) != null ? _e : {}),
+    ...Object.keys((_f = diskState == null ? void 0 : diskState.memoryCards) != null ? _f : {}),
+    ...Object.keys((_g = baseState == null ? void 0 : baseState.memoryCards) != null ? _g : {})
+  ]);
+  const cardEntries = [];
+  for (const id of cardIds) {
+    if (tombstones.cards.has(id)) continue;
+    const m = ownProp(memState.memoryCards, id);
+    const d = ownProp(diskState == null ? void 0 : diskState.memoryCards, id);
+    const b = ownProp(baseState == null ? void 0 : baseState.memoryCards, id);
+    let chosen;
+    if (m && d) {
+      chosen = isCardNewer(d, m) ? d : m;
+    } else if (m) {
+      chosen = m;
+    } else if (d) {
+      chosen = d;
+    } else {
+      chosen = b;
+    }
+    if (!chosen) continue;
+    cardEntries.push([id, { ...chosen }]);
+  }
+  const memoryCards = cardEntries.length === 0 ? void 0 : Object.fromEntries(cardEntries);
+  const memCorrect = safeCount(memState.correctCount);
+  const memWrong = safeCount(memState.wrongCount);
+  let correctCount;
+  let wrongCount;
+  let dailyAnswers;
+  if (base === null) {
+    correctCount = memCorrect;
+    wrongCount = memWrong;
+    dailyAnswers = { ...(_h = memState.dailyAnswers) != null ? _h : {} };
+  } else {
+    correctCount = Math.max(
+      0,
+      safeCount(diskState == null ? void 0 : diskState.correctCount) + Math.max(0, memCorrect - safeCount(statsBaseline.correct))
+    );
+    wrongCount = Math.max(
+      0,
+      safeCount(diskState == null ? void 0 : diskState.wrongCount) + Math.max(0, memWrong - safeCount(statsBaseline.wrong))
+    );
+    const memDaily = (_i = memState.dailyAnswers) != null ? _i : {};
+    const diskDaily = (_j = diskState == null ? void 0 : diskState.dailyAnswers) != null ? _j : {};
+    const dates = /* @__PURE__ */ new Set([
+      ...Object.keys(diskDaily),
+      ...Object.keys(memDaily)
+    ]);
+    const merged = {};
+    for (const date of dates) {
+      const value = safeCount(ownProp(diskDaily, date)) + Math.max(
+        0,
+        safeCount(ownProp(memDaily, date)) - safeCount(ownProp(statsBaseline.daily, date))
+      );
+      if (value > 0) merged[date] = value;
+    }
+    dailyAnswers = merged;
+  }
+  pruneDailyAnswers(dailyAnswers, /* @__PURE__ */ new Date());
+  const memoryInitialized = memState.memoryInitialized === true || (diskState == null ? void 0 : diskState.memoryInitialized) === true || (baseState == null ? void 0 : baseState.memoryInitialized) === true;
+  const state = {
+    // 会话级字段（位置/筛选/displayOrder/memory 配额）一律内存优先
+    ...memState,
+    displayOrder: memState.displayOrder.slice(),
+    currentIndex: memState.currentIndex,
+    correctCount,
+    wrongCount,
+    answeredQuestions: answered,
+    memoryCards,
+    memoryInitialized,
+    dailyAnswers,
+    memoryPendingNew: memState.memoryPendingNew === void 0 ? void 0 : memState.memoryPendingNew.slice(),
+    updatedAt: Date.now()
+  };
+  return { version: 1, meta, state };
 }
 
 // src/settings.ts
@@ -7074,12 +7275,11 @@ ${message}`);
   pruneMetaEntries() {
     const ids = new Set(this.allQuestions.map((q) => metaKeyFor(q)));
     const meta = this.stateManager.getMeta();
-    let changed = false;
-    for (const k of Object.keys(meta)) {
-      if (!ids.has(k)) {
-        delete meta[k];
-        changed = true;
-      }
+    const deadKeys = Object.keys(meta).filter((k) => !ids.has(k));
+    const changed = deadKeys.length > 0;
+    if (changed) {
+      this.stateManager.markMetaDeleted(deadKeys);
+      for (const k of deadKeys) delete meta[k];
     }
     if (changed) {
       const st = this.stateManager.getState();
@@ -7303,14 +7503,11 @@ ${message}`);
   pruneMemoryCards() {
     var _a, _b;
     const ids = new Set(this.allQuestions.map((q) => q.id));
-    let changed = false;
-    for (const k of Object.keys(this.memoryCards)) {
-      if (!ids.has(k)) {
-        delete this.memoryCards[k];
-        changed = true;
-      }
-    }
+    const deadIds = Object.keys(this.memoryCards).filter((k) => !ids.has(k));
+    const changed = deadIds.length > 0;
     if (changed) {
+      this.stateManager.markCardsDeleted(deadIds);
+      for (const k of deadIds) delete this.memoryCards[k];
       void this.stateManager.saveStateImmediately(this.buildCurrentState());
       (_b = (_a = this.plugin).refreshMemoryReminder) == null ? void 0 : _b.call(_a);
     }
@@ -7900,6 +8097,12 @@ ${message}`);
         this.selectedOption = null;
         this.selectedOptions = [];
         this.cancelAutoNext();
+        if (this.canPersistState && this.stateManager.getState()) {
+          await this.stateManager.saveStateImmediately(
+            this.buildCurrentState(),
+            { authoritative: true }
+          );
+        }
       }
       const pool = this.applyFiltersTo(this.orderedQuestions, true);
       const now = /* @__PURE__ */ new Date();
@@ -8944,7 +9147,13 @@ ${message}`);
             state.memoryInitialized = false;
           }
         }
-        await this.stateManager.saveStateImmediately(state);
+        if (choice === "order") {
+          await this.stateManager.saveStateImmediately(state);
+        } else {
+          await this.stateManager.saveStateImmediately(state, {
+            authoritative: true
+          });
+        }
       }
       new import_obsidian6.Notice(
         choice === "all" ? "\u8FDB\u5EA6\u5DF2\u91CD\u7F6E" : choice === "order" ? "\u9898\u76EE\u987A\u5E8F\u5DF2\u91CD\u7F6E\uFF0C\u91CD\u65B0\u6253\u5F00\u9762\u677F\u65F6\u751F\u6548" : choice === "records" ? "\u5237\u9898\u8BB0\u5F55\u5DF2\u6E05\u7406" : "\u8BB0\u5FC6\u5361\u7247\u5DF2\u5220\u9664"
@@ -8987,6 +9196,8 @@ ${message}`);
       this.dailyAnswers = {};
     }
     if (choice !== "records") {
+      const deletedIds = Object.keys(this.memoryCards);
+      this.stateManager.markCardsDeleted(deletedIds);
       this.memoryCards = {};
       this.memoryNewDate = "";
       this.memoryNewCountToday = 0;
@@ -9000,7 +9211,13 @@ ${message}`);
     this.selectedOptions = [];
     this.cancelAutoNext();
     this.renderQuestion();
-    this.saveState();
+    if (choice === "records") {
+      await this.stateManager.saveStateImmediately(this.buildCurrentState(), {
+        authoritative: true
+      });
+    } else {
+      this.saveState();
+    }
     (_j = (_i = this.plugin).refreshMemoryReminder) == null ? void 0 : _j.call(_i);
     new import_obsidian6.Notice(choice === "records" ? "\u5237\u9898\u8BB0\u5F55\u5DF2\u6E05\u7406" : "\u8BB0\u5FC6\u5361\u7247\u5DF2\u5220\u9664");
   }
@@ -10233,6 +10450,38 @@ var SAVE_MAX_WAIT_MS = 3e3;
 function computeSaveDelay(delay, firstScheduledAt, now, maxWaitMs) {
   return Math.max(0, Math.min(delay, firstScheduledAt + maxWaitMs - now));
 }
+function safeCount2(value) {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+function maxDailyAnswers(...sources) {
+  var _a;
+  const out = /* @__PURE__ */ new Map();
+  for (const source of sources) {
+    if (!source) continue;
+    for (const [date, count] of Object.entries(source)) {
+      const value = safeCount2(count);
+      out.set(date, Math.max((_a = out.get(date)) != null ? _a : 0, value));
+    }
+  }
+  if (out.size === 0) return void 0;
+  return Object.fromEntries(out);
+}
+function sortKeysDeep(value) {
+  if (Array.isArray(value)) return value.map((item) => sortKeysDeep(item));
+  if (value !== null && typeof value === "object") {
+    const out = {};
+    for (const key of Object.keys(value).sort()) {
+      out[key] = sortKeysDeep(value[key]);
+    }
+    return out;
+  }
+  return value;
+}
+function canonicalSidecarJson(data, opts = {}) {
+  const copy = cloneSidecarData(data);
+  if (opts.ignoreUpdatedAt !== false) delete copy.state.updatedAt;
+  return JSON.stringify(sortKeysDeep(copy));
+}
 var StateWriteQueue = class {
   constructor(plugin) {
     this.queue = [];
@@ -10292,6 +10541,12 @@ var StateManager = class {
     /** 默认筛选值（loadSidecar 入参保存），供「全部重置」时 emptySidecarState 复用，
      *  避免重置后默认筛选设置被清空（与首次打开 missing 路径的 emptySessionState 行为保持一致）。 */
     this.defaultFilters = { favorite: "", mastered: "", repeat: "", wrong: "" };
+    /** 每个内容源最近一次读到/写成的 sidecar 快照（写盘前的磁盘变更检测基准）。 */
+    this.sidecarBase = /* @__PURE__ */ new Map();
+    /** 每个内容源的统计基线（上次读到/写成时 state 的累计计数快照）。 */
+    this.statsBaseline = /* @__PURE__ */ new Map();
+    /** 每个内容源本次会话内被权威删除的题 id（阻止磁盘旧数据复活）。 */
+    this.tombstones = /* @__PURE__ */ new Map();
     /** 最近一次从磁盘载入或成功写入当前 sidecar 的时间（epoch ms；0=未知）。
      *  冲突合并时作为 base 的时间戳：必须用磁盘侧真实时间（updatedAt/mtime/本插件
      *  最近成功写入时刻），绝不能用合并时刻 Date.now()——否则 base 条目会以「合并
@@ -10300,7 +10555,7 @@ var StateManager = class {
     this.plugin = plugin;
     this.vault = plugin.app.vault;
     this.writeQueue = new StateWriteQueue(plugin);
-    this.sidecarQueue = new SidecarWriteQueue(this.vault);
+    this.sidecarQueue = new SidecarWriteQueue();
   }
   /**
    * 读取 data.json 中的旧版 quizState（兼容模式内存态），字段级归一化后设置为
@@ -10455,36 +10710,45 @@ var StateManager = class {
    *   （recovered 时 readSidecar 内部已弹「从备份恢复」提示；corrupt 不动内存，由调用方提示重建）
    */
   async loadSidecar(contentPath, defaultFilters) {
+    var _a, _b;
+    await this.sidecarQueue.drain();
     this.defaultFilters = defaultFilters;
     const result = await readSidecar(this.vault, contentPath);
     if (result.status === "corrupt") {
       this.currentSidecarUpdatedAt = 0;
       return { status: "corrupt", reason: result.reason };
     }
+    let baseData;
     if (result.status === "missing") {
-      const state = this.emptySessionState(defaultFilters);
-      state.csvPath = contentPath;
-      this.currentState = state;
-      this.currentMeta = {};
-      this.contentPath = contentPath;
+      baseData = this.emptySidecarData();
       this.currentSidecarUpdatedAt = 0;
-      return { status: "missing", state, meta: {} };
-    }
-    const diskUpdatedAt = result.data.state.updatedAt;
-    if (typeof diskUpdatedAt === "number" && Number.isFinite(diskUpdatedAt) && diskUpdatedAt > 0) {
-      this.currentSidecarUpdatedAt = diskUpdatedAt;
     } else {
-      const statPath = result.status === "recovered" ? backupPathFor(contentPath) : sidecarPathFor(contentPath);
-      try {
-        const stat = await this.vault.adapter.stat(statPath);
-        const mtime = stat == null ? void 0 : stat.mtime;
-        this.currentSidecarUpdatedAt = typeof mtime === "number" && Number.isFinite(mtime) && mtime > 0 ? mtime : 0;
-      } catch (e) {
-        this.currentSidecarUpdatedAt = 0;
+      baseData = cloneSidecarData(result.data);
+      const diskUpdatedAt = result.data.state.updatedAt;
+      if (typeof diskUpdatedAt === "number" && Number.isFinite(diskUpdatedAt) && diskUpdatedAt > 0) {
+        this.currentSidecarUpdatedAt = diskUpdatedAt;
+      } else {
+        const statPath = result.status === "recovered" ? backupPathFor(contentPath) : sidecarPathFor(contentPath);
+        try {
+          const stat2 = await this.vault.adapter.stat(statPath);
+          const mtime = stat2 == null ? void 0 : stat2.mtime;
+          this.currentSidecarUpdatedAt = typeof mtime === "number" && Number.isFinite(mtime) && mtime > 0 ? mtime : 0;
+        } catch (e) {
+          this.currentSidecarUpdatedAt = 0;
+        }
       }
     }
-    this.currentState = this.stateFromSidecar(result.data.state, contentPath);
-    this.currentMeta = result.data.meta;
+    const stat = await this.statSidecar(contentPath);
+    this.sidecarBase.set(contentPath, {
+      data: baseData,
+      mtimeMs: (_a = stat == null ? void 0 : stat.mtimeMs) != null ? _a : 0,
+      size: (_b = stat == null ? void 0 : stat.size) != null ? _b : -1
+    });
+    this.statsBaseline.set(contentPath, countersOfSidecar(baseData));
+    this.tombstones.set(contentPath, this.emptyTombstones());
+    const memoryCopy = cloneSidecarData(baseData);
+    this.currentState = this.stateFromSidecar(memoryCopy.state, contentPath);
+    this.currentMeta = memoryCopy.meta;
     this.contentPath = contentPath;
     return {
       status: result.status,
@@ -10494,12 +10758,18 @@ var StateManager = class {
   }
   /**
    * 卸载当前 sidecar：flush（取消挂起防抖 + 立即写盘）后清空
-   * contentPath/currentState/currentMeta。兼容模式下仅清空内存。
+   * contentPath/currentState/currentMeta 及该路径的保存层基准。兼容模式下仅清空内存。
    */
   async unloadSidecar() {
     this.cancelScheduledSave();
-    if (this.contentPath !== null && this.currentState !== null) {
+    const path = this.contentPath;
+    if (path !== null && this.currentState !== null) {
       await this.persistNow();
+    }
+    if (path !== null) {
+      this.sidecarBase.delete(path);
+      this.statsBaseline.delete(path);
+      this.tombstones.delete(path);
     }
     this.contentPath = null;
     this.currentState = null;
@@ -10523,23 +10793,60 @@ var StateManager = class {
       this.scheduleSave(this.currentState, SIDECAR_SAVE_DEBOUNCE_MS);
     }
   }
-  /** 删除某题的整条 meta（内存）+ 调度保存。currentState 为 null 时仅改内存。 */
+  /** 删除某题的整条 meta（内存）+ 调度保存。currentState 为 null 时仅改内存。
+   *  同时登记 meta tombstone：否则保存层三方合并会把磁盘上的旧 meta 条目并回来。 */
   clearQuestionMeta(questionId) {
     delete this.currentMeta[questionId];
+    if (this.contentPath !== null && this.currentState !== null) {
+      this.markMetaDeleted([questionId]);
+      return;
+    }
     if (this.currentState) {
       this.scheduleSave(this.currentState, SIDECAR_SAVE_DEBOUNCE_MS);
     }
   }
-  /** 从 currentState + currentMeta 组装 sidecar 全量数据（version 1）。 */
+  /**
+   * 登记「本次会话权威删除了这些记忆卡片」：保存层合并时据此阻止磁盘旧卡复活。
+   * 只登记 + 调度防抖保存（不立即写盘），由调用方随后从内存删除卡片即可；
+   * tombstone 仅在写盘成功（commitGated/writeRaw）后清空，写失败则保留待下次重试。
+   * contentPath/currentState 均为空（题库未载入/兼容模式）时不登记。
+   */
+  markCardsDeleted(ids) {
+    if (!this.addTombstones("cards", ids)) return;
+    this.scheduleSave(this.currentState, SIDECAR_SAVE_DEBOUNCE_MS);
+  }
+  /** 登记「本次会话权威删除了这些题的 meta」；语义同 markCardsDeleted。 */
+  markMetaDeleted(ids) {
+    if (!this.addTombstones("meta", ids)) return;
+    this.scheduleSave(this.currentState, SIDECAR_SAVE_DEBOUNCE_MS);
+  }
+  /** 把 id 加入当前内容源的指定 tombstone 集合。返回是否登记成功（未载入题库时 false）。 */
+  addTombstones(kind, ids) {
+    const path = this.contentPath;
+    if (path === null || this.currentState === null) return false;
+    let tomb = this.tombstones.get(path);
+    if (!tomb) {
+      tomb = this.emptyTombstones();
+      this.tombstones.set(path, tomb);
+    }
+    for (const id of ids) {
+      if (typeof id === "string" && id !== "") tomb[kind].add(id);
+    }
+    return true;
+  }
+  /** 从 currentState + currentMeta 组装 sidecar 全量数据（version 1）。
+   *  返回深拷贝快照：answered/memoryCards/meta/displayOrder/dailyAnswers 不与
+   *  currentState/currentMeta 共享引用，保存后才修改内存不会污染 base 快照。 */
   buildSidecarData() {
     const state = this.currentState;
-    return {
+    return cloneSidecarData({
       version: 1,
       meta: this.currentMeta,
       state: state ? this.stateToSidecar(state) : this.emptySidecarState()
-    };
+    });
   }
-  /** QuizSessionState → SidecarState：去掉 csvPath 字段（关联靠文件命名约定，不入 sidecar）。 */
+  /** QuizSessionState → SidecarState：去掉 csvPath 字段（关联靠文件命名约定，不入 sidecar）。
+   *  updatedAt 不在此处写：由保存层 commitGated/writeRaw 在真正落盘时统一打时间戳。 */
   stateToSidecar(s) {
     return {
       currentIndex: s.currentIndex,
@@ -10563,31 +10870,166 @@ var StateManager = class {
       memoryNewCountToday: s.memoryNewCountToday,
       memoryPendingNew: s.memoryPendingNew,
       memoryInitialized: s.memoryInitialized,
-      dailyAnswers: s.dailyAnswers,
-      // 冲突合并时间戳：每次写盘刷新（供同步冲突合并判定文件新旧）
-      updatedAt: Date.now()
+      dailyAnswers: s.dailyAnswers
     };
+  }
+  /** 空 sidecar 数据（空 meta + 空状态）。 */
+  emptySidecarData() {
+    return { version: 1, meta: {}, state: this.emptySidecarState() };
+  }
+  /** 空 tombstone 集合（每个内容源一份，写盘成功后清空）。 */
+  emptyTombstones() {
+    return { answered: /* @__PURE__ */ new Set(), cards: /* @__PURE__ */ new Set(), meta: /* @__PURE__ */ new Set() };
+  }
+  /** 把 job 投入串行链（所有读-合并-写必须经此入口，避免并发穿插）。 */
+  runExclusive(job) {
+    return this.sidecarQueue.enqueue(job);
+  }
+  /** 读 canonical sidecar 的磁盘 stat；mtime 非有限正数按 0，size 非有限正数按 -1。 */
+  async statSidecar(contentPath) {
+    try {
+      const stat = await this.vault.adapter.stat(sidecarPathFor(contentPath));
+      const mtime = stat == null ? void 0 : stat.mtime;
+      const size = stat == null ? void 0 : stat.size;
+      return {
+        mtimeMs: typeof mtime === "number" && Number.isFinite(mtime) && mtime > 0 ? mtime : 0,
+        size: typeof size === "number" && Number.isFinite(size) && size > 0 ? size : -1
+      };
+    } catch (e) {
+      return null;
+    }
+  }
+  /** 两个 stat 是否可判定为「同一份未被改动的磁盘文件」。未知 stat 一律视为不同。 */
+  sameStat(a, b) {
+    if (!a || !b) return false;
+    return a.mtimeMs > 0 && a.size >= 0 && a.mtimeMs === b.mtimeMs && a.size === b.size;
+  }
+  /**
+   * 门控写盘（sidecar 模式唯一入口）：
+   * - 磁盘 stat 与 base 快照一致 → 磁盘没被外部改过，快路径直接写内存（无需读文件）；
+   * - stat 变了/未知 → 重读磁盘，按 base/memory/disk 三方合并后写回；
+   * - 文件缺失（disk=null）→ 用 base 兜底，绝不当成空状态清库；
+   * - sidecar 损坏 → 提示后按 base 兜底继续保存。
+   */
+  async writeGated(contentPath, memory) {
+    var _a, _b, _c;
+    const base = this.sidecarBase.get(contentPath);
+    const baseline = (_a = this.statsBaseline.get(contentPath)) != null ? _a : countersOfSidecar(memory);
+    const tomb = (_b = this.tombstones.get(contentPath)) != null ? _b : this.emptyTombstones();
+    let disk;
+    if (!base) {
+      const r = await readSidecar(this.vault, contentPath);
+      disk = r.status === "ok" || r.status === "recovered" ? r.data : null;
+    } else {
+      const st = await this.statSidecar(contentPath);
+      if (this.sameStat(st, base)) {
+        const out2 = cloneSidecarData(memory);
+        await this.commitGated(contentPath, out2, memory, baseline);
+        return;
+      }
+      const r = await readSidecar(this.vault, contentPath);
+      if (r.status === "corrupt") {
+        console.error(
+          "CSV Quiz: sidecar \u635F\u574F\uFF0C\u4FDD\u5B58\u65F6\u6309 base \u515C\u5E95",
+          contentPath,
+          r.reason
+        );
+        new import_obsidian7.Notice("\u72B6\u6001\u6587\u4EF6\u635F\u574F\uFF0C\u5DF2\u6309\u5185\u5B58\u548C\u4E0A\u6B21\u5FEB\u7167\u7EE7\u7EED\u4FDD\u5B58");
+        disk = null;
+      } else {
+        disk = r.status === "missing" ? null : r.data;
+      }
+    }
+    const out = mergeSidecarForWrite({
+      base: (_c = base == null ? void 0 : base.data) != null ? _c : null,
+      memory,
+      disk,
+      statsBaseline: baseline,
+      tombstones: tomb
+    });
+    await this.commitGated(contentPath, out, memory, baseline);
+  }
+  /**
+   * 落盘 out 并刷新保存层基准。写完比对文件字节数：与实际写入长度不符（写入被
+   * 同步服务截断/追加等）则重读磁盘再合并一次（最多一次），避免直接信任损坏内容。
+   */
+  async commitGated(contentPath, out, memory, baseline) {
+    var _a, _b, _c;
+    out.state.updatedAt = Date.now();
+    await writeSidecar(this.vault, contentPath, out);
+    let st = await this.statSidecar(contentPath);
+    const expectedBytes = new TextEncoder().encode(JSON.stringify(out)).length;
+    if (st !== null && st.size > 0 && st.size !== expectedBytes) {
+      const r = await readSidecar(this.vault, contentPath);
+      const disk = r.status === "ok" || r.status === "recovered" ? r.data : null;
+      const retried = mergeSidecarForWrite({
+        base: out,
+        memory,
+        disk,
+        statsBaseline: baseline,
+        tombstones: this.emptyTombstones()
+      });
+      retried.state.updatedAt = Date.now();
+      await writeSidecar(this.vault, contentPath, retried);
+      out = retried;
+      st = await this.statSidecar(contentPath);
+    }
+    this.sidecarBase.set(contentPath, {
+      data: cloneSidecarData(out),
+      mtimeMs: (_a = st == null ? void 0 : st.mtimeMs) != null ? _a : 0,
+      size: (_b = st == null ? void 0 : st.size) != null ? _b : -1
+    });
+    this.statsBaseline.set(contentPath, countersOfSidecar(memory));
+    this.currentSidecarUpdatedAt = (_c = out.state.updatedAt) != null ? _c : 0;
+    this.tombstones.set(contentPath, this.emptyTombstones());
+  }
+  /**
+   * 直接写盘（不合并）：用于「全部重置」、旧进度迁移、冲突/成分合并等权威写。
+   * 成功后 base/baseline 同步为写入内容，tombstone 清空。
+   */
+  async writeRaw(contentPath, data, opts = {}) {
+    var _a, _b;
+    void opts;
+    const out = cloneSidecarData(data);
+    out.state.updatedAt = Date.now();
+    await writeSidecar(this.vault, contentPath, out);
+    const st = await this.statSidecar(contentPath);
+    this.sidecarBase.set(contentPath, {
+      data: cloneSidecarData(out),
+      mtimeMs: (_a = st == null ? void 0 : st.mtimeMs) != null ? _a : 0,
+      size: (_b = st == null ? void 0 : st.size) != null ? _b : -1
+    });
+    this.statsBaseline.set(contentPath, countersOfSidecar(out));
+    this.currentSidecarUpdatedAt = out.state.updatedAt;
+    this.tombstones.set(contentPath, this.emptyTombstones());
   }
   /**
    * 立即落盘当前状态：
-   * - sidecar 模式（contentPath 非 null）→ sidecarQueue.enqueue（同 contentPath 合并）
+   * - sidecar 模式（contentPath 非 null）→ 串行链内门控读改写（stat 未变走快路径）
    * - 兼容模式（contentPath 为 null）→ 写 data.json.quizState
    */
   async persistNow() {
     this.lastPersistAt = Date.now();
-    if (this.contentPath !== null) {
-      await this.sidecarQueue.enqueue(
-        this.contentPath,
-        this.buildSidecarData()
-      );
-      this.currentSidecarUpdatedAt = Date.now();
+    const path = this.contentPath;
+    if (path !== null) {
+      const memory = this.buildSidecarData();
+      await this.runExclusive(() => this.writeGated(path, memory));
     } else {
       await this.writeQueue.enqueue({ quizState: this.currentState });
     }
   }
-  async saveStateImmediately(state) {
+  async saveStateImmediately(state, opts = {}) {
     this.cancelScheduledSave();
     this.currentState = state;
+    const path = this.contentPath;
+    if (opts.authoritative && path !== null) {
+      this.lastPersistAt = Date.now();
+      const memory = this.buildSidecarData();
+      await this.runExclusive(
+        () => this.writeRaw(path, memory, { authoritative: true })
+      );
+      return;
+    }
     await this.persistNow();
   }
   /**
@@ -10621,13 +11063,13 @@ var StateManager = class {
   async clearState() {
     this.cancelScheduledSave();
     this.currentState = null;
-    if (this.contentPath !== null) {
+    const path = this.contentPath;
+    if (path !== null) {
       this.currentMeta = {};
-      await this.sidecarQueue.enqueue(
-        this.contentPath,
-        this.buildSidecarData()
+      const empty = this.emptySidecarData();
+      await this.runExclusive(
+        () => this.writeRaw(path, empty, { authoritative: true })
       );
-      this.currentSidecarUpdatedAt = Date.now();
     } else {
       await this.writeQueue.enqueue({ quizState: null });
     }
@@ -10695,11 +11137,17 @@ var StateManager = class {
         );
       }
     }
-    await writeSidecar(this.vault, contentPath, {
-      version: 1,
-      meta: {},
-      state: this.stateToSidecar(normalized)
-    });
+    await this.runExclusive(
+      () => this.writeRaw(
+        contentPath,
+        {
+          version: 1,
+          meta: {},
+          state: this.stateToSidecar(normalized)
+        },
+        { authoritative: true }
+      )
+    );
     const backup = JSON.stringify(data, null, 2);
     await this.vault.adapter.write("data.json.bak", backup);
     await this.plugin.saveData({ ...data, quizState: null });
@@ -10737,21 +11185,36 @@ var StateManager = class {
    * （meta 以 entry.ts/源时间戳取新，记忆卡片以 lastReview 取新、缺 lastReview 回退
    * ts/源时间戳，完全平局当前优先）。currentState 的 answeredQuestions/memoryCards 原地更新内容
    * （保持对象引用，调用方持有的状态对象同步可见）；currentMeta 整体替换为合并结果。
+   * dailyAnswers 按日期取 max(current, 各副本)，避免重复合并不翻倍；memoryInitialized 取 OR。
    * 正确/错误计数不在合并内改写（统计口径是累计作答事件数，整体重算会篡改历史；
    * 由调用方按 addedAnswerIds 为新并入的答案逐条补计）。
+   * 整个「检测 → 读副本 → 合并 → 写回 → 归档」在串行链内完成，不会与门控保存穿插。
    */
   async mergeSidecarConflicts() {
-    var _a, _b;
-    if (this.contentPath === null || this.currentState === null) {
+    const path = this.contentPath;
+    const state = this.currentState;
+    if (path === null || state === null) {
       return { status: "none" };
     }
+    return this.runExclusive(async () => {
+      if (this.contentPath !== path || this.currentState !== state) {
+        return { status: "none" };
+      }
+      return this.mergeSidecarConflictsImpl(path);
+    });
+  }
+  /** mergeSidecarConflicts 的实现体（须在 runExclusive 内调用，不可自行入队）。 */
+  async mergeSidecarConflictsImpl(path) {
+    var _a, _b;
+    const state = this.currentState;
+    if (state === null) return { status: "none" };
     const conflictPaths = await this.detectSidecarConflicts();
     if (conflictPaths.length === 0) return { status: "none" };
     const sources = [];
     let unreadable = 0;
-    for (const path of conflictPaths) {
+    for (const conflictPath of conflictPaths) {
       try {
-        const content = await this.vault.adapter.read(path);
+        const content = await this.vault.adapter.read(conflictPath);
         const data = normalizeSidecar(JSON.parse(content));
         if (!data) {
           unreadable++;
@@ -10759,12 +11222,12 @@ var StateManager = class {
         }
         let tsMs = typeof data.state.updatedAt === "number" ? data.state.updatedAt : 0;
         if (!tsMs) {
-          const stat = await this.vault.adapter.stat(path);
+          const stat = await this.vault.adapter.stat(conflictPath);
           tsMs = (_a = stat == null ? void 0 : stat.mtime) != null ? _a : 0;
         }
-        sources.push({ path, data, tsMs });
+        sources.push({ path: conflictPath, data, tsMs });
       } catch (e) {
-        console.error("CSV Quiz: \u8BFB\u53D6\u51B2\u7A81\u526F\u672C\u5931\u8D25", path, e);
+        console.error("CSV Quiz: \u8BFB\u53D6\u51B2\u7A81\u526F\u672C\u5931\u8D25", conflictPath, e);
         unreadable++;
       }
     }
@@ -10776,7 +11239,15 @@ var StateManager = class {
       this.currentSidecarUpdatedAt,
       sources
     );
+    const mergedDaily = maxDailyAnswers(
+      merge.data.state.dailyAnswers,
+      ...sources.map((s) => s.data.state.dailyAnswers)
+    );
+    const memoryInitialized = merge.data.state.memoryInitialized === true || sources.some((s) => s.data.state.memoryInitialized === true);
+    merge.data.state.dailyAnswers = mergedDaily;
+    merge.data.state.memoryInitialized = memoryInitialized;
     const st = this.currentState;
+    if (st === null) return { status: "none" };
     for (const key of Object.keys(st.answeredQuestions)) {
       delete st.answeredQuestions[key];
     }
@@ -10787,20 +11258,21 @@ var StateManager = class {
       Object.assign(merged, merge.data.state.memoryCards);
       st.memoryCards = merged;
     }
+    st.dailyAnswers = mergedDaily;
+    st.memoryInitialized = memoryInitialized;
     this.currentMeta = merge.data.meta;
-    await this.sidecarQueue.enqueue(this.contentPath, this.buildSidecarData());
-    this.currentSidecarUpdatedAt = Date.now();
+    await this.writeRaw(path, this.buildSidecarData(), { authoritative: true });
     let archived = 0;
     let archiveFailed = 0;
-    for (const path of conflictPaths) {
+    for (const conflictPath of conflictPaths) {
       try {
-        const dest = path + SIDECAR_MERGED_SUFFIX;
-        await renameOverwriteWithRetry(this.vault, path, dest, {
+        const dest = conflictPath + SIDECAR_MERGED_SUFFIX;
+        await renameOverwriteWithRetry(this.vault, conflictPath, dest, {
           budgetMs: 3e3
         });
         archived++;
       } catch (e) {
-        console.error("CSV Quiz: \u5F52\u6863\u51B2\u7A81\u526F\u672C\u5931\u8D25", path, e);
+        console.error("CSV Quiz: \u5F52\u6863\u51B2\u7A81\u526F\u672C\u5931\u8D25", conflictPath, e);
         archiveFailed++;
       }
     }
@@ -10837,17 +11309,22 @@ var StateManager = class {
    */
   async archiveSidecar(contentPath) {
     if (contentPath === "") return;
-    const srcPath = sidecarPathFor(contentPath);
-    const dstPath = `${srcPath}.merged`;
-    try {
-      if (!await this.vault.adapter.exists(srcPath)) return;
-      if (await this.vault.adapter.exists(dstPath)) {
-        await this.vault.adapter.remove(dstPath);
+    await this.runExclusive(async () => {
+      const srcPath = sidecarPathFor(contentPath);
+      const dstPath = `${srcPath}.merged`;
+      try {
+        if (!await this.vault.adapter.exists(srcPath)) return;
+        if (await this.vault.adapter.exists(dstPath)) {
+          await this.vault.adapter.remove(dstPath);
+        }
+        await this.vault.adapter.rename(srcPath, dstPath);
+        this.sidecarBase.delete(contentPath);
+        this.statsBaseline.delete(contentPath);
+        this.tombstones.delete(contentPath);
+      } catch (e) {
+        console.error("CSV Quiz: \u5F52\u6863 sidecar \u5931\u8D25", srcPath, e);
       }
-      await this.vault.adapter.rename(srcPath, dstPath);
-    } catch (e) {
-      console.error("CSV Quiz: \u5F52\u6863 sidecar \u5931\u8D25", srcPath, e);
-    }
+    });
   }
   /**
    * 把 from 内容源的 sidecar 复制/合并到 to 内容源（不删除 from）。
@@ -10867,6 +11344,10 @@ var StateManager = class {
     if (fromPath === toPath) {
       return { status: "skipped", reason: "same-path" };
     }
+    return this.runExclusive(() => this.transferSidecarImpl(fromPath, toPath));
+  }
+  /** transferSidecar 的实现体（须在 runExclusive 内调用，不可自行入队）。 */
+  async transferSidecarImpl(fromPath, toPath) {
     try {
       const fromResult = await readSidecar(this.vault, fromPath);
       if (fromResult.status === "missing") {
@@ -10892,14 +11373,27 @@ var StateManager = class {
         return { status: "error", reason: toResult.reason };
       }
       if (toResult.status === "missing") {
-        await writeSidecar(this.vault, toPath, fromData);
+        await this.writeRaw(toPath, fromData);
         return { status: "copied" };
       }
       const toTs = await this.sidecarTimestampMs(toPath, toResult.data);
       const merged = mergeSidecarData(toResult.data, toTs, [
         { path: sidecarPathFor(fromPath), data: fromData, tsMs: fromTs }
       ]);
-      await writeSidecar(this.vault, toPath, merged.data);
+      merged.data.state.correctCount = Math.max(
+        safeCount2(toResult.data.state.correctCount),
+        safeCount2(fromData.state.correctCount)
+      );
+      merged.data.state.wrongCount = Math.max(
+        safeCount2(toResult.data.state.wrongCount),
+        safeCount2(fromData.state.wrongCount)
+      );
+      merged.data.state.dailyAnswers = maxDailyAnswers(
+        toResult.data.state.dailyAnswers,
+        fromData.state.dailyAnswers
+      );
+      merged.data.state.memoryInitialized = toResult.data.state.memoryInitialized === true || fromData.state.memoryInitialized === true;
+      await this.writeRaw(toPath, merged.data);
       return { status: "merged" };
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
@@ -10921,23 +11415,25 @@ var StateManager = class {
     if (csv === imagePath) {
       return { status: "skipped", reason: "same-path" };
     }
-    const result = await this.transferSidecar(imagePath, csv);
-    if (result.status !== "copied" && result.status !== "merged") {
+    return this.runExclusive(async () => {
+      const result = await this.transferSidecarImpl(imagePath, csv);
+      if (result.status !== "copied" && result.status !== "merged") {
+        return result;
+      }
+      const srcPath = sidecarPathFor(imagePath);
+      try {
+        if (!await this.vault.adapter.exists(srcPath)) return result;
+        await renameOverwriteWithRetry(
+          this.vault,
+          srcPath,
+          srcPath + SIDECAR_MERGED_SUFFIX,
+          { budgetMs: 3e3 }
+        );
+      } catch (e) {
+        console.error("CSV Quiz: \u5F52\u6863\u56FE\u7247\u5185\u5BB9\u6E90 sidecar \u5931\u8D25", srcPath, e);
+      }
       return result;
-    }
-    const srcPath = sidecarPathFor(imagePath);
-    try {
-      if (!await this.vault.adapter.exists(srcPath)) return result;
-      await renameOverwriteWithRetry(
-        this.vault,
-        srcPath,
-        srcPath + SIDECAR_MERGED_SUFFIX,
-        { budgetMs: 3e3 }
-      );
-    } catch (e) {
-      console.error("CSV Quiz: \u5F52\u6863\u56FE\u7247\u5185\u5BB9\u6E90 sidecar \u5931\u8D25", srcPath, e);
-    }
-    return result;
+    });
   }
   /** sidecar 是否含用户进度（answered / memoryCards / 对错计数 / meta 任一非空）。 */
   sidecarHasProgress(data) {
@@ -10950,10 +11446,10 @@ var StateManager = class {
    * manifest.sidecar.json 是新建空状态，组成 sidecar 里的进度全部不可见）。
    *
    * - 目标缺失 → 以空状态为 base；目标损坏 → error（不覆盖，避免丢数据）
-   * - 目标已有任何进度 → skipped/target-has-progress（避免重复累计）
-   * - 组成按写入时间参与 mergeSidecarData（answered/meta/memoryCards 并集，base 优先），
-   *   对错计数/每日答题量按累计口径求和，会话字段（displayOrder/currentIndex/filter*）
-   *   一律保留目标值（缺失时为空，后续由视图重建）
+   * - 目标已有进度也继续合并（幂等）：answered/meta/memoryCards 为并集，
+   *   计数/每日按「组件求和后与目标取 max」合并，重复运行不翻倍
+   * - 会话字段（displayOrder/currentIndex/filter*）一律保留目标值（缺失时为空，后续由视图重建）
+   * - 合并结果与目标规范化 JSON 完全一致 → skipped/no-change（不写盘）
    * - 不删除/不归档任何组成 sidecar（保留回退数据源）
    */
   async mergeManifestComponentSidecars(targetAnchor, componentAnchors, defaultFilters) {
@@ -10978,9 +11474,6 @@ var StateManager = class {
     } else {
       targetData = targetResult.data;
       targetTs = await this.sidecarTimestampMs(target, targetResult.data);
-      if (this.sidecarHasProgress(targetData)) {
-        return { status: "skipped", reason: "target-has-progress" };
-      }
     }
     const seen = /* @__PURE__ */ new Set();
     const components = [];
@@ -11009,22 +11502,42 @@ var StateManager = class {
       return { status: "skipped", reason: "no-component-progress" };
     }
     const merge = mergeSidecarData(targetData, targetTs, components);
-    let correctCount = targetData.state.correctCount;
-    let wrongCount = targetData.state.wrongCount;
-    const dailyAnswers = {
-      ...(_a = targetData.state.dailyAnswers) != null ? _a : {}
-    };
-    let memoryInitialized = targetData.state.memoryInitialized === true;
+    let sumCorrect = 0;
+    let sumWrong = 0;
+    let anyComponentInitialized = false;
+    const sumDaily = /* @__PURE__ */ new Map();
     for (const component of components) {
-      correctCount += component.data.state.correctCount;
-      wrongCount += component.data.state.wrongCount;
-      memoryInitialized = memoryInitialized || component.data.state.memoryInitialized === true;
+      sumCorrect += safeCount2(component.data.state.correctCount);
+      sumWrong += safeCount2(component.data.state.wrongCount);
+      anyComponentInitialized = anyComponentInitialized || component.data.state.memoryInitialized === true;
       for (const [date, count] of Object.entries(
-        (_b = component.data.state.dailyAnswers) != null ? _b : {}
+        (_a = component.data.state.dailyAnswers) != null ? _a : {}
       )) {
-        dailyAnswers[date] = ((_c = dailyAnswers[date]) != null ? _c : 0) + count;
+        sumDaily.set(date, ((_b = sumDaily.get(date)) != null ? _b : 0) + safeCount2(count));
       }
     }
+    const correctCount = Math.max(
+      safeCount2(targetData.state.correctCount),
+      sumCorrect
+    );
+    const wrongCount = Math.max(
+      safeCount2(targetData.state.wrongCount),
+      sumWrong
+    );
+    const dailyAnswers = {};
+    for (const [date, count] of Object.entries(
+      (_c = targetData.state.dailyAnswers) != null ? _c : {}
+    )) {
+      dailyAnswers[date] = safeCount2(count);
+    }
+    for (const [date, count] of sumDaily) {
+      const targetCount = Object.prototype.hasOwnProperty.call(
+        dailyAnswers,
+        date
+      ) ? dailyAnswers[date] : 0;
+      dailyAnswers[date] = Math.max(targetCount, count);
+    }
+    const memoryInitialized = anyComponentInitialized || targetData.state.memoryInitialized === true;
     const mergedData = {
       version: 1,
       meta: merge.data.meta,
@@ -11033,13 +11546,19 @@ var StateManager = class {
         // 会话字段（displayOrder/currentIndex/filter*）取自 base（target）
         correctCount,
         wrongCount,
-        dailyAnswers: Object.keys(dailyAnswers).length > 0 ? dailyAnswers : void 0,
-        memoryInitialized,
-        updatedAt: Date.now()
+        // 双方都无每日记录时保持 target 原值（undefined 不写成空对象）
+        dailyAnswers: Object.keys(dailyAnswers).length > 0 ? dailyAnswers : targetData.state.dailyAnswers,
+        // OR 语义；两方都不是 true 时保留 target 原值（含 undefined）
+        memoryInitialized: memoryInitialized ? true : targetData.state.memoryInitialized,
+        updatedAt: targetData.state.updatedAt
       }
     };
+    if (canonicalSidecarJson(mergedData) === canonicalSidecarJson(targetData)) {
+      return { status: "skipped", reason: "no-change" };
+    }
+    mergedData.state.updatedAt = Date.now();
     try {
-      await writeSidecar(this.vault, target, mergedData);
+      await this.runExclusive(() => this.writeRaw(target, mergedData));
     } catch (e) {
       console.error("CSV Quiz: \u5199\u5165 manifest \u5408\u5E76\u540E sidecar \u5931\u8D25", target, e);
       return { status: "error", reason: "write-failed" };
@@ -11051,6 +11570,151 @@ var StateManager = class {
       correctCount,
       wrongCount
     };
+  }
+  /**
+   * 从 `.merged` 归档（冲突副本合并后保留的快照）恢复进度：把每个归档按
+   * mergeSidecarData 并入目标 sidecar，成功后把归档改名为 `+".recovered"`
+   * （幂等：第二次运行时已无 `.merged` 可匹配）。整个过程在串行链内完成。
+   *
+   * - 目标损坏 → error/target-corrupt（不写、不改名）
+   * - 目标缺失 → 用空状态（默认筛选取自 defaultFilters）作 base
+   * - 坏归档跳过（不阻塞其余归档）
+   * - correct/wrong 保持目标当前值（累计作答事件数无法从快照反推）；
+   *   dailyAnswers 逐日取 max；memoryInitialized 取 OR
+   * - 合并结果与目标一致时不写盘（只改名归档）
+   * - 写盘失败 → error/write-failed（不改名，保留归档待下次重试）
+   */
+  async recoverMergedSidecars(targetAnchor, componentAnchors, defaultFilters) {
+    const target = targetAnchor.trim();
+    if (target === "") return { status: "none" };
+    return this.runExclusive(async () => {
+      const anchors = [];
+      const seenAnchors = /* @__PURE__ */ new Set();
+      const pushAnchor = (raw) => {
+        const value = raw.trim();
+        if (value === "" || seenAnchors.has(value)) return;
+        seenAnchors.add(value);
+        anchors.push(value);
+      };
+      pushAnchor(target);
+      for (const raw of componentAnchors) pushAnchor(raw);
+      const archivePaths = [];
+      const seenPaths = /* @__PURE__ */ new Set();
+      const dirListings = /* @__PURE__ */ new Map();
+      for (const anchor of anchors) {
+        const dir = anchor.includes("/") ? anchor.slice(0, anchor.lastIndexOf("/")) : "/";
+        let files = dirListings.get(dir);
+        if (!files) {
+          try {
+            const listing = await this.vault.adapter.list(dir);
+            files = listing.files;
+          } catch (e) {
+            console.error("CSV Quiz: \u5217\u76EE\u5F55\u67E5\u627E .merged \u5F52\u6863\u5931\u8D25", dir, e);
+            files = [];
+          }
+          dirListings.set(dir, files);
+        }
+        for (const archivePath of findMergedSidecarPaths(files, anchor)) {
+          if (seenPaths.has(archivePath)) continue;
+          seenPaths.add(archivePath);
+          archivePaths.push(archivePath);
+        }
+      }
+      if (archivePaths.length === 0) return { status: "none" };
+      const targetResult = await readSidecar(this.vault, target);
+      if (targetResult.status === "corrupt") {
+        console.error(
+          "CSV Quiz: \u76EE\u6807 sidecar \u635F\u574F\uFF0C\u8DF3\u8FC7 .merged \u5F52\u6863\u6062\u590D",
+          target,
+          targetResult.reason
+        );
+        return { status: "error", reason: "target-corrupt" };
+      }
+      let base;
+      let baseTs = 0;
+      if (targetResult.status === "missing") {
+        const { csvPath: _csvPath, ...emptyState } = this.emptySessionState(defaultFilters);
+        void _csvPath;
+        base = { version: 1, meta: {}, state: { ...emptyState } };
+      } else {
+        base = targetResult.data;
+        baseTs = await this.sidecarTimestampMs(target, base);
+      }
+      const sources = [];
+      for (const archivePath of archivePaths) {
+        try {
+          const content = await this.vault.adapter.read(archivePath);
+          const data = normalizeSidecar(JSON.parse(content));
+          if (!data) continue;
+          let tsMs = typeof data.state.updatedAt === "number" && Number.isFinite(data.state.updatedAt) ? data.state.updatedAt : 0;
+          if (!tsMs) {
+            try {
+              const stat = await this.vault.adapter.stat(archivePath);
+              const mtime = stat == null ? void 0 : stat.mtime;
+              tsMs = typeof mtime === "number" && Number.isFinite(mtime) ? mtime : 0;
+            } catch (e) {
+              tsMs = 0;
+            }
+          }
+          sources.push({ path: archivePath, data, tsMs });
+        } catch (e) {
+          console.error("CSV Quiz: \u8BFB\u53D6 .merged \u5F52\u6863\u5931\u8D25", archivePath, e);
+        }
+      }
+      const merge = mergeSidecarData(base, baseTs, sources);
+      const dailyAnswers = maxDailyAnswers(
+        base.state.dailyAnswers,
+        ...sources.map((source) => source.data.state.dailyAnswers)
+      );
+      const memoryInitialized = base.state.memoryInitialized === true || sources.some((source) => source.data.state.memoryInitialized === true);
+      const merged = {
+        version: 1,
+        meta: merge.data.meta,
+        state: {
+          ...merge.data.state,
+          // 累计作答事件数无法从快照反推 → 保持目标当前值
+          correctCount: base.state.correctCount,
+          wrongCount: base.state.wrongCount,
+          dailyAnswers,
+          memoryInitialized: memoryInitialized ? true : base.state.memoryInitialized,
+          updatedAt: base.state.updatedAt
+        }
+      };
+      const changed = canonicalSidecarJson(merged) !== canonicalSidecarJson(base);
+      if (changed) {
+        merged.state.updatedAt = Date.now();
+        try {
+          await this.writeRaw(target, merged, { authoritative: true });
+        } catch (e) {
+          console.error("CSV Quiz: \u5199\u5165 .merged \u6062\u590D\u7ED3\u679C\u5931\u8D25", target, e);
+          return { status: "error", reason: "write-failed" };
+        }
+      }
+      let renamed = 0;
+      let renameFailed = 0;
+      for (const archivePath of archivePaths) {
+        let dest = archivePath + ".recovered";
+        try {
+          if (await this.vault.adapter.exists(dest)) {
+            dest = `${archivePath}.recovered.${Date.now()}`;
+          }
+          await renameOverwriteWithRetry(this.vault, archivePath, dest, {
+            budgetMs: 3e3
+          });
+          renamed++;
+        } catch (e) {
+          console.error("CSV Quiz: \u5F52\u6863 .merged \u6539\u540D\u5931\u8D25", archivePath, e);
+          renameFailed++;
+        }
+      }
+      return {
+        status: "merged",
+        archives: sources.length,
+        addedAnswers: merge.addedAnswers,
+        renamed,
+        renameFailed
+      };
+    });
   }
   /**
    * 设置保存防抖：设置面板每次击键都会触发，合并为最后一次变更后 400ms 写入一次。
@@ -11214,6 +11878,13 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
       name: "\u6253\u5F00\u5237\u9898\u9762\u677F",
       callback: () => {
         void this.activateView();
+      }
+    });
+    this.addCommand({
+      id: "recover-merged-sidecars",
+      name: "\u4ECE\u5DF2\u5F52\u6863\u51B2\u7A81\u526F\u672C\u6062\u590D\u8FDB\u5EA6",
+      callback: () => {
+        void this.recoverMergedSidecarsCommand();
       }
     });
     this.settingTab = new CSVQuizSettingTab(this.app, this);
@@ -11534,8 +12205,9 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
     return ((_a = this.bankStatus) == null ? void 0 : _a.status) === "ok" ? this.bankStatus.source.anchor : "";
   }
   /**
-   * manifest 复合题库：确保组成内容源的 sidecar 进度已一次性并入 manifest 锚点 sidecar。
-   * - 仅 manifest 模式；已合并过的锚点（settings.manifestMerged）直接返回
+   * manifest 复合题库：确保组成内容源的 sidecar 进度已并入 manifest 锚点 sidecar。
+   * - 仅 manifest 模式；settings.manifestMerged 仅作诊断标记，不再阻止合并
+   *   （旧 marker 可能是「目标已有进度就跳过」时期写入的，需允许修复）
    * - 同锚点并发调用复用同一 promise（onload 与视图可能同时触发）
    * - 任何失败都不抛出（合并失败不应变成题库加载失败）
    */
@@ -11543,7 +12215,6 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
     if (source.mode !== "manifest") return;
     const key = source.anchor.trim();
     if (key === "") return;
-    if (this.settings.manifestMerged[key] === true) return;
     const pending = this.manifestMergePromises.get(key);
     if (pending) return pending;
     const task = this.runManifestSidecarMerge(source, key).finally(() => {
@@ -11569,10 +12240,13 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
       push(imageFolder === "/" ? ROOT_IMAGE_ANCHOR : imageFolder);
     }
     if (components.length === 0) {
-      this.settings.manifestMerged[key] = true;
-      await this.saveSettings();
       return;
     }
+    const markMerged = async () => {
+      if (this.settings.manifestMerged[key] === true) return;
+      this.settings.manifestMerged[key] = true;
+      await this.saveSettings();
+    };
     try {
       const result = await this.stateManager.mergeManifestComponentSidecars(
         key,
@@ -11585,16 +12259,14 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
         }
       );
       if (result.status === "merged") {
-        this.settings.manifestMerged[key] = true;
-        await this.saveSettings();
+        await markMerged();
         console.info(
           `CSV Quiz: \u5DF2\u628A ${(_b = result.mergedComponents) != null ? _b : 0} \u4E2A\u7EC4\u6210 sidecar \u5E76\u5165 manifest \u8FDB\u5EA6\uFF08\u65B0\u589E\u7B54\u9898 ${(_c = result.addedAnswers) != null ? _c : 0} \u6761\uFF0C\u2705${(_d = result.correctCount) != null ? _d : 0} / \u274C${(_e = result.wrongCount) != null ? _e : 0}\uFF09`
         );
         return;
       }
-      if (result.reason === "target-has-progress") {
-        this.settings.manifestMerged[key] = true;
-        await this.saveSettings();
+      if (result.reason === "no-change") {
+        await markMerged();
         return;
       }
       if (result.reason === "no-component-progress") {
@@ -11670,7 +12342,13 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
             state.memoryNewCountToday = 0;
             state.memoryPendingNew = [];
           }
-          await this.stateManager.saveStateImmediately(state);
+          if (choice === "order") {
+            await this.stateManager.saveStateImmediately(state);
+          } else {
+            await this.stateManager.saveStateImmediately(state, {
+              authoritative: true
+            });
+          }
           new import_obsidian8.Notice(
             choice === "order" ? autoOff ? "\u9898\u76EE\u987A\u5E8F\u5DF2\u91CD\u7F6E\uFF0C\u91CD\u65B0\u6253\u5F00\u9762\u677F\u65F6\u751F\u6548\uFF0C\u5E76\u5DF2\u81EA\u52A8\u5173\u95ED\u968F\u673A\u9898\u76EE\u987A\u5E8F" : "\u9898\u76EE\u987A\u5E8F\u5DF2\u91CD\u7F6E\uFF0C\u91CD\u65B0\u6253\u5F00\u9762\u677F\u65F6\u751F\u6548" : choice === "records" ? "\u5237\u9898\u8BB0\u5F55\u5DF2\u6E05\u7406" : "\u8BB0\u5FC6\u5361\u7247\u5DF2\u5220\u9664"
           );
@@ -11764,6 +12442,101 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
   /** @deprecated 旧名称，保留为 refreshBank 的别名。 */
   async refreshImageBank() {
     await this.refreshBank();
+  }
+  /**
+   * 命令：把 `.merged` 归档（历史上冲突副本合并后保留的快照）重新并入当前题库进度。
+   * 显式操作，不在启动/打开面板时自动执行；成功后把归档改名为 `.recovered`，
+   * 因此重复执行只会得到「未找到可恢复归档」。
+   */
+  async recoverMergedSidecarsCommand() {
+    var _a, _b, _c, _d, _e;
+    const res = await this.resolveBank();
+    if (res.status !== "ok") {
+      new import_obsidian8.Notice(res.message);
+      return;
+    }
+    const defaults = {
+      favorite: this.settings.defaultFilterFavorite,
+      mastered: this.settings.defaultFilterMastered,
+      repeat: this.settings.defaultFilterRepeat,
+      wrong: this.settings.defaultFilterWrong
+    };
+    const components = [];
+    const seen = /* @__PURE__ */ new Set();
+    const push = (anchor) => {
+      const value = (anchor != null ? anchor : "").trim();
+      if (value === "" || seen.has(value)) return;
+      seen.add(value);
+      components.push(value);
+    };
+    for (const contentPath of res.source.contentPaths) push(contentPath);
+    const imageFolder = ((_a = res.source.imageFolder) != null ? _a : "").trim();
+    if (imageFolder !== "") {
+      push(imageFolder === "/" ? ROOT_IMAGE_ANCHOR : imageFolder);
+    }
+    let result;
+    try {
+      const pendingState = this.stateManager.getState();
+      if (pendingState !== null) {
+        await this.stateManager.saveStateImmediately(pendingState);
+      }
+      result = await this.stateManager.recoverMergedSidecars(
+        res.source.anchor,
+        components,
+        defaults
+      );
+    } catch (e) {
+      console.error("CSV Quiz: \u4ECE .merged \u5F52\u6863\u6062\u590D\u8FDB\u5EA6\u5931\u8D25", e);
+      new import_obsidian8.Notice("\u4ECE\u5DF2\u5F52\u6863\u51B2\u7A81\u526F\u672C\u6062\u590D\u8FDB\u5EA6\u5931\u8D25");
+      return;
+    }
+    if (result.status === "error") {
+      new import_obsidian8.Notice(
+        result.reason === "target-corrupt" ? "\u5F53\u524D\u9898\u5E93\u72B6\u6001\u6587\u4EF6\u635F\u574F\uFF0C\u672A\u4ECE\u5F52\u6863\u6062\u590D\uFF08\u8BF7\u5148\u5904\u7406\u635F\u574F\u7684\u72B6\u6001\u6587\u4EF6\uFF09" : "\u5199\u5165\u6062\u590D\u540E\u7684\u8FDB\u5EA6\u5931\u8D25\uFF0C\u5F52\u6863\u6587\u4EF6\u672A\u6539\u52A8\uFF0C\u53EF\u7A0D\u540E\u91CD\u8BD5"
+      );
+      return;
+    }
+    if (result.status === "none") {
+      new import_obsidian8.Notice("\u672A\u627E\u5230\u53EF\u6062\u590D\u7684\u5DF2\u5F52\u6863\u51B2\u7A81\u526F\u672C\uFF08.merged\uFF09");
+      return;
+    }
+    const renamedPart = result.renameFailed !== void 0 && result.renameFailed > 0 ? `\uFF0C${(_b = result.renamed) != null ? _b : 0} \u4E2A\u6539\u540D\u6210\u529F\u3001${result.renameFailed} \u4E2A\u6539\u540D\u5931\u8D25` : `\uFF0C${(_c = result.renamed) != null ? _c : 0} \u4E2A\u5F52\u6863\u5DF2\u6539\u540D\u4FDD\u7559`;
+    new import_obsidian8.Notice(
+      `\u5DF2\u4ECE ${(_d = result.archives) != null ? _d : 0} \u4E2A\u5F52\u6863\u6062\u590D\u8FDB\u5EA6\uFF1A\u65B0\u589E\u7B54\u9898 ${(_e = result.addedAnswers) != null ? _e : 0} \u6761${renamedPart}`
+    );
+    await this.reloadAfterMergedRecovery(res.source.anchor);
+  }
+  /**
+   * .merged 恢复后的刷新：磁盘已是合并结果，但内存（视图/管理器）仍是恢复前的
+   * 旧进度。面板打开时先卸载内存状态（currentState 为 null 时 unloadSidecar 不写盘，
+   * 避免旧进度覆盖刚恢复的数据），再由 view.refresh(true) 从磁盘重新载入；
+   * 面板未打开时直接重载 sidecar 到内存。
+   */
+  async reloadAfterMergedRecovery(anchor) {
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
+    const view = leaf == null ? void 0 : leaf.view;
+    if (view) {
+      try {
+        this.stateManager.setState(null);
+        await this.stateManager.unloadSidecar();
+        await view.refresh(true);
+      } catch (e) {
+        console.error("CSV Quiz: \u6062\u590D\u8FDB\u5EA6\u540E\u5237\u65B0\u9762\u677F\u5931\u8D25", e);
+      }
+      this.refreshMemoryReminder();
+      return;
+    }
+    try {
+      await this.stateManager.loadSidecar(anchor, {
+        favorite: this.settings.defaultFilterFavorite,
+        mastered: this.settings.defaultFilterMastered,
+        repeat: this.settings.defaultFilterRepeat,
+        wrong: this.settings.defaultFilterWrong
+      });
+    } catch (e) {
+      console.error("CSV Quiz: \u6062\u590D\u8FDB\u5EA6\u540E\u91CD\u8F7D\u72B6\u6001\u5931\u8D25", e);
+    }
+    this.refreshMemoryReminder();
   }
   /** 「随机考试题数」设置变更后同步视图按钮文案（即时生效）。 */
   syncRandomExamCount() {

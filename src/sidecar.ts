@@ -1,7 +1,7 @@
 import { Notice, Platform, Vault } from "obsidian";
 import { MemoryCard } from "./types";
 import { normalizeMemoryCards } from "./utils";
-import { normalizeDailyAnswers } from "./practiceStats";
+import { normalizeDailyAnswers, pruneDailyAnswers } from "./practiceStats";
 
 /** sidecar 中 B 类覆盖 + C 类状态的合并存储层（同层）。键为题 id。 */
 export interface SidecarMeta {
@@ -381,12 +381,19 @@ export function normalizeSidecar(raw: unknown): SidecarData | null {
   const toOptBool = (v: unknown): boolean | undefined =>
     typeof v === "boolean" ? v : undefined;
 
-  // meta 层归一化：逐条校验可选字符串字段，非对象条目丢弃
+  // meta 层归一化：逐条校验可选字符串字段，非对象条目丢弃。
+  // 用 defineProperty 而非 meta[id] = ...：题 id 可能是 "__proto__" 等原型键，
+  // 直接赋值会改写原型而不是写入自有属性，导致该题 meta 静默丢失。
   const meta: Record<string, SidecarMeta> = {};
   if (r.meta && typeof r.meta === "object") {
     for (const [id, value] of Object.entries(r.meta)) {
       if (value && typeof value === "object") {
-        meta[id] = normalizeMeta(value as Record<string, unknown>);
+        Object.defineProperty(meta, id, {
+          value: normalizeMeta(value as Record<string, unknown>),
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
       }
     }
   }
@@ -469,73 +476,33 @@ function normalizeMeta(raw: Record<string, unknown>): SidecarMeta {
   return result;
 }
 
-/** 串行写队列：同内容源连续入队时合并（只保留最后一次数据，写一次）。参考 CSVWriteQueue 模式，无 transform 合并。 */
+/**
+ * 通用串行 job 链：所有通过 enqueue 提交的异步任务严格按提交顺序执行（前一个
+ * 完成/失败后再跑下一个），任一任务失败不会中断后续任务（job 的 rejection
+ * 只回传给提交者）。写盘前的「读-合并-写」必须串行，否则并发保存会互相覆盖
+ * 或重复计数；因此队列不再按 contentPath 合并 payload，由调用方在 job 内部
+ * 自行决定读改写语义。
+ */
 export class SidecarWriteQueue {
-  private queue: Array<{
-    contentPath: string;
-    data: SidecarData;
-    resolves: Array<(value: void) => void>;
-    rejects: Array<(reason: unknown) => void>;
-  }> = [];
-  private processing = false;
-  private vault: Vault;
+  private tail: Promise<unknown> = Promise.resolve();
+  private depth = 0;
 
-  constructor(vault: Vault) {
-    this.vault = vault;
-  }
-
-  /** 入队一次 sidecar 全量写。同内容源连续入队时合并（只保留最后一次数据，写一次）。 */
-  enqueue(contentPath: string, data: SidecarData): Promise<void> {
-    // 若队列中已有同 contentPath 的项（尚未开始处理），合并写入：
-    // 用新 data 全量替换旧数据，并把本次 promise 的 resolve/reject 登记到该项。
-    const existing = this.queue.find(
-      (item) => item.contentPath === contentPath
-    );
-    if (existing) {
-      existing.data = data;
-      return new Promise<void>((resolve, reject) => {
-        existing.resolves.push(resolve);
-        existing.rejects.push(reject);
-      });
-    }
-
-    return new Promise((resolve, reject) => {
-      this.queue.push({
-        contentPath,
-        data,
-        resolves: [resolve],
-        rejects: [reject],
-      });
-      void this.processNext();
+  enqueue<T>(job: () => Promise<T>): Promise<T> {
+    this.depth++;
+    const run = this.tail.then(job, job);
+    this.tail = run.catch(() => {}).finally(() => {
+      this.depth--;
     });
-  }
-
-  private async processNext(): Promise<void> {
-    if (this.processing || this.queue.length === 0) return;
-    this.processing = true;
-
-    const item = this.queue.shift()!;
-    try {
-      await writeSidecar(this.vault, item.contentPath, item.data);
-      for (const resolve of item.resolves) resolve();
-    } catch (e: unknown) {
-      // 写入失败：reject 该项所有 promise
-      for (const reject of item.rejects) reject(e);
-    } finally {
-      this.processing = false;
-      void this.processNext();
-    }
+    return run;
   }
 
   get pending(): number {
-    return this.queue.length;
+    return this.depth;
   }
 
-  /** 等待队列清空（参考 CSVWriteQueue.drain 的轮询实现）。 */
+  /** 等待队列清空（含等待期间新入队的任务）。 */
   async drain(): Promise<void> {
-    while (this.processing || this.queue.length > 0) {
-      await new Promise<void>((resolve) => window.setTimeout(resolve, 10));
-    }
+    while (this.depth > 0) await this.tail;
   }
 }
 
@@ -608,6 +575,48 @@ export function findSidecarConflictPaths(
     const sidecarSuffix = m[2];
     if (!mainSuffix && !sidecarSuffix) continue; // 规范 sidecar 本身
     // 校验序号：空格组必须 ≥2（排除用户命名 "xxx 1"）；括号组 ≥1 即可（Windows iCloud 从 (1) 起）
+    const spaceNums: string[] = [
+      ...(mainSuffix?.match(/ \d+/g) ?? []),
+      ...(sidecarSuffix?.match(/ \d+/g) ?? []),
+    ];
+    if (spaceNums.some((n) => Number(n.trim()) < 2)) continue;
+    result.push(file);
+  }
+  return result;
+}
+
+/**
+ * 从目录文件列表中找出 contentPath 的「已归档冲突副本」路径（`.merged` 后缀）。
+ * 覆盖与 findSidecarConflictPaths 相同的两类命名，另加规范 sidecar 自身的归档：
+ * - `<contentPath>.sidecar.json.merged`（规范 sidecar 被归档）
+ * - `<contentPath>.sidecar<S>.json.merged`（sidecar 自身被冲突后归档）
+ * - `<contentPath><S>.sidecar.json.merged`（主文件被冲突后归档）
+ * 编号校验同 findSidecarConflictPaths：空格序号 ≥2、括号序号 ≥1。
+ * 只接受以 `.merged` 结尾的路径；`.merged.recovered`（已恢复过一次的归档）不匹配，
+ * 避免重复恢复。
+ */
+export function findMergedSidecarPaths(
+  allFiles: string[],
+  contentPath: string
+): string[] {
+  const suffixGroup = "((?: \\d+| ?\\(\\d+\\))+)?";
+  const re = new RegExp(
+    "^" +
+      escapeRegExp(contentPath) +
+      suffixGroup +
+      "\\.sidecar" +
+      suffixGroup +
+      "\\.json" +
+      escapeRegExp(SIDECAR_MERGED_SUFFIX) +
+      "$"
+  );
+  const result: string[] = [];
+  for (const file of allFiles) {
+    const m = re.exec(file);
+    if (!m) continue;
+    const mainSuffix = m[1];
+    const sidecarSuffix = m[2];
+    // 校验序号：空格组必须 ≥2（排除用户命名的 "xxx 1"）；括号组 ≥1 即可
     const spaceNums: string[] = [
       ...(mainSuffix?.match(/ \d+/g) ?? []),
       ...(sidecarSuffix?.match(/ \d+/g) ?? []),
@@ -804,4 +813,319 @@ export function mergeSidecarData(
     addedAnswerIds,
     mergedSources: others.length,
   };
+}
+
+/* ===================== 保存层 base/memory/disk 三方合并 ===================== */
+
+/**
+ * 统计基线：上次从磁盘读出（或上次成功保存）时 state 的累计计数快照。
+ * 保存时用 memory - baseline 得到「本次会话新增的答题事件数」，再叠加到磁盘当前值上，
+ * 避免用 memory - base 或整体覆盖把其他设备写入的计数抹掉。
+ */
+export interface StatsBaseline {
+  correct: number;
+  wrong: number;
+  daily: Record<string, number>;
+}
+
+/** 本次会话内被显式删除（权威删除）的题 id 集合，保存合并时据此阻止磁盘侧「复活」。 */
+export interface SidecarTombstones {
+  answered: Set<string>;
+  cards: Set<string>;
+  meta: Set<string>;
+}
+
+/** 取 own 属性值：区分「键缺失」与「键存在但值为空字符串」，且不受原型链干扰。 */
+function ownProp<T>(
+  record: Record<string, T> | undefined,
+  key: string
+): T | undefined {
+  if (!record) return undefined;
+  return Object.prototype.hasOwnProperty.call(record, key)
+    ? record[key]
+    : undefined;
+}
+
+/** 有限数值才视为有效时间戳。 */
+function finiteTs(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/** 非负有限计数（损坏数据兜底为 0）。 */
+function safeCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, value)
+    : 0;
+}
+
+/**
+ * 深拷贝 sidecar：meta 逐 entry 拷贝，state 的记录/数组/卡片对象全部新建，
+ * 避免合并结果与入参共享引用（合并函数不得修改入参）。
+ */
+export function cloneSidecarData(data: SidecarData): SidecarData {
+  const metaEntries: Array<[string, SidecarMeta]> = Object.entries(data.meta).map(
+    ([id, entry]) => [id, entry ? { ...entry } : entry]
+  );
+  const state = data.state;
+  const cardEntries: Array<[string, MemoryCard]> | undefined =
+    state.memoryCards === undefined
+      ? undefined
+      : Object.entries(state.memoryCards).map(([id, card]) => [
+          id,
+          card ? { ...card } : card,
+        ]);
+  return {
+    version: 1,
+    meta: Object.fromEntries(metaEntries) as Record<string, SidecarMeta>,
+    state: {
+      ...state,
+      displayOrder: state.displayOrder.slice(),
+      answeredQuestions: { ...state.answeredQuestions },
+      memoryCards:
+        cardEntries === undefined
+          ? undefined
+          : (Object.fromEntries(cardEntries) as Record<string, MemoryCard>),
+      memoryPendingNew:
+        state.memoryPendingNew === undefined
+          ? undefined
+          : state.memoryPendingNew.slice(),
+      dailyAnswers:
+        state.dailyAnswers === undefined
+          ? undefined
+          : { ...state.dailyAnswers },
+    },
+  };
+}
+
+/** 提取 sidecar 的统计快照（null = 未读到文件 → 全 0 基线）。 */
+export function countersOfSidecar(data: SidecarData | null): StatsBaseline {
+  if (!data) return { correct: 0, wrong: 0, daily: {} };
+  return {
+    correct: safeCount(data.state.correctCount),
+    wrong: safeCount(data.state.wrongCount),
+    daily: { ...(data.state.dailyAnswers ?? {}) },
+  };
+}
+
+/** 卡片新旧排序键：lastReview 优先，非法/缺失回退 ts。 */
+function cardFreshness(card: MemoryCard): { review: number; ts: number } {
+  const parsed =
+    typeof card.lastReview === "string" && card.lastReview !== ""
+      ? Date.parse(card.lastReview)
+      : NaN;
+  return {
+    review: Number.isFinite(parsed) ? parsed : -Infinity,
+    ts: finiteTs(card.ts) ?? -Infinity,
+  };
+}
+
+/** disk 卡片是否严格新于 memory 卡片（完全平局返回 false → 内存优先）。 */
+function isCardNewer(diskCard: MemoryCard, memCard: MemoryCard): boolean {
+  const d = cardFreshness(diskCard);
+  const m = cardFreshness(memCard);
+  if (d.review !== m.review) return d.review > m.review;
+  return d.ts > m.ts;
+}
+
+/**
+ * 保存层三方合并（纯函数，不修改入参）：把内存状态写成磁盘可接受的新状态。
+ * - base：本次会话最初从磁盘读到的数据（null = 本次会话从未读到该文件）；
+ * - memory：当前内存中的权威会话状态；
+ * - disk：保存前重新读到的磁盘最新数据（null = 文件缺失，此时用 base 兜底，
+ *   绝不能当成空状态）；
+ * - statsBaseline：计数/每日的累计快照，用于只把「本次会话增量」叠加到磁盘值上；
+ * - tombstones：本次会话权威删除的题 id，阻止磁盘旧数据复活。
+ *
+ * 合并语义：
+ * - answeredQuestions / meta / memoryCards 按并集处理：内存缺失≠删除（只由
+ *   tombstones 或权威写删除）；内存未改动（m === base）的键让磁盘新值胜出；
+ * - 计数与每日用 statsBaseline 计算增量，叠加到磁盘当前值（不被内存整体覆盖）；
+ * - 会话级字段（位置/筛选/displayOrder/memory 配额）一律内存优先。
+ */
+export function mergeSidecarForWrite(args: {
+  base: SidecarData | null;
+  memory: SidecarData;
+  disk: SidecarData | null;
+  statsBaseline: StatsBaseline;
+  tombstones: SidecarTombstones;
+}): SidecarData {
+  const { base, memory, disk, statsBaseline, tombstones } = args;
+  const memState = memory.state;
+  const baseState = base?.state;
+  const diskLike = disk ?? base;
+  const diskState = diskLike?.state;
+  const diskMeta = diskLike?.meta ?? {};
+  const baseMeta = base?.meta ?? {};
+
+  /* ----- answeredQuestions：并集 + 「内存没改则磁盘胜」 ----- */
+  const answeredIds = new Set<string>([
+    ...Object.keys(memState.answeredQuestions),
+    ...Object.keys(diskState?.answeredQuestions ?? {}),
+    ...Object.keys(baseState?.answeredQuestions ?? {}),
+  ]);
+  const answeredEntries: Array<[string, string]> = [];
+  for (const id of answeredIds) {
+    if (tombstones.answered.has(id)) continue;
+    const m = ownProp(memState.answeredQuestions, id);
+    const d = ownProp(diskState?.answeredQuestions, id);
+    const b = ownProp(baseState?.answeredQuestions, id);
+    let value: string | undefined;
+    if (m === undefined) {
+      // 内存没有≠删除：磁盘有则用磁盘，否则用 base
+      value = d ?? b;
+    } else if (d !== undefined && (b === undefined || m === b)) {
+      // 内存未改动该题 → 磁盘新答案胜出
+      value = d;
+    } else {
+      value = m;
+    }
+    if (value !== undefined) answeredEntries.push([id, value]);
+  }
+  const answered = Object.fromEntries(answeredEntries) as Record<string, string>;
+
+  /* ----- meta：tombstone 整条删；否则逐字段三方合并 ----- */
+  const metaIds = new Set<string>([
+    ...Object.keys(memory.meta),
+    ...Object.keys(diskMeta),
+    ...Object.keys(baseMeta),
+  ]);
+  const metaEntries: Array<[string, SidecarMeta]> = [];
+  for (const id of metaIds) {
+    if (tombstones.meta.has(id)) continue;
+    const memEntry = ownProp(memory.meta, id);
+    const diskEntry = ownProp(diskMeta, id);
+    const baseEntry = ownProp(baseMeta, id);
+    const memHasEntry = memEntry !== undefined;
+    const entry: SidecarMeta = {};
+    let maxTs: number | undefined;
+    let hasField = false;
+    for (const field of META_MERGE_FIELDS) {
+      const mv = memHasEntry ? memEntry[field] : undefined;
+      const bv = baseEntry?.[field];
+      const dv = diskEntry?.[field];
+      let value: string | undefined;
+      let primaryTs: number | undefined;
+      if (memHasEntry && mv !== bv) {
+        // 内存相对 base 有变化（含内存缺失 = 用户清空该字段）→ 内存胜
+        value = mv;
+        primaryTs = memEntry.ts;
+      } else if (dv !== undefined) {
+        // 内存没改而磁盘有新值 → 磁盘胜
+        value = dv;
+        primaryTs = diskEntry?.ts;
+      } else {
+        // 都没变化/都没值 → 用 base/memory 当前值
+        value = mv ?? bv;
+        primaryTs = memHasEntry ? memEntry.ts : baseEntry?.ts;
+      }
+      if (value === undefined) continue; // 内存删除的字段不写入
+      entry[field] = value;
+      hasField = true;
+      const ts = finiteTs(primaryTs);
+      if (ts !== undefined) maxTs = maxTs === undefined ? ts : Math.max(maxTs, ts);
+    }
+    if (!hasField) continue; // 无字段则丢弃 entry
+    if (maxTs !== undefined) entry.ts = maxTs;
+    metaEntries.push([id, entry]);
+  }
+  const meta = Object.fromEntries(metaEntries) as Record<string, SidecarMeta>;
+
+  /* ----- memoryCards：tombstone 删；否则取较新卡片（内存缺失≠删卡） ----- */
+  const cardIds = new Set<string>([
+    ...Object.keys(memState.memoryCards ?? {}),
+    ...Object.keys(diskState?.memoryCards ?? {}),
+    ...Object.keys(baseState?.memoryCards ?? {}),
+  ]);
+  const cardEntries: Array<[string, MemoryCard]> = [];
+  for (const id of cardIds) {
+    if (tombstones.cards.has(id)) continue;
+    const m = ownProp(memState.memoryCards, id);
+    const d = ownProp(diskState?.memoryCards, id);
+    const b = ownProp(baseState?.memoryCards, id);
+    let chosen: MemoryCard | undefined;
+    if (m && d) {
+      chosen = isCardNewer(d, m) ? d : m;
+    } else if (m) {
+      chosen = m;
+    } else if (d) {
+      chosen = d;
+    } else {
+      chosen = b;
+    }
+    if (!chosen) continue;
+    cardEntries.push([id, { ...chosen }]);
+  }
+  const memoryCards =
+    cardEntries.length === 0
+      ? undefined
+      : (Object.fromEntries(cardEntries) as Record<string, MemoryCard>);
+
+  /* ----- 计数与每日：磁盘值 + 本次会话增量（statsBaseline 口径） ----- */
+  const memCorrect = safeCount(memState.correctCount);
+  const memWrong = safeCount(memState.wrongCount);
+  let correctCount: number;
+  let wrongCount: number;
+  let dailyAnswers: Record<string, number>;
+  if (base === null) {
+    // 本次会话未读过该文件：以 memory 为准，避免 0 基线把计数抹掉
+    correctCount = memCorrect;
+    wrongCount = memWrong;
+    dailyAnswers = { ...(memState.dailyAnswers ?? {}) };
+  } else {
+    correctCount = Math.max(
+      0,
+      safeCount(diskState?.correctCount) +
+        Math.max(0, memCorrect - safeCount(statsBaseline.correct))
+    );
+    wrongCount = Math.max(
+      0,
+      safeCount(diskState?.wrongCount) +
+        Math.max(0, memWrong - safeCount(statsBaseline.wrong))
+    );
+    const memDaily = memState.dailyAnswers ?? {};
+    const diskDaily = diskState?.dailyAnswers ?? {};
+    const dates = new Set<string>([
+      ...Object.keys(diskDaily),
+      ...Object.keys(memDaily),
+    ]);
+    const merged: Record<string, number> = {};
+    for (const date of dates) {
+      const value =
+        safeCount(ownProp(diskDaily, date)) +
+        Math.max(
+          0,
+          safeCount(ownProp(memDaily, date)) -
+            safeCount(ownProp(statsBaseline.daily, date))
+        );
+      // 只保留结果 >0 的日期
+      if (value > 0) merged[date] = value;
+    }
+    dailyAnswers = merged;
+  }
+  pruneDailyAnswers(dailyAnswers, new Date());
+
+  const memoryInitialized =
+    memState.memoryInitialized === true ||
+    diskState?.memoryInitialized === true ||
+    baseState?.memoryInitialized === true;
+
+  const state: SidecarState = {
+    // 会话级字段（位置/筛选/displayOrder/memory 配额）一律内存优先
+    ...memState,
+    displayOrder: memState.displayOrder.slice(),
+    currentIndex: memState.currentIndex,
+    correctCount,
+    wrongCount,
+    answeredQuestions: answered,
+    memoryCards,
+    memoryInitialized,
+    dailyAnswers,
+    memoryPendingNew:
+      memState.memoryPendingNew === undefined
+        ? undefined
+        : memState.memoryPendingNew.slice(),
+    updatedAt: Date.now(),
+  };
+
+  return { version: 1, meta, state };
 }

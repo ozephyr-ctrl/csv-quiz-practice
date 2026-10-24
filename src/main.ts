@@ -8,6 +8,7 @@ import {
 import { CSVQuizSettingTab } from "./settings";
 import { QuizView } from "./quizView";
 import { StateManager } from "./stateManager";
+import type { MergedArchiveRecoveryResult } from "./stateManager";
 import { CSVWriteQueue } from "./csvHandler";
 import { countDueCards } from "./utils";
 import { normalizeVaultFolder } from "./contentSource";
@@ -178,6 +179,14 @@ export default class CSVQuizPlugin extends Plugin {
       name: "打开刷题面板",
       callback: () => {
         void this.activateView();
+      },
+    });
+
+    this.addCommand({
+      id: "recover-merged-sidecars",
+      name: "从已归档冲突副本恢复进度",
+      callback: () => {
+        void this.recoverMergedSidecarsCommand();
       },
     });
 
@@ -610,8 +619,9 @@ export default class CSVQuizPlugin extends Plugin {
   }
 
   /**
-   * manifest 复合题库：确保组成内容源的 sidecar 进度已一次性并入 manifest 锚点 sidecar。
-   * - 仅 manifest 模式；已合并过的锚点（settings.manifestMerged）直接返回
+   * manifest 复合题库：确保组成内容源的 sidecar 进度已并入 manifest 锚点 sidecar。
+   * - 仅 manifest 模式；settings.manifestMerged 仅作诊断标记，不再阻止合并
+   *   （旧 marker 可能是「目标已有进度就跳过」时期写入的，需允许修复）
    * - 同锚点并发调用复用同一 promise（onload 与视图可能同时触发）
    * - 任何失败都不抛出（合并失败不应变成题库加载失败）
    */
@@ -619,7 +629,6 @@ export default class CSVQuizPlugin extends Plugin {
     if (source.mode !== "manifest") return;
     const key = source.anchor.trim();
     if (key === "") return;
-    if (this.settings.manifestMerged[key] === true) return;
     const pending = this.manifestMergePromises.get(key);
     if (pending) return pending;
     const task = this.runManifestSidecarMerge(source, key).finally(() => {
@@ -648,11 +657,16 @@ export default class CSVQuizPlugin extends Plugin {
       push(imageFolder === "/" ? ROOT_IMAGE_ANCHOR : imageFolder);
     }
     if (components.length === 0) {
-      // 无任何组成内容源：标记完成，避免每次启动重复探测
-      this.settings.manifestMerged[key] = true;
-      await this.saveSettings();
+      // 无任何组成内容源：无需合并，也不写 marker
       return;
     }
+
+    /** 写诊断标记（已标记则跳过，避免每次载入都写设置）。 */
+    const markMerged = async (): Promise<void> => {
+      if (this.settings.manifestMerged[key] === true) return;
+      this.settings.manifestMerged[key] = true;
+      await this.saveSettings();
+    };
 
     try {
       const result = await this.stateManager.mergeManifestComponentSidecars(
@@ -666,18 +680,16 @@ export default class CSVQuizPlugin extends Plugin {
         }
       );
       if (result.status === "merged") {
-        this.settings.manifestMerged[key] = true;
-        await this.saveSettings();
+        await markMerged();
         console.info(
           `CSV Quiz: 已把 ${result.mergedComponents ?? 0} 个组成 sidecar 并入 manifest 进度` +
             `（新增答题 ${result.addedAnswers ?? 0} 条，✅${result.correctCount ?? 0} / ❌${result.wrongCount ?? 0}）`
         );
         return;
       }
-      if (result.reason === "target-has-progress") {
-        // 目标已有复合题库进度：不再合并（避免重复累计），直接标记完成
-        this.settings.manifestMerged[key] = true;
-        await this.saveSettings();
+      if (result.reason === "no-change") {
+        // 合并结果与目标一致：视为已完成（不写盘）
+        await markMerged();
         return;
       }
       if (result.reason === "no-component-progress") {
@@ -771,7 +783,15 @@ export default class CSVQuizPlugin extends Plugin {
             state.memoryNewCountToday = 0;
             state.memoryPendingNew = [];
           }
-          await this.stateManager.saveStateImmediately(state);
+          if (choice === "order") {
+            await this.stateManager.saveStateImmediately(state);
+          } else {
+            // L2: records/cards 是用户显式重置且无视图（无 tombstone）：
+            // 权威写直接覆盖磁盘，避免读改写合并把旧记录并回来。
+            await this.stateManager.saveStateImmediately(state, {
+              authoritative: true,
+            });
+          }
           // C-2: 面板未打开时也要给用户反馈
           new Notice(
             choice === "order"
@@ -885,6 +905,113 @@ export default class CSVQuizPlugin extends Plugin {
   /** @deprecated 旧名称，保留为 refreshBank 的别名。 */
   async refreshImageBank(): Promise<void> {
     await this.refreshBank();
+  }
+
+  /**
+   * 命令：把 `.merged` 归档（历史上冲突副本合并后保留的快照）重新并入当前题库进度。
+   * 显式操作，不在启动/打开面板时自动执行；成功后把归档改名为 `.recovered`，
+   * 因此重复执行只会得到「未找到可恢复归档」。
+   */
+  private async recoverMergedSidecarsCommand(): Promise<void> {
+    const res = await this.resolveBank();
+    if (res.status !== "ok") {
+      new Notice(res.message);
+      return;
+    }
+    const defaults = {
+      favorite: this.settings.defaultFilterFavorite,
+      mastered: this.settings.defaultFilterMastered,
+      repeat: this.settings.defaultFilterRepeat,
+      wrong: this.settings.defaultFilterWrong,
+    };
+    // 组件锚点 = manifest 组成内容源 + 图片文件夹（根哨兵 "/" 换 ROOT_IMAGE_ANCHOR）
+    const components: string[] = [];
+    const seen = new Set<string>();
+    const push = (anchor: string | undefined): void => {
+      const value = (anchor ?? "").trim();
+      if (value === "" || seen.has(value)) return;
+      seen.add(value);
+      components.push(value);
+    };
+    for (const contentPath of res.source.contentPaths) push(contentPath);
+    const imageFolder = (res.source.imageFolder ?? "").trim();
+    if (imageFolder !== "") {
+      push(imageFolder === "/" ? ROOT_IMAGE_ANCHOR : imageFolder);
+    }
+
+    let result: MergedArchiveRecoveryResult;
+    try {
+      // 先把内存中尚未落盘的进度写入磁盘：恢复后会卸载内存状态并按磁盘重载，
+      // 不先落盘会丢掉防抖窗口内最近几秒的作答。
+      const pendingState = this.stateManager.getState();
+      if (pendingState !== null) {
+        await this.stateManager.saveStateImmediately(pendingState);
+      }
+      result = await this.stateManager.recoverMergedSidecars(
+        res.source.anchor,
+        components,
+        defaults
+      );
+    } catch (e: unknown) {
+      console.error("CSV Quiz: 从 .merged 归档恢复进度失败", e);
+      new Notice("从已归档冲突副本恢复进度失败");
+      return;
+    }
+
+    if (result.status === "error") {
+      new Notice(
+        result.reason === "target-corrupt"
+          ? "当前题库状态文件损坏，未从归档恢复（请先处理损坏的状态文件）"
+          : "写入恢复后的进度失败，归档文件未改动，可稍后重试"
+      );
+      return;
+    }
+    if (result.status === "none") {
+      new Notice("未找到可恢复的已归档冲突副本（.merged）");
+      return;
+    }
+
+    const renamedPart =
+      result.renameFailed !== undefined && result.renameFailed > 0
+        ? `，${result.renamed ?? 0} 个改名成功、${result.renameFailed} 个改名失败`
+        : `，${result.renamed ?? 0} 个归档已改名保留`;
+    new Notice(
+      `已从 ${result.archives ?? 0} 个归档恢复进度：新增答题 ${result.addedAnswers ?? 0} 条${renamedPart}`
+    );
+    await this.reloadAfterMergedRecovery(res.source.anchor);
+  }
+
+  /**
+   * .merged 恢复后的刷新：磁盘已是合并结果，但内存（视图/管理器）仍是恢复前的
+   * 旧进度。面板打开时先卸载内存状态（currentState 为 null 时 unloadSidecar 不写盘，
+   * 避免旧进度覆盖刚恢复的数据），再由 view.refresh(true) 从磁盘重新载入；
+   * 面板未打开时直接重载 sidecar 到内存。
+   */
+  private async reloadAfterMergedRecovery(anchor: string): Promise<void> {
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_QUIZ).first();
+    const view = leaf?.view as QuizView | undefined;
+    if (view) {
+      try {
+        this.stateManager.setState(null);
+        await this.stateManager.unloadSidecar();
+        await view.refresh(true);
+      } catch (e) {
+        console.error("CSV Quiz: 恢复进度后刷新面板失败", e);
+      }
+      this.refreshMemoryReminder();
+      return;
+    }
+    try {
+      await this.stateManager.loadSidecar(anchor, {
+        favorite: this.settings.defaultFilterFavorite,
+        mastered: this.settings.defaultFilterMastered,
+        repeat: this.settings.defaultFilterRepeat,
+        wrong: this.settings.defaultFilterWrong,
+      });
+    } catch (e) {
+      console.error("CSV Quiz: 恢复进度后重载状态失败", e);
+    }
+    this.refreshMemoryReminder();
   }
 
   /** 「随机考试题数」设置变更后同步视图按钮文案（即时生效）。 */

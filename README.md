@@ -123,8 +123,8 @@ Choose an explicit source type in settings:
 
 每个状态文件保存答题记录、统计、记忆卡片（FSRS）、筛选、收藏/掌握/错题、标签与分类的修改等。**切换题库时各题库状态相互独立、自动恢复，不会互相覆盖。**
 
-- 首次使用复合题库时，会把 `content`、`contents`、`imageFolder` 各自旧 sidecar 的答题/FSRS/meta/累计统计合并到 `manifest.sidecar.json`；旧 sidecar 保留作回退。合并按 manifest 锚点只执行一次，重置进度后不会再次合并。
-  On first use of a composite bank, progress from the sidecars of `content`, `contents`, and `imageFolder` is merged into `manifest.sidecar.json`; the old sidecars are kept for rollback. This runs once per manifest anchor and is not repeated after a reset.
+- 首次使用复合题库时，会把 `content`、`contents`、`imageFolder` 各自旧 sidecar 的答题/FSRS/meta/累计统计合并到 `manifest.sidecar.json`；旧 sidecar 保留作回退。合并是幂等的（每次载入比对，无变化不写盘，重复运行不会翻倍）。
+  On first use of a composite bank, progress from the sidecars of `content`, `contents`, and `imageFolder` is merged into `manifest.sidecar.json`; the old sidecars are kept for rollback. The merge is idempotent (compared on every load, no write when unchanged, no double counting).
 
 State files are named by source type:
 
@@ -134,10 +134,14 @@ State files are named by source type:
 
 Each state file holds answer records, statistics, FSRS cards, filters, favorite/mastered/wrong flags, and tag/category edits. **Switching banks restores each bank's own progress automatically — no overwriting.**
 
+- 保存采用 **mtime + size 门控的读改写**：磁盘未变时直接写内存快照；磁盘被其他设备改动时，先做 base/memory/disk 三方合并再写回。删除通过 tombstone 生效，`dailyAnswers`/对错计数按增量合并，写后会校验字节数并在并发覆盖时重读合并一次
+  Saves use **mtime + size gated read-modify-write**: if the file is unchanged, the memory snapshot is written directly; if another device changed it, a base/memory/disk three-way merge runs before writing. Deletions use tombstones, daily/correct counters merge by delta, and the written byte size is verified with one re-read/merge retry on concurrent overwrite
 - 状态写入为原子操作（临时文件 + 重命名），并每 30 分钟保留一份备份（`.bak`）；状态文件损坏或缺失时自动从备份恢复
   State writes are atomic (temp file + rename) with a 30-minute backup (`.bak`); corrupted or missing state files are auto-recovered from backup
 - **重置进度请使用设置页「重置刷题进度」按钮**；手动删除状态文件会被备份自动恢复
   **Reset progress via the settings page "Reset Progress" button**; manually deleting the state file is auto-restored from backup
+- 同步冲突副本合并后会把副本归档为 `.merged`（不删除）。若需要把归档里的进度重新并入当前题库，执行命令 `从已归档冲突副本恢复进度`；归档会改名为 `.recovered` 保留备查，重复执行不会重复叠加
+  Merged conflict copies are archived as `.merged` (never deleted). To merge those archived snapshots back into the current bank, run the command `从已归档冲突副本恢复进度` (Recover progress from archived conflict copies); archives are renamed to `.recovered` and repeated runs do not double count
 - 升级自旧版本时，旧进度自动迁移至状态文件，原 `data.json` 备份为 `data.json.bak`（如需回滚可手工恢复）
   When upgrading from older versions, legacy progress is migrated automatically and `data.json` is backed up as `data.json.bak` for manual rollback
 

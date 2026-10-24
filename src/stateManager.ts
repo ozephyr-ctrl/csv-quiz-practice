@@ -10,11 +10,17 @@ import {
   SidecarData,
   SidecarMeta,
   SidecarState,
+  SidecarTombstones,
   SidecarWriteQueue,
+  StatsBaseline,
   backupSidecar,
   backupPathFor,
+  cloneSidecarData,
+  countersOfSidecar,
+  findMergedSidecarPaths,
   findSidecarConflictPaths,
   mergeSidecarData,
+  mergeSidecarForWrite,
   normalizeSidecar,
   readSidecar,
   renameOverwriteWithRetry,
@@ -46,6 +52,59 @@ export function computeSaveDelay(
   maxWaitMs: number
 ): number {
   return Math.max(0, Math.min(delay, firstScheduledAt + maxWaitMs - now));
+}
+
+/** 非负有限计数（损坏数据兜底为 0）。 */
+function safeCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, value)
+    : 0;
+}
+
+/**
+ * 每日答题量按日期取 max（而非求和）：冲突副本/内容源迁移重复执行时不翻倍，
+ * 同时保留另一分支独有的日期计数。全部为空时返回 undefined（不写入空对象）。
+ */
+function maxDailyAnswers(
+  ...sources: Array<Record<string, number> | undefined>
+): Record<string, number> | undefined {
+  const out = new Map<string, number>();
+  for (const source of sources) {
+    if (!source) continue;
+    for (const [date, count] of Object.entries(source)) {
+      const value = safeCount(count);
+      out.set(date, Math.max(out.get(date) ?? 0, value));
+    }
+  }
+  if (out.size === 0) return undefined;
+  // Object.fromEntries 对 "__proto__" 等键生成自有属性（不同于赋值）
+  return Object.fromEntries(out);
+}
+
+/** 递归按对象键排序（数组保持顺序），用于生成与键顺序无关的 JSON 比较基准。 */
+function sortKeysDeep(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => sortKeysDeep(item));
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      out[key] = sortKeysDeep((value as Record<string, unknown>)[key]);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * sidecar 的规范化 JSON（键排序 + 可选忽略 state.updatedAt）：合并前后内容
+ * 是否真有变化以它为准，避免「每次运行都因为时间戳/键顺序不同而写盘」。
+ */
+function canonicalSidecarJson(
+  data: SidecarData,
+  opts: { ignoreUpdatedAt?: boolean } = {}
+): string {
+  const copy = cloneSidecarData(data);
+  if (opts.ignoreUpdatedAt !== false) delete copy.state.updatedAt;
+  return JSON.stringify(sortKeysDeep(copy));
 }
 
 class StateWriteQueue {
@@ -157,7 +216,7 @@ export interface SidecarMergeOpResult {
 export interface ManifestSidecarMergeResult {
   status: "merged" | "skipped" | "error";
   reason?:
-    | "target-has-progress"
+    | "no-change"
     | "no-component-progress"
     | "target-corrupt"
     | "write-failed";
@@ -165,6 +224,28 @@ export interface ManifestSidecarMergeResult {
   addedAnswers?: number;
   correctCount?: number;
   wrongCount?: number;
+}
+
+/** 从 `.merged` 归档恢复进度的结果（status=none 时其余字段缺失）。 */
+export interface MergedArchiveRecoveryResult {
+  status: "merged" | "none" | "error";
+  reason?: "target-corrupt" | "write-failed";
+  /** 成功读取并参与合并的归档数（损坏归档跳过不计）。 */
+  archives?: number;
+  /** 并入目标时新增的答题记录条数。 */
+  addedAnswers?: number;
+  /** 成功改名（+".recovered"）的归档数。 */
+  renamed?: number;
+  /** 改名失败的归档数（失败者保留原名，下次可重试）。 */
+  renameFailed?: number;
+}
+
+/** 保存层 base 快照：本次会话最近一次读到/写成的 sidecar 数据 + 其磁盘 stat。
+ *  写盘前用 stat 比对判断磁盘是否被外部改动（未变→快路径，变了→重读磁盘再合并）。 */
+interface SidecarBaseSnapshot {
+  data: SidecarData;
+  mtimeMs: number;
+  size: number;
 }
 
 
@@ -197,8 +278,14 @@ export class StateManager {
     repeat: string;
     wrong: string;
   } = { favorite: "", mastered: "", repeat: "", wrong: "" };
-  /** sidecar 串行写队列（同 contentPath 连续入队合并）。 */
+  /** sidecar 串行写队列（通用 job 链：读-合并-写整段串行，不按路径合并 payload）。 */
   private sidecarQueue: SidecarWriteQueue;
+  /** 每个内容源最近一次读到/写成的 sidecar 快照（写盘前的磁盘变更检测基准）。 */
+  private sidecarBase = new Map<string, SidecarBaseSnapshot>();
+  /** 每个内容源的统计基线（上次读到/写成时 state 的累计计数快照）。 */
+  private statsBaseline = new Map<string, StatsBaseline>();
+  /** 每个内容源本次会话内被权威删除的题 id（阻止磁盘旧数据复活）。 */
+  private tombstones = new Map<string, SidecarTombstones>();
   /** 最近一次从磁盘载入或成功写入当前 sidecar 的时间（epoch ms；0=未知）。
    *  冲突合并时作为 base 的时间戳：必须用磁盘侧真实时间（updatedAt/mtime/本插件
    *  最近成功写入时刻），绝不能用合并时刻 Date.now()——否则 base 条目会以「合并
@@ -209,7 +296,7 @@ export class StateManager {
     this.plugin = plugin;
     this.vault = plugin.app.vault;
     this.writeQueue = new StateWriteQueue(plugin);
-    this.sidecarQueue = new SidecarWriteQueue(this.vault);
+    this.sidecarQueue = new SidecarWriteQueue();
   }
 
   /**
@@ -398,55 +485,68 @@ export class StateManager {
       wrong: string;
     }
   ): Promise<SidecarLoadResult> {
+    // 载入前先等挂起写盘完成：否则未落盘的读-合并-写会与本函数的读互相穿插
+    await this.sidecarQueue.drain();
     // M3: 保存入参默认筛选，供「全部重置」（emptySidecarState）复用
     this.defaultFilters = defaultFilters;
     const result = await readSidecar(this.vault, contentPath);
     if (result.status === "corrupt") {
-      // 不动内存，返回 corrupt 由调用方决定是否重建
+      // 不动内存，返回 corrupt 由调用方决定是否重建（不设置 base 快照）
       this.currentSidecarUpdatedAt = 0;
       return { status: "corrupt", reason: result.reason };
     }
+
+    let baseData: SidecarData;
     if (result.status === "missing") {
-      const state = this.emptySessionState(defaultFilters);
-      state.csvPath = contentPath;
-      this.currentState = state;
-      this.currentMeta = {};
-      this.contentPath = contentPath;
+      baseData = this.emptySidecarData();
       this.currentSidecarUpdatedAt = 0;
-      return { status: "missing", state, meta: {} };
-    }
-    // ok / recovered
-    // base 时间戳取磁盘侧真实时间：文件内 state.updatedAt 优先（有限且 >0），
-    // 旧文件缺失该字段时回退文件 mtime；都拿不到则 0（未知，合并时照传，
-    // 绝不回退 Date.now()，否则旧备份会压掉较新副本）。
-    const diskUpdatedAt = result.data.state.updatedAt;
-    if (
-      typeof diskUpdatedAt === "number" &&
-      Number.isFinite(diskUpdatedAt) &&
-      diskUpdatedAt > 0
-    ) {
-      this.currentSidecarUpdatedAt = diskUpdatedAt;
     } else {
-      // recovered：readSidecar 恢复时已用 writeSidecar 重写 canonical，其 mtime≈now，
-      // 不能代表恢复出的旧内容时间；应取 .bak（实际载入的数据来源）的 mtime。
-      // ok：使用 canonical 的 mtime。
-      const statPath =
-        result.status === "recovered"
-          ? backupPathFor(contentPath)
-          : sidecarPathFor(contentPath);
-      try {
-        const stat = await this.vault.adapter.stat(statPath);
-        const mtime = stat?.mtime;
-        this.currentSidecarUpdatedAt =
-          typeof mtime === "number" && Number.isFinite(mtime) && mtime > 0
-            ? mtime
-            : 0;
-      } catch {
-        this.currentSidecarUpdatedAt = 0;
+      baseData = cloneSidecarData(result.data);
+      // base 时间戳取磁盘侧真实时间：文件内 state.updatedAt 优先（有限且 >0），
+      // 旧文件缺失该字段时回退文件 mtime；都拿不到则 0（未知，合并时照传，
+      // 绝不回退 Date.now()，否则旧备份会压掉较新副本）。
+      const diskUpdatedAt = result.data.state.updatedAt;
+      if (
+        typeof diskUpdatedAt === "number" &&
+        Number.isFinite(diskUpdatedAt) &&
+        diskUpdatedAt > 0
+      ) {
+        this.currentSidecarUpdatedAt = diskUpdatedAt;
+      } else {
+        // recovered：readSidecar 恢复时已用 writeSidecar 重写 canonical，其 mtime≈now，
+        // 不能代表恢复出的旧内容时间；应取 .bak（实际载入的数据来源）的 mtime。
+        // ok：使用 canonical 的 mtime。
+        const statPath =
+          result.status === "recovered"
+            ? backupPathFor(contentPath)
+            : sidecarPathFor(contentPath);
+        try {
+          const stat = await this.vault.adapter.stat(statPath);
+          const mtime = stat?.mtime;
+          this.currentSidecarUpdatedAt =
+            typeof mtime === "number" && Number.isFinite(mtime) && mtime > 0
+              ? mtime
+              : 0;
+        } catch {
+          this.currentSidecarUpdatedAt = 0;
+        }
       }
     }
-    this.currentState = this.stateFromSidecar(result.data.state, contentPath);
-    this.currentMeta = result.data.meta;
+
+    // 记录保存层基准：base 数据（独立副本）+ canonical sidecar 的磁盘 stat
+    const stat = await this.statSidecar(contentPath);
+    this.sidecarBase.set(contentPath, {
+      data: baseData,
+      mtimeMs: stat?.mtimeMs ?? 0,
+      size: stat?.size ?? -1,
+    });
+    this.statsBaseline.set(contentPath, countersOfSidecar(baseData));
+    this.tombstones.set(contentPath, this.emptyTombstones());
+
+    // currentState/currentMeta 为 base 的独立副本（不与 base 快照共享引用）
+    const memoryCopy = cloneSidecarData(baseData);
+    this.currentState = this.stateFromSidecar(memoryCopy.state, contentPath);
+    this.currentMeta = memoryCopy.meta;
     this.contentPath = contentPath;
     return {
       status: result.status,
@@ -457,12 +557,18 @@ export class StateManager {
 
   /**
    * 卸载当前 sidecar：flush（取消挂起防抖 + 立即写盘）后清空
-   * contentPath/currentState/currentMeta。兼容模式下仅清空内存。
+   * contentPath/currentState/currentMeta 及该路径的保存层基准。兼容模式下仅清空内存。
    */
   async unloadSidecar(): Promise<void> {
     this.cancelScheduledSave();
-    if (this.contentPath !== null && this.currentState !== null) {
+    const path = this.contentPath;
+    if (path !== null && this.currentState !== null) {
       await this.persistNow();
+    }
+    if (path !== null) {
+      this.sidecarBase.delete(path);
+      this.statsBaseline.delete(path);
+      this.tombstones.delete(path);
     }
     this.contentPath = null;
     this.currentState = null;
@@ -501,25 +607,69 @@ export class StateManager {
     }
   }
 
-  /** 删除某题的整条 meta（内存）+ 调度保存。currentState 为 null 时仅改内存。 */
+  /** 删除某题的整条 meta（内存）+ 调度保存。currentState 为 null 时仅改内存。
+   *  同时登记 meta tombstone：否则保存层三方合并会把磁盘上的旧 meta 条目并回来。 */
   clearQuestionMeta(questionId: string): void {
     delete this.currentMeta[questionId];
+    if (this.contentPath !== null && this.currentState !== null) {
+      // markMetaDeleted 内已调度保存（含 tombstone 登记）
+      this.markMetaDeleted([questionId]);
+      return;
+    }
     if (this.currentState) {
       this.scheduleSave(this.currentState, SIDECAR_SAVE_DEBOUNCE_MS);
     }
   }
 
-  /** 从 currentState + currentMeta 组装 sidecar 全量数据（version 1）。 */
+  /**
+   * 登记「本次会话权威删除了这些记忆卡片」：保存层合并时据此阻止磁盘旧卡复活。
+   * 只登记 + 调度防抖保存（不立即写盘），由调用方随后从内存删除卡片即可；
+   * tombstone 仅在写盘成功（commitGated/writeRaw）后清空，写失败则保留待下次重试。
+   * contentPath/currentState 均为空（题库未载入/兼容模式）时不登记。
+   */
+  markCardsDeleted(ids: Iterable<string>): void {
+    if (!this.addTombstones("cards", ids)) return;
+    this.scheduleSave(this.currentState!, SIDECAR_SAVE_DEBOUNCE_MS);
+  }
+
+  /** 登记「本次会话权威删除了这些题的 meta」；语义同 markCardsDeleted。 */
+  markMetaDeleted(ids: Iterable<string>): void {
+    if (!this.addTombstones("meta", ids)) return;
+    this.scheduleSave(this.currentState!, SIDECAR_SAVE_DEBOUNCE_MS);
+  }
+
+  /** 把 id 加入当前内容源的指定 tombstone 集合。返回是否登记成功（未载入题库时 false）。 */
+  private addTombstones(
+    kind: "cards" | "meta",
+    ids: Iterable<string>
+  ): boolean {
+    const path = this.contentPath;
+    if (path === null || this.currentState === null) return false;
+    let tomb = this.tombstones.get(path);
+    if (!tomb) {
+      tomb = this.emptyTombstones();
+      this.tombstones.set(path, tomb);
+    }
+    for (const id of ids) {
+      if (typeof id === "string" && id !== "") tomb[kind].add(id);
+    }
+    return true;
+  }
+
+  /** 从 currentState + currentMeta 组装 sidecar 全量数据（version 1）。
+   *  返回深拷贝快照：answered/memoryCards/meta/displayOrder/dailyAnswers 不与
+   *  currentState/currentMeta 共享引用，保存后才修改内存不会污染 base 快照。 */
   private buildSidecarData(): SidecarData {
     const state = this.currentState;
-    return {
+    return cloneSidecarData({
       version: 1,
       meta: this.currentMeta,
       state: state ? this.stateToSidecar(state) : this.emptySidecarState(),
-    };
+    });
   }
 
-  /** QuizSessionState → SidecarState：去掉 csvPath 字段（关联靠文件命名约定，不入 sidecar）。 */
+  /** QuizSessionState → SidecarState：去掉 csvPath 字段（关联靠文件命名约定，不入 sidecar）。
+   *  updatedAt 不在此处写：由保存层 commitGated/writeRaw 在真正落盘时统一打时间戳。 */
   private stateToSidecar(s: QuizSessionState): SidecarState {
     return {
       currentIndex: s.currentIndex,
@@ -544,34 +694,211 @@ export class StateManager {
       memoryPendingNew: s.memoryPendingNew,
       memoryInitialized: s.memoryInitialized,
       dailyAnswers: s.dailyAnswers,
-      // 冲突合并时间戳：每次写盘刷新（供同步冲突合并判定文件新旧）
-      updatedAt: Date.now(),
     };
+  }
+
+  /** 空 sidecar 数据（空 meta + 空状态）。 */
+  private emptySidecarData(): SidecarData {
+    return { version: 1, meta: {}, state: this.emptySidecarState() };
+  }
+
+  /** 空 tombstone 集合（每个内容源一份，写盘成功后清空）。 */
+  private emptyTombstones(): SidecarTombstones {
+    return { answered: new Set(), cards: new Set(), meta: new Set() };
+  }
+
+  /** 把 job 投入串行链（所有读-合并-写必须经此入口，避免并发穿插）。 */
+  private runExclusive<T>(job: () => Promise<T>): Promise<T> {
+    return this.sidecarQueue.enqueue(job);
+  }
+
+  /** 读 canonical sidecar 的磁盘 stat；mtime 非有限正数按 0，size 非有限正数按 -1。 */
+  private async statSidecar(
+    contentPath: string
+  ): Promise<{ mtimeMs: number; size: number } | null> {
+    try {
+      const stat = await this.vault.adapter.stat(sidecarPathFor(contentPath));
+      const mtime = stat?.mtime;
+      const size = stat?.size;
+      return {
+        mtimeMs:
+          typeof mtime === "number" && Number.isFinite(mtime) && mtime > 0
+            ? mtime
+            : 0,
+        size:
+          typeof size === "number" && Number.isFinite(size) && size > 0
+            ? size
+            : -1,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /** 两个 stat 是否可判定为「同一份未被改动的磁盘文件」。未知 stat 一律视为不同。 */
+  private sameStat(
+    a: { mtimeMs: number; size: number } | null,
+    b: { mtimeMs: number; size: number } | null
+  ): boolean {
+    if (!a || !b) return false;
+    return (
+      a.mtimeMs > 0 &&
+      a.size >= 0 &&
+      a.mtimeMs === b.mtimeMs &&
+      a.size === b.size
+    );
+  }
+
+  /**
+   * 门控写盘（sidecar 模式唯一入口）：
+   * - 磁盘 stat 与 base 快照一致 → 磁盘没被外部改过，快路径直接写内存（无需读文件）；
+   * - stat 变了/未知 → 重读磁盘，按 base/memory/disk 三方合并后写回；
+   * - 文件缺失（disk=null）→ 用 base 兜底，绝不当成空状态清库；
+   * - sidecar 损坏 → 提示后按 base 兜底继续保存。
+   */
+  private async writeGated(
+    contentPath: string,
+    memory: SidecarData
+  ): Promise<void> {
+    const base = this.sidecarBase.get(contentPath);
+    const baseline =
+      this.statsBaseline.get(contentPath) ?? countersOfSidecar(memory);
+    const tomb = this.tombstones.get(contentPath) ?? this.emptyTombstones();
+    let disk: SidecarData | null;
+    if (!base) {
+      // 本次会话没有 base（未经过 loadSidecar）：按磁盘现有内容做并集
+      const r = await readSidecar(this.vault, contentPath);
+      disk = r.status === "ok" || r.status === "recovered" ? r.data : null;
+    } else {
+      const st = await this.statSidecar(contentPath);
+      if (this.sameStat(st, base)) {
+        const out = cloneSidecarData(memory);
+        await this.commitGated(contentPath, out, memory, baseline);
+        return;
+      }
+      const r = await readSidecar(this.vault, contentPath);
+      if (r.status === "corrupt") {
+        console.error(
+          "CSV Quiz: sidecar 损坏，保存时按 base 兜底",
+          contentPath,
+          r.reason
+        );
+        new Notice("状态文件损坏，已按内存和上次快照继续保存");
+        disk = null;
+      } else {
+        disk = r.status === "missing" ? null : r.data;
+      }
+    }
+    const out = mergeSidecarForWrite({
+      base: base?.data ?? null,
+      memory,
+      disk,
+      statsBaseline: baseline,
+      tombstones: tomb,
+    });
+    await this.commitGated(contentPath, out, memory, baseline);
+  }
+
+  /**
+   * 落盘 out 并刷新保存层基准。写完比对文件字节数：与实际写入长度不符（写入被
+   * 同步服务截断/追加等）则重读磁盘再合并一次（最多一次），避免直接信任损坏内容。
+   */
+  private async commitGated(
+    contentPath: string,
+    out: SidecarData,
+    memory: SidecarData,
+    baseline: StatsBaseline
+  ): Promise<void> {
+    out.state.updatedAt = Date.now();
+    await writeSidecar(this.vault, contentPath, out);
+    let st = await this.statSidecar(contentPath);
+    const expectedBytes = new TextEncoder().encode(JSON.stringify(out)).length;
+    if (st !== null && st.size > 0 && st.size !== expectedBytes) {
+      // 写后大小不符：重读磁盘合并一次后重写（不再校验第二次，避免死循环）
+      const r = await readSidecar(this.vault, contentPath);
+      const disk = r.status === "ok" || r.status === "recovered" ? r.data : null;
+      const retried = mergeSidecarForWrite({
+        base: out,
+        memory,
+        disk,
+        statsBaseline: baseline,
+        tombstones: this.emptyTombstones(),
+      });
+      retried.state.updatedAt = Date.now();
+      await writeSidecar(this.vault, contentPath, retried);
+      out = retried;
+      st = await this.statSidecar(contentPath);
+    }
+    this.sidecarBase.set(contentPath, {
+      data: cloneSidecarData(out),
+      mtimeMs: st?.mtimeMs ?? 0,
+      size: st?.size ?? -1,
+    });
+    // 基线取 memory 的计数（= 本次已确认写入的会话累计值），下次保存才算增量
+    this.statsBaseline.set(contentPath, countersOfSidecar(memory));
+    this.currentSidecarUpdatedAt = out.state.updatedAt ?? 0;
+    this.tombstones.set(contentPath, this.emptyTombstones());
+  }
+
+  /**
+   * 直接写盘（不合并）：用于「全部重置」、旧进度迁移、冲突/成分合并等权威写。
+   * 成功后 base/baseline 同步为写入内容，tombstone 清空。
+   */
+  private async writeRaw(
+    contentPath: string,
+    data: SidecarData,
+    opts: { authoritative?: boolean } = {}
+  ): Promise<void> {
+    // opts 记录调用方语义（authoritative = 覆盖写）；两条路径行为一致：
+    // 不与磁盘合并，直接以 data 为准。
+    void opts;
+    const out = cloneSidecarData(data);
+    out.state.updatedAt = Date.now();
+    await writeSidecar(this.vault, contentPath, out);
+    const st = await this.statSidecar(contentPath);
+    this.sidecarBase.set(contentPath, {
+      data: cloneSidecarData(out),
+      mtimeMs: st?.mtimeMs ?? 0,
+      size: st?.size ?? -1,
+    });
+    this.statsBaseline.set(contentPath, countersOfSidecar(out));
+    this.currentSidecarUpdatedAt = out.state.updatedAt;
+    this.tombstones.set(contentPath, this.emptyTombstones());
   }
 
   /**
    * 立即落盘当前状态：
-   * - sidecar 模式（contentPath 非 null）→ sidecarQueue.enqueue（同 contentPath 合并）
+   * - sidecar 模式（contentPath 非 null）→ 串行链内门控读改写（stat 未变走快路径）
    * - 兼容模式（contentPath 为 null）→ 写 data.json.quizState
    */
   private async persistNow(): Promise<void> {
     // 入队即视为本插件已提交该状态写盘（供外部修改检测抑制窗口使用）
     this.lastPersistAt = Date.now();
-    if (this.contentPath !== null) {
-      await this.sidecarQueue.enqueue(
-        this.contentPath,
-        this.buildSidecarData()
-      );
-      // 写入成功即刷新磁盘侧时间（供后续冲突合并判定 base 新旧）
-      this.currentSidecarUpdatedAt = Date.now();
+    const path = this.contentPath;
+    if (path !== null) {
+      const memory = this.buildSidecarData();
+      await this.runExclusive(() => this.writeGated(path, memory));
     } else {
       await this.writeQueue.enqueue({ quizState: this.currentState });
     }
   }
 
-  async saveStateImmediately(state: QuizSessionState): Promise<void> {
+  async saveStateImmediately(
+    state: QuizSessionState,
+    opts: { authoritative?: boolean } = {}
+  ): Promise<void> {
     this.cancelScheduledSave();
     this.currentState = state;
+    const path = this.contentPath;
+    if (opts.authoritative && path !== null) {
+      // 权威写（如「重建状态」）：直接覆盖，不保留磁盘旧数据
+      this.lastPersistAt = Date.now();
+      const memory = this.buildSidecarData();
+      await this.runExclusive(() =>
+        this.writeRaw(path, memory, { authoritative: true })
+      );
+      return;
+    }
     await this.persistNow();
   }
 
@@ -623,14 +950,14 @@ export class StateManager {
   async clearState(): Promise<void> {
     this.cancelScheduledSave();
     this.currentState = null;
-    if (this.contentPath !== null) {
-      // 清空 sidecar（保留文件，避免重建）：meta 与状态全清
+    const path = this.contentPath;
+    if (path !== null) {
+      // 清空 sidecar（保留文件，避免重建）：meta 与状态全清。权威写，不与磁盘合并。
       this.currentMeta = {};
-      await this.sidecarQueue.enqueue(
-        this.contentPath,
-        this.buildSidecarData()
+      const empty = this.emptySidecarData();
+      await this.runExclusive(() =>
+        this.writeRaw(path, empty, { authoritative: true })
       );
-      this.currentSidecarUpdatedAt = Date.now();
     } else {
       await this.writeQueue.enqueue({ quizState: null });
     }
@@ -733,12 +1060,19 @@ export class StateManager {
       }
     }
 
-    // 旧版无 meta 概念：meta 写入空层；state 原样搬入 sidecar
-    await writeSidecar(this.vault, contentPath, {
-      version: 1,
-      meta: {},
-      state: this.stateToSidecar(normalized),
-    });
+    // 旧版无 meta 概念：meta 写入空层；state 原样搬入 sidecar（权威覆盖写，不合并磁盘）
+    // writeRaw 成功后会同步 sidecarBase/statsBaseline，避免后续门控保存拿旧 base 误判。
+    await this.runExclusive(() =>
+      this.writeRaw(
+        contentPath,
+        {
+          version: 1,
+          meta: {},
+          state: this.stateToSidecar(normalized),
+        },
+        { authoritative: true }
+      )
+    );
 
     // S4: 顺序依赖——必须先写完整 data.json 备份、成功后再清空 quizState。
     // 若顺序颠倒（先清空再备份），第二步失败时 data.json 已清空且无备份，
@@ -785,22 +1119,42 @@ export class StateManager {
    * （meta 以 entry.ts/源时间戳取新，记忆卡片以 lastReview 取新、缺 lastReview 回退
    * ts/源时间戳，完全平局当前优先）。currentState 的 answeredQuestions/memoryCards 原地更新内容
    * （保持对象引用，调用方持有的状态对象同步可见）；currentMeta 整体替换为合并结果。
+   * dailyAnswers 按日期取 max(current, 各副本)，避免重复合并不翻倍；memoryInitialized 取 OR。
    * 正确/错误计数不在合并内改写（统计口径是累计作答事件数，整体重算会篡改历史；
    * 由调用方按 addedAnswerIds 为新并入的答案逐条补计）。
+   * 整个「检测 → 读副本 → 合并 → 写回 → 归档」在串行链内完成，不会与门控保存穿插。
    */
   async mergeSidecarConflicts(): Promise<SidecarMergeOutcome> {
-    if (this.contentPath === null || this.currentState === null) {
+    const path = this.contentPath;
+    const state = this.currentState;
+    if (path === null || state === null) {
       return { status: "none" };
     }
+    // 检测副本 → 读副本 → 合并 → 写回 → 归档 整段串行；实现体不得再入队（避免死锁）
+    return this.runExclusive(async () => {
+      // 排队期间题库已切换/卸载：不把旧状态写到新路径
+      if (this.contentPath !== path || this.currentState !== state) {
+        return { status: "none" };
+      }
+      return this.mergeSidecarConflictsImpl(path);
+    });
+  }
+
+  /** mergeSidecarConflicts 的实现体（须在 runExclusive 内调用，不可自行入队）。 */
+  private async mergeSidecarConflictsImpl(
+    path: string
+  ): Promise<SidecarMergeOutcome> {
+    const state = this.currentState;
+    if (state === null) return { status: "none" };
     const conflictPaths = await this.detectSidecarConflicts();
     if (conflictPaths.length === 0) return { status: "none" };
 
     // 逐个读取冲突副本：解析失败/结构非法的跳过并计数（不阻塞其余副本合并）
     const sources: SidecarConflictSource[] = [];
     let unreadable = 0;
-    for (const path of conflictPaths) {
+    for (const conflictPath of conflictPaths) {
       try {
-        const content = await this.vault.adapter.read(path);
+        const content = await this.vault.adapter.read(conflictPath);
         const data = normalizeSidecar(JSON.parse(content));
         if (!data) {
           unreadable++;
@@ -810,12 +1164,12 @@ export class StateManager {
         let tsMs =
           typeof data.state.updatedAt === "number" ? data.state.updatedAt : 0;
         if (!tsMs) {
-          const stat = await this.vault.adapter.stat(path);
+          const stat = await this.vault.adapter.stat(conflictPath);
           tsMs = stat?.mtime ?? 0;
         }
-        sources.push({ path, data, tsMs });
+        sources.push({ path: conflictPath, data, tsMs });
       } catch (e) {
-        console.error("CSV Quiz: 读取冲突副本失败", path, e);
+        console.error("CSV Quiz: 读取冲突副本失败", conflictPath, e);
         unreadable++;
       }
     }
@@ -832,9 +1186,24 @@ export class StateManager {
       sources
     );
 
+    // 每日答题量：按日期取 max(current, 各冲突副本)，不求和——重复合并不会翻倍，
+    // 也不会丢掉另一分支独有的日期计数；当前缺失的日期由副本补入。
+    // correct/wrong 保持 base 计数（视图按 addStatsForAnswers/addedAnswerIds 继续补新增
+    // answered），不在合并里重算，避免把累计作答事件数改成唯一题数。
+    const mergedDaily = maxDailyAnswers(
+      merge.data.state.dailyAnswers,
+      ...sources.map((s) => s.data.state.dailyAnswers)
+    );
+    const memoryInitialized =
+      merge.data.state.memoryInitialized === true ||
+      sources.some((s) => s.data.state.memoryInitialized === true);
+    merge.data.state.dailyAnswers = mergedDaily;
+    merge.data.state.memoryInitialized = memoryInitialized;
+
     // 写回内存：answeredQuestions/memoryCards 原地替换内容（保持引用，视图持有的
-    // effectiveState/loadResult.state 与本 currentState 为同一对象）
+    // effectiveState/loadResult.state 与本 currentState 为同一对象）；daily/初始化标记整体更新
     const st = this.currentState;
+    if (st === null) return { status: "none" };
     for (const key of Object.keys(st.answeredQuestions)) {
       delete st.answeredQuestions[key];
     }
@@ -845,26 +1214,31 @@ export class StateManager {
       Object.assign(merged, merge.data.state.memoryCards);
       st.memoryCards = merged;
     }
+    st.dailyAnswers = mergedDaily;
+    st.memoryInitialized = memoryInitialized;
     this.currentMeta = merge.data.meta;
 
-    // 合并属关键操作：绕过防抖直接落盘；成功后刷新磁盘侧时间
-    await this.sidecarQueue.enqueue(this.contentPath, this.buildSidecarData());
-    this.currentSidecarUpdatedAt = Date.now();
+    // 合并属关键操作：绕过防抖直接落盘。这里用 writeRaw 权威覆盖而非 writeGated：
+    // 本方法已在串行链内，合并结果已是「base ∪ 副本（daily 取 max）」；writeGated 的
+    // 增量语义会再叠加一次每日/计数导致翻倍。代价是：从读 base 到写盘之间若磁盘被外部
+    // 改动，这些改动会被覆盖（窗口极短，且冲突合并本身即权威操作）。
+    // writeRaw 成功后同步刷新 base/baseline，tombstone 清空。
+    await this.writeRaw(path, this.buildSidecarData(), { authoritative: true });
 
     // 归档冲突副本（改名保留备查；单个失败不阻塞其余）
     let archived = 0;
     let archiveFailed = 0;
-    for (const path of conflictPaths) {
+    for (const conflictPath of conflictPaths) {
       try {
-        const dest = path + SIDECAR_MERGED_SUFFIX;
+        const dest = conflictPath + SIDECAR_MERGED_SUFFIX;
         // 重试式覆盖归档：Windows 同步目录下 remove+rename 易 EBUSY，走桌面原子 rename/兜底重试。
         // 预算收紧到 3s：多个副本串行归档时不因单副本 30s 重试阻塞视图渲染（失败者下次再试）
-        await renameOverwriteWithRetry(this.vault, path, dest, {
+        await renameOverwriteWithRetry(this.vault, conflictPath, dest, {
           budgetMs: 3000,
         });
         archived++;
       } catch (e) {
-        console.error("CSV Quiz: 归档冲突副本失败", path, e);
+        console.error("CSV Quiz: 归档冲突副本失败", conflictPath, e);
         archiveFailed++;
       }
     }
@@ -912,17 +1286,23 @@ export class StateManager {
    */
   async archiveSidecar(contentPath: string): Promise<void> {
     if (contentPath === "") return;
-    const srcPath = sidecarPathFor(contentPath);
-    const dstPath = `${srcPath}.merged`;
-    try {
-      if (!(await this.vault.adapter.exists(srcPath))) return;
-      if (await this.vault.adapter.exists(dstPath)) {
-        await this.vault.adapter.remove(dstPath);
+    await this.runExclusive(async () => {
+      const srcPath = sidecarPathFor(contentPath);
+      const dstPath = `${srcPath}.merged`;
+      try {
+        if (!(await this.vault.adapter.exists(srcPath))) return;
+        if (await this.vault.adapter.exists(dstPath)) {
+          await this.vault.adapter.remove(dstPath);
+        }
+        await this.vault.adapter.rename(srcPath, dstPath);
+        // 归档后该内容源已无 canonical sidecar：保存层基准失效，避免下次写盘误判未变
+        this.sidecarBase.delete(contentPath);
+        this.statsBaseline.delete(contentPath);
+        this.tombstones.delete(contentPath);
+      } catch (e) {
+        console.error("CSV Quiz: 归档 sidecar 失败", srcPath, e);
       }
-      await this.vault.adapter.rename(srcPath, dstPath);
-    } catch (e) {
-      console.error("CSV Quiz: 归档 sidecar 失败", srcPath, e);
-    }
+    });
   }
 
   /**
@@ -946,7 +1326,15 @@ export class StateManager {
     if (fromPath === toPath) {
       return { status: "skipped", reason: "same-path" };
     }
+    // 读源 + 读目标 + 写目标必须整体串行（避免与门控保存互相穿插）
+    return this.runExclusive(() => this.transferSidecarImpl(fromPath, toPath));
+  }
 
+  /** transferSidecar 的实现体（须在 runExclusive 内调用，不可自行入队）。 */
+  private async transferSidecarImpl(
+    fromPath: string,
+    toPath: string
+  ): Promise<SidecarMergeOpResult> {
     try {
       const fromResult = await readSidecar(this.vault, fromPath);
       if (fromResult.status === "missing") {
@@ -975,7 +1363,7 @@ export class StateManager {
         return { status: "error", reason: toResult.reason };
       }
       if (toResult.status === "missing") {
-        await writeSidecar(this.vault, toPath, fromData);
+        await this.writeRaw(toPath, fromData);
         return { status: "copied" };
       }
 
@@ -984,7 +1372,26 @@ export class StateManager {
       const merged = mergeSidecarData(toResult.data, toTs, [
         { path: sidecarPathFor(fromPath), data: fromData, tsMs: fromTs },
       ]);
-      await writeSidecar(this.vault, toPath, merged.data);
+      // 幂等口径：同一源重复迁移时，计数/每日不能翻倍。
+      // - correct/wrong 取 max(target, from)：累计精确值无法从快照反推，保留高位；
+      // - daily 逐日取 max；memoryInitialized 取 OR。
+      merged.data.state.correctCount = Math.max(
+        safeCount(toResult.data.state.correctCount),
+        safeCount(fromData.state.correctCount)
+      );
+      merged.data.state.wrongCount = Math.max(
+        safeCount(toResult.data.state.wrongCount),
+        safeCount(fromData.state.wrongCount)
+      );
+      merged.data.state.dailyAnswers = maxDailyAnswers(
+        toResult.data.state.dailyAnswers,
+        fromData.state.dailyAnswers
+      );
+      merged.data.state.memoryInitialized =
+        toResult.data.state.memoryInitialized === true ||
+        fromData.state.memoryInitialized === true;
+      // writeRaw 成功后会同步刷新目标路径的 base/baseline（重复迁移以新 base 为准）
+      await this.writeRaw(toPath, merged.data);
       return { status: "merged" };
     } catch (e: unknown) {
       const reason = e instanceof Error ? e.message : String(e);
@@ -1011,26 +1418,29 @@ export class StateManager {
       return { status: "skipped", reason: "same-path" };
     }
 
-    const result = await this.transferSidecar(imagePath, csv);
-    if (result.status !== "copied" && result.status !== "merged") {
-      return result;
-    }
+    // 转移 + 归档整体串行：transferSidecarImpl 不自行入队，避免死锁
+    return this.runExclusive(async () => {
+      const result = await this.transferSidecarImpl(imagePath, csv);
+      if (result.status !== "copied" && result.status !== "merged") {
+        return result;
+      }
 
-    // 归档源 sidecar（重试式覆盖：目标 .merged 已存在时先删再改名）
-    const srcPath = sidecarPathFor(imagePath);
-    try {
-      if (!(await this.vault.adapter.exists(srcPath))) return result;
-      await renameOverwriteWithRetry(
-        this.vault,
-        srcPath,
-        srcPath + SIDECAR_MERGED_SUFFIX,
-        { budgetMs: 3000 }
-      );
-    } catch (e) {
-      // 归档失败只记日志：合并已成功，原文件保留可下次重试
-      console.error("CSV Quiz: 归档图片内容源 sidecar 失败", srcPath, e);
-    }
-    return result;
+      // 归档源 sidecar（重试式覆盖：目标 .merged 已存在时先删再改名）
+      const srcPath = sidecarPathFor(imagePath);
+      try {
+        if (!(await this.vault.adapter.exists(srcPath))) return result;
+        await renameOverwriteWithRetry(
+          this.vault,
+          srcPath,
+          srcPath + SIDECAR_MERGED_SUFFIX,
+          { budgetMs: 3000 }
+        );
+      } catch (e) {
+        // 归档失败只记日志：合并已成功，原文件保留可下次重试
+        console.error("CSV Quiz: 归档图片内容源 sidecar 失败", srcPath, e);
+      }
+      return result;
+    });
   }
 
   /** sidecar 是否含用户进度（answered / memoryCards / 对错计数 / meta 任一非空）。 */
@@ -1051,10 +1461,10 @@ export class StateManager {
    * manifest.sidecar.json 是新建空状态，组成 sidecar 里的进度全部不可见）。
    *
    * - 目标缺失 → 以空状态为 base；目标损坏 → error（不覆盖，避免丢数据）
-   * - 目标已有任何进度 → skipped/target-has-progress（避免重复累计）
-   * - 组成按写入时间参与 mergeSidecarData（answered/meta/memoryCards 并集，base 优先），
-   *   对错计数/每日答题量按累计口径求和，会话字段（displayOrder/currentIndex/filter*）
-   *   一律保留目标值（缺失时为空，后续由视图重建）
+   * - 目标已有进度也继续合并（幂等）：answered/meta/memoryCards 为并集，
+   *   计数/每日按「组件求和后与目标取 max」合并，重复运行不翻倍
+   * - 会话字段（displayOrder/currentIndex/filter*）一律保留目标值（缺失时为空，后续由视图重建）
+   * - 合并结果与目标规范化 JSON 完全一致 → skipped/no-change（不写盘）
    * - 不删除/不归档任何组成 sidecar（保留回退数据源）
    */
   async mergeManifestComponentSidecars(
@@ -1086,9 +1496,6 @@ export class StateManager {
     } else {
       targetData = targetResult.data;
       targetTs = await this.sidecarTimestampMs(target, targetResult.data);
-      if (this.sidecarHasProgress(targetData)) {
-        return { status: "skipped", reason: "target-has-progress" };
-      }
     }
 
     // 组成去重（排除空与 target 自身），只收「有进度」的 sidecar
@@ -1122,24 +1529,49 @@ export class StateManager {
 
     const merge = mergeSidecarData(targetData, targetTs, components);
 
-    // 累计口径求和：对错计数 / 每日答题量（同一题可多次作答，不能按唯一题重算）
-    let correctCount = targetData.state.correctCount;
-    let wrongCount = targetData.state.wrongCount;
-    const dailyAnswers: Record<string, number> = {
-      ...(targetData.state.dailyAnswers ?? {}),
-    };
-    let memoryInitialized = targetData.state.memoryInitialized === true;
+    // 幂等口径：组件侧先按组件求和（累计作答事件口径），再与 target 取 max。
+    // 重复运行同一批组件不会翻倍；target 已有更高计数/日期值时保留高位。
+    let sumCorrect = 0;
+    let sumWrong = 0;
+    let anyComponentInitialized = false;
+    const sumDaily = new Map<string, number>();
     for (const component of components) {
-      correctCount += component.data.state.correctCount;
-      wrongCount += component.data.state.wrongCount;
-      memoryInitialized =
-        memoryInitialized || component.data.state.memoryInitialized === true;
+      sumCorrect += safeCount(component.data.state.correctCount);
+      sumWrong += safeCount(component.data.state.wrongCount);
+      anyComponentInitialized =
+        anyComponentInitialized ||
+        component.data.state.memoryInitialized === true;
       for (const [date, count] of Object.entries(
         component.data.state.dailyAnswers ?? {}
       )) {
-        dailyAnswers[date] = (dailyAnswers[date] ?? 0) + count;
+        sumDaily.set(date, (sumDaily.get(date) ?? 0) + safeCount(count));
       }
     }
+    const correctCount = Math.max(
+      safeCount(targetData.state.correctCount),
+      sumCorrect
+    );
+    const wrongCount = Math.max(
+      safeCount(targetData.state.wrongCount),
+      sumWrong
+    );
+    const dailyAnswers: Record<string, number> = {};
+    for (const [date, count] of Object.entries(
+      targetData.state.dailyAnswers ?? {}
+    )) {
+      dailyAnswers[date] = safeCount(count);
+    }
+    for (const [date, count] of sumDaily) {
+      const targetCount = Object.prototype.hasOwnProperty.call(
+        dailyAnswers,
+        date
+      )
+        ? dailyAnswers[date]
+        : 0;
+      dailyAnswers[date] = Math.max(targetCount, count);
+    }
+    const memoryInitialized =
+      anyComponentInitialized || targetData.state.memoryInitialized === true;
 
     const mergedData: SidecarData = {
       version: 1,
@@ -1149,15 +1581,29 @@ export class StateManager {
         // 会话字段（displayOrder/currentIndex/filter*）取自 base（target）
         correctCount,
         wrongCount,
+        // 双方都无每日记录时保持 target 原值（undefined 不写成空对象）
         dailyAnswers:
-          Object.keys(dailyAnswers).length > 0 ? dailyAnswers : undefined,
-        memoryInitialized,
-        updatedAt: Date.now(),
+          Object.keys(dailyAnswers).length > 0
+            ? dailyAnswers
+            : targetData.state.dailyAnswers,
+        // OR 语义；两方都不是 true 时保留 target 原值（含 undefined）
+        memoryInitialized: memoryInitialized
+          ? true
+          : targetData.state.memoryInitialized,
+        updatedAt: targetData.state.updatedAt,
       },
     };
 
+    // 无变化判断：忽略 updatedAt 后规范化 JSON 完全相同 → 不写盘（重复运行零副作用）
+    if (
+      canonicalSidecarJson(mergedData) === canonicalSidecarJson(targetData)
+    ) {
+      return { status: "skipped", reason: "no-change" };
+    }
+    mergedData.state.updatedAt = Date.now();
+
     try {
-      await writeSidecar(this.vault, target, mergedData);
+      await this.runExclusive(() => this.writeRaw(target, mergedData));
     } catch (e: unknown) {
       console.error("CSV Quiz: 写入 manifest 合并后 sidecar 失败", target, e);
       return { status: "error", reason: "write-failed" };
@@ -1170,6 +1616,184 @@ export class StateManager {
       correctCount,
       wrongCount,
     };
+  }
+
+  /**
+   * 从 `.merged` 归档（冲突副本合并后保留的快照）恢复进度：把每个归档按
+   * mergeSidecarData 并入目标 sidecar，成功后把归档改名为 `+".recovered"`
+   * （幂等：第二次运行时已无 `.merged` 可匹配）。整个过程在串行链内完成。
+   *
+   * - 目标损坏 → error/target-corrupt（不写、不改名）
+   * - 目标缺失 → 用空状态（默认筛选取自 defaultFilters）作 base
+   * - 坏归档跳过（不阻塞其余归档）
+   * - correct/wrong 保持目标当前值（累计作答事件数无法从快照反推）；
+   *   dailyAnswers 逐日取 max；memoryInitialized 取 OR
+   * - 合并结果与目标一致时不写盘（只改名归档）
+   * - 写盘失败 → error/write-failed（不改名，保留归档待下次重试）
+   */
+  async recoverMergedSidecars(
+    targetAnchor: string,
+    componentAnchors: string[],
+    defaultFilters: { favorite: string; mastered: string; repeat: string; wrong: string }
+  ): Promise<MergedArchiveRecoveryResult> {
+    const target = targetAnchor.trim();
+    if (target === "") return { status: "none" };
+
+    // 读归档 → 合并 → 写回 → 改名整段串行，避免与门控保存穿插
+    return this.runExclusive(async () => {
+      // 1. 收集各锚点目录下的 .merged 归档（路径去重）
+      const anchors: string[] = [];
+      const seenAnchors = new Set<string>();
+      const pushAnchor = (raw: string): void => {
+        const value = raw.trim();
+        if (value === "" || seenAnchors.has(value)) return;
+        seenAnchors.add(value);
+        anchors.push(value);
+      };
+      pushAnchor(target);
+      for (const raw of componentAnchors) pushAnchor(raw);
+
+      const archivePaths: string[] = [];
+      const seenPaths = new Set<string>();
+      const dirListings = new Map<string, string[]>();
+      for (const anchor of anchors) {
+        const dir = anchor.includes("/")
+          ? anchor.slice(0, anchor.lastIndexOf("/"))
+          : "/";
+        let files = dirListings.get(dir);
+        if (!files) {
+          try {
+            const listing = await this.vault.adapter.list(dir);
+            files = listing.files;
+          } catch (e) {
+            console.error("CSV Quiz: 列目录查找 .merged 归档失败", dir, e);
+            files = [];
+          }
+          dirListings.set(dir, files);
+        }
+        for (const archivePath of findMergedSidecarPaths(files, anchor)) {
+          if (seenPaths.has(archivePath)) continue;
+          seenPaths.add(archivePath);
+          archivePaths.push(archivePath);
+        }
+      }
+      if (archivePaths.length === 0) return { status: "none" };
+
+      // 2. 读目标（损坏不写不改名；缺失用空状态兜底）
+      const targetResult = await readSidecar(this.vault, target);
+      if (targetResult.status === "corrupt") {
+        console.error(
+          "CSV Quiz: 目标 sidecar 损坏，跳过 .merged 归档恢复",
+          target,
+          targetResult.reason
+        );
+        return { status: "error", reason: "target-corrupt" };
+      }
+      let base: SidecarData;
+      let baseTs = 0;
+      if (targetResult.status === "missing") {
+        const { csvPath: _csvPath, ...emptyState } =
+          this.emptySessionState(defaultFilters);
+        void _csvPath;
+        base = { version: 1, meta: {}, state: { ...emptyState } };
+      } else {
+        base = targetResult.data;
+        baseTs = await this.sidecarTimestampMs(target, base);
+      }
+
+      // 3. 逐个读归档（坏归档跳过）
+      const sources: SidecarConflictSource[] = [];
+      for (const archivePath of archivePaths) {
+        try {
+          const content = await this.vault.adapter.read(archivePath);
+          const data = normalizeSidecar(JSON.parse(content));
+          if (!data) continue;
+          let tsMs =
+            typeof data.state.updatedAt === "number" &&
+            Number.isFinite(data.state.updatedAt)
+              ? data.state.updatedAt
+              : 0;
+          if (!tsMs) {
+            try {
+              const stat = await this.vault.adapter.stat(archivePath);
+              const mtime = stat?.mtime;
+              tsMs =
+                typeof mtime === "number" && Number.isFinite(mtime) ? mtime : 0;
+            } catch {
+              tsMs = 0;
+            }
+          }
+          sources.push({ path: archivePath, data, tsMs });
+        } catch (e) {
+          console.error("CSV Quiz: 读取 .merged 归档失败", archivePath, e);
+        }
+      }
+
+      // 4. 合并：answered/meta/cards 并集；correct/wrong 保持目标；daily 取 max
+      const merge = mergeSidecarData(base, baseTs, sources);
+      const dailyAnswers = maxDailyAnswers(
+        base.state.dailyAnswers,
+        ...sources.map((source) => source.data.state.dailyAnswers)
+      );
+      const memoryInitialized =
+        base.state.memoryInitialized === true ||
+        sources.some((source) => source.data.state.memoryInitialized === true);
+      const merged: SidecarData = {
+        version: 1,
+        meta: merge.data.meta,
+        state: {
+          ...merge.data.state,
+          // 累计作答事件数无法从快照反推 → 保持目标当前值
+          correctCount: base.state.correctCount,
+          wrongCount: base.state.wrongCount,
+          dailyAnswers,
+          memoryInitialized: memoryInitialized
+            ? true
+            : base.state.memoryInitialized,
+          updatedAt: base.state.updatedAt,
+        },
+      };
+
+      // 5. 有内容变化才写盘（避免无变化时白写；写失败不改名）
+      const changed =
+        canonicalSidecarJson(merged) !== canonicalSidecarJson(base);
+      if (changed) {
+        merged.state.updatedAt = Date.now();
+        try {
+          await this.writeRaw(target, merged, { authoritative: true });
+        } catch (e) {
+          console.error("CSV Quiz: 写入 .merged 恢复结果失败", target, e);
+          return { status: "error", reason: "write-failed" };
+        }
+      }
+
+      // 6. 归档改名为 .recovered（已存在则加时间戳后缀；失败计数不改变 status）
+      let renamed = 0;
+      let renameFailed = 0;
+      for (const archivePath of archivePaths) {
+        let dest = archivePath + ".recovered";
+        try {
+          if (await this.vault.adapter.exists(dest)) {
+            dest = `${archivePath}.recovered.${Date.now()}`;
+          }
+          await renameOverwriteWithRetry(this.vault, archivePath, dest, {
+            budgetMs: 3000,
+          });
+          renamed++;
+        } catch (e) {
+          console.error("CSV Quiz: 归档 .merged 改名失败", archivePath, e);
+          renameFailed++;
+        }
+      }
+
+      return {
+        status: "merged",
+        archives: sources.length,
+        addedAnswers: merge.addedAnswers,
+        renamed,
+        renameFailed,
+      };
+    });
   }
 
   /**
