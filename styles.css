@@ -1317,10 +1317,6 @@
   width: 100%;
   min-height: 44px;
   font-weight: 600;
-  /* 不支持 color-mix 的旧版本回退到主题按钮底色 */
-  background: var(--background-secondary);
-  border-color: var(--background-modifier-border);
-  color: var(--text-normal);
   background: color-mix(
     in srgb,
     var(--csv-image-rate-color) 12%,
@@ -1534,10 +1530,6 @@
   width: 100%;
   min-height: 44px;
   font-weight: 600;
-  /* 不支持 color-mix 的旧版本回退到主题按钮底色 */
-  background: var(--background-secondary);
-  border-color: var(--background-modifier-border);
-  color: var(--text-normal);
   background: color-mix(
     in srgb,
     var(--csv-image-rate-color) 12%,
@@ -1739,14 +1731,14 @@
 /* 行内长链接 / 公式：不越界 */
 .csv-quiz-short-stem.markdown-rendered a,
 .csv-quiz-short-answer.markdown-rendered a,
-.csv-quiz-short-stem.markdown-rendered mjx-container,
-.csv-quiz-short-answer.markdown-rendered mjx-container {
+.csv-quiz-short-stem.markdown-rendered .MathJax,
+.csv-quiz-short-answer.markdown-rendered .MathJax {
   max-width: 100%;
   overflow-wrap: anywhere;
 }
 
-.csv-quiz-short-stem.markdown-rendered mjx-container,
-.csv-quiz-short-answer.markdown-rendered mjx-container {
+.csv-quiz-short-stem.markdown-rendered .MathJax,
+.csv-quiz-short-answer.markdown-rendered .MathJax {
   overflow-x: auto;
 }
 

@@ -95,7 +95,7 @@ export interface QuizSessionState {
 
 export interface PluginSettings {
   csvPath: string;
-  /** @deprecated 旧版单一图片文件夹设置；3.6.x 迁移后不再作为主入口。 */
+  /** 旧版单一图片文件夹设置（仅迁移/兼容读取）；3.6.x 后主入口为 bankFolder。 */
   imageFolder: string;
   /** 题库文件夹（vault 相对路径；"/"=vault 根；""=未设置）。 */
   bankFolder: string;

@@ -190,11 +190,13 @@ const DEFAULT_RENAME_RETRY_BUDGET_MS = 30000;
 const DEFAULT_RENAME_RETRY_BASE_DELAY_MS = 50;
 const DEFAULT_RENAME_RETRY_MAX_DELAY_MS = 250;
 
-/** 睡眠指定毫秒（window.setTimeout 保证 popout 兼容；vitest 为 node 环境无 window，退回 globalThis）。 */
+/** 睡眠指定毫秒（window.setTimeout 保证 popout 兼容；vitest node 环境无 window，退回全局定时器）。 */
 function sleep(ms: number): Promise<void> {
-  const host: { setTimeout: (cb: () => void, ms: number) => number } =
-    typeof window !== "undefined" ? window : globalThis;
-  return new Promise<void>((resolve) => host.setTimeout(resolve, ms));
+  const timer: (cb: () => void, ms: number) => unknown =
+    typeof window !== "undefined" ? window.setTimeout.bind(window) : setTimeout;
+  return new Promise<void>((resolve) => {
+    timer(resolve, ms);
+  });
 }
 
 /**
@@ -206,11 +208,8 @@ function sleep(ms: number): Promise<void> {
  */
 let fsPromisesCache: typeof import("fs").promises | null | undefined;
 async function loadNodeFsPromises(): Promise<typeof import("fs").promises | null> {
+  if (!Platform.isDesktop) return null;
   if (fsPromisesCache !== undefined) return fsPromisesCache;
-  if (!Platform.isDesktop) {
-    fsPromisesCache = null;
-    return null;
-  }
   try {
     fsPromisesCache = (await import("fs")).promises;
   } catch {
@@ -878,7 +877,7 @@ export function cloneSidecarData(data: SidecarData): SidecarData {
         ]);
   return {
     version: 1,
-    meta: Object.fromEntries(metaEntries) as Record<string, SidecarMeta>,
+    meta: Object.fromEntries(metaEntries),
     state: {
       ...state,
       displayOrder: state.displayOrder.slice(),
@@ -886,7 +885,7 @@ export function cloneSidecarData(data: SidecarData): SidecarData {
       memoryCards:
         cardEntries === undefined
           ? undefined
-          : (Object.fromEntries(cardEntries) as Record<string, MemoryCard>),
+          : Object.fromEntries(cardEntries),
       memoryPendingNew:
         state.memoryPendingNew === undefined
           ? undefined

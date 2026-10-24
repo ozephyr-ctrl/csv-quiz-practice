@@ -61,7 +61,7 @@ export class ChoiceModal extends Modal {
       btn.addEventListener("click", () => this.choose(opt.value));
 
       if (opt.description) {
-        item.createEl("div", {
+        item.createDiv({
           text: opt.description,
           cls: "csv-quiz-modal-option-desc",
         });
@@ -211,7 +211,7 @@ export class TagPickerModal extends Modal {
       cb.checked = currentTagSet.has(tag);
       checkboxes.push(cb);
 
-      item.createEl("span", {
+      item.createSpan({
         text: tag,
         cls: "csv-quiz-tag-picker-label",
       });

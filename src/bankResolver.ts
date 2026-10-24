@@ -276,8 +276,9 @@ export function parseBankManifest(
       };
     }
     const seen = new Set<string>([contentRel.path]);
+    const values: string[] = [];
     for (let i = 0; i < contentsRaw.length; i += 1) {
-      const item = contentsRaw[i];
+      const item: unknown = contentsRaw[i];
       if (typeof item !== "string" || item.trim() === "") {
         return {
           status: "error",
@@ -305,8 +306,9 @@ export function parseBankManifest(
       }
       seen.add(rel.path);
       contentsRels.push(rel.path);
+      values.push(item.trim());
     }
-    contentsValues = contentsRaw.map((item) => (item as string).trim());
+    contentsValues = values;
   }
 
   // ---- imageFolder（可选） ----

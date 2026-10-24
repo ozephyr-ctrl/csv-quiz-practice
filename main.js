@@ -537,7 +537,7 @@ var ChoiceModal = class extends import_obsidian.Modal {
       });
       btn.addEventListener("click", () => this.choose(opt.value));
       if (opt.description) {
-        item.createEl("div", {
+        item.createDiv({
           text: opt.description,
           cls: "csv-quiz-modal-option-desc"
         });
@@ -649,7 +649,7 @@ var TagPickerModal = class extends import_obsidian.Modal {
       });
       cb.checked = currentTagSet.has(tag);
       checkboxes.push(cb);
-      item.createEl("span", {
+      item.createSpan({
         text: tag,
         cls: "csv-quiz-tag-picker-label"
       });
@@ -1242,16 +1242,15 @@ var DEFAULT_RENAME_RETRY_BUDGET_MS = 3e4;
 var DEFAULT_RENAME_RETRY_BASE_DELAY_MS = 50;
 var DEFAULT_RENAME_RETRY_MAX_DELAY_MS = 250;
 function sleep(ms) {
-  const host = typeof window !== "undefined" ? window : globalThis;
-  return new Promise((resolve) => host.setTimeout(resolve, ms));
+  const timer = typeof window !== "undefined" ? window.setTimeout.bind(window) : setTimeout;
+  return new Promise((resolve) => {
+    timer(resolve, ms);
+  });
 }
 var fsPromisesCache;
 async function loadNodeFsPromises() {
+  if (!import_obsidian2.Platform.isDesktop) return null;
   if (fsPromisesCache !== void 0) return fsPromisesCache;
-  if (!import_obsidian2.Platform.isDesktop) {
-    fsPromisesCache = null;
-    return null;
-  }
   try {
     fsPromisesCache = (await import("fs")).promises;
   } catch (e) {
@@ -3469,75 +3468,75 @@ var _ProgressModal = class _ProgressModal extends import_obsidian5.Modal {
       const a = answeredQuestions[q.id];
       const isImage = isImageQuestion(q);
       const ratingLabel = a !== void 0 ? imageRatingLabel(a) : null;
-      const row = createEl("div", { cls: "csv-quiz-progress-row" });
+      const row = createDiv({ cls: "csv-quiz-progress-row" });
       row.dataset.id = q.id;
       if (q.id === currentId) row.addClass("csv-quiz-progress-row-current");
       if (isImage) {
         const num = typeof q.imageNumber === "number" && Number.isFinite(q.imageNumber) ? Math.max(1, Math.trunc(q.imageNumber)) : 1;
-        row.createEl("span", {
+        row.createSpan({
           text: `\u56FE\u7247\u9898 #${num}`,
           cls: "csv-quiz-progress-image-label"
         });
         const showName = ratingLabel !== null && !maskCorrectness;
-        row.createEl("span", {
+        row.createSpan({
           text: showName ? q.answer : "\uFF08\u56FE\u7247\u9898\uFF09",
           cls: showName ? "csv-quiz-progress-image-answer" : "csv-quiz-progress-stem"
         });
         if (a === void 0) {
-          row.createEl("span", {
+          row.createSpan({
             text: "\u672A\u7B54",
             cls: "csv-quiz-progress-status csv-quiz-progress-unanswered"
           });
         } else if (maskCorrectness) {
-          row.createEl("span", {
+          row.createSpan({
             text: "\u5DF2\u7B54",
             cls: "csv-quiz-progress-status csv-quiz-progress-masked"
           });
         } else if (ratingLabel !== null) {
-          row.createEl("span", {
+          row.createSpan({
             text: `\u5DF2\u8BC4 \xB7 ${ratingLabel}`,
             cls: "csv-quiz-progress-status"
           });
         } else {
-          row.createEl("span", {
+          row.createSpan({
             text: "\u5DF2\u770B\u7B54\u6848",
             cls: "csv-quiz-progress-status csv-quiz-progress-unanswered"
           });
         }
       } else if (isShortAnswer(q)) {
-        row.createEl("span", {
+        row.createSpan({
           text: shortAnswerBadge(q),
           cls: "csv-quiz-progress-image-label csv-quiz-progress-short-label"
         });
-        row.createEl("span", {
+        row.createSpan({
           text: progressStemPreview(q.stem),
           cls: "csv-quiz-progress-stem"
         });
         const status = shortAnswerStatus(a, maskCorrectness);
-        row.createEl("span", { text: status.text, cls: status.cls });
+        row.createSpan({ text: status.text, cls: status.cls });
       } else {
-        row.createEl("span", { text: q.id, cls: "csv-quiz-progress-id" });
-        row.createEl("span", {
+        row.createSpan({ text: q.id, cls: "csv-quiz-progress-id" });
+        row.createSpan({
           text: progressStemPreview(q.stem),
           cls: "csv-quiz-progress-stem"
         });
         if (a === void 0) {
-          row.createEl("span", {
+          row.createSpan({
             text: "\u672A\u7B54",
             cls: "csv-quiz-progress-status csv-quiz-progress-unanswered"
           });
         } else if (maskCorrectness) {
-          row.createEl("span", {
+          row.createSpan({
             text: "\u5DF2\u7B54",
             cls: "csv-quiz-progress-status csv-quiz-progress-masked"
           });
         } else if (normCache.get(`u:${q.id}`) === normCache.get(`c:${q.id}`)) {
-          row.createEl("span", {
+          row.createSpan({
             text: a ? `\u2713 \u5DF2\u7B54${a}` : "\u2713 \u5DF2\u7B54",
             cls: "csv-quiz-progress-status csv-quiz-progress-correct"
           });
         } else {
-          row.createEl("span", {
+          row.createSpan({
             text: a ? `\u2717 \u7B54\u9519${a}` : "\u2717 \u7B54\u9519",
             cls: "csv-quiz-progress-status csv-quiz-progress-wrong"
           });
@@ -3545,24 +3544,24 @@ var _ProgressModal = class _ProgressModal extends import_obsidian5.Modal {
       }
       const card = memoryCards[q.id];
       if (maskCorrectness) {
-        row.createEl("span", { text: "\u2014", cls: "csv-quiz-progress-memory" });
+        row.createSpan({ text: "\u2014", cls: "csv-quiz-progress-memory" });
       } else if (card) {
         const dueT = new Date(card.due).getTime();
         const dueText = Number.isNaN(dueT) ? "\u2014" : dueT <= now ? "\u5DF2\u5230\u671F" : `${Math.max(1, Math.ceil((dueT - now) / 864e5))} \u5929\u540E`;
         const memCls = "csv-quiz-progress-memory" + (dueT <= now ? " csv-quiz-progress-memory-due" : "");
-        row.createEl("span", {
+        row.createSpan({
           text: `${(_a = stateNames[card.state]) != null ? _a : "\u672A\u77E5"} ${dueText}`,
           cls: memCls
         });
       } else {
-        row.createEl("span", { text: "\u2014", cls: "csv-quiz-progress-memory" });
+        row.createSpan({ text: "\u2014", cls: "csv-quiz-progress-memory" });
       }
       const flags = [];
       if (q.favorite === "1") flags.push("\u2605");
       if (q.mastered === "1") flags.push("\u2713");
       if (!maskCorrectness && q.wrong === "1") flags.push("\u2717");
       if (flags.length > 0) {
-        row.createEl("span", {
+        row.createSpan({
           text: flags.join(" "),
           cls: "csv-quiz-progress-flags"
         });
@@ -6154,6 +6153,7 @@ function parseBankManifest(text, bankFolder) {
       };
     }
     const seen = /* @__PURE__ */ new Set([contentRel.path]);
+    const values = [];
     for (let i = 0; i < contentsRaw.length; i += 1) {
       const item = contentsRaw[i];
       if (typeof item !== "string" || item.trim() === "") {
@@ -6183,8 +6183,9 @@ function parseBankManifest(text, bankFolder) {
       }
       seen.add(rel.path);
       contentsRels.push(rel.path);
+      values.push(item.trim());
     }
-    contentsValues = contentsRaw.map((item) => item.trim());
+    contentsValues = values;
   }
   const imageRaw = record.imageFolder;
   let imageRelPath = null;
@@ -7610,7 +7611,7 @@ ${message}`);
       "csv-quiz-filter-toggle"
     );
     const toggleIcon = toggleHeader.createSpan("csv-quiz-filter-icon");
-    toggleHeader.createEl("span", { text: "\u7B5B\u9009\u6761\u4EF6" });
+    toggleHeader.createSpan({ text: "\u7B5B\u9009\u6761\u4EF6" });
     const panelOpen = settings.filterPanelOpen;
     const filterBody = this.filterContainer.createDiv(
       "csv-quiz-filter-body"
@@ -7678,7 +7679,7 @@ ${message}`);
     for (const bf of boolFilters) {
       const group = boolRow.createSpan({ cls: "csv-quiz-bool-group" });
       group.createSpan({ text: bf.label, cls: "csv-quiz-bool-label" });
-      const posChip = group.createEl("span", {
+      const posChip = group.createSpan({
         text: "\u662F",
         cls: "csv-quiz-bool-chip" + (bf.value === "1" ? " csv-quiz-bool-chip-active" : ""),
         attr: { "data-bool-key": bf.key, "data-bool-val": "1" }
@@ -7686,7 +7687,7 @@ ${message}`);
       posChip.addEventListener("click", () => {
         void this.toggleBoolFilter(bf.key, "1");
       });
-      const negChip = group.createEl("span", {
+      const negChip = group.createSpan({
         text: "\u5426",
         cls: "csv-quiz-bool-chip" + (bf.value === "0" ? " csv-quiz-bool-chip-active csv-quiz-bool-chip-inverse" : ""),
         attr: { "data-bool-key": bf.key, "data-bool-val": "0" }
@@ -7708,7 +7709,7 @@ ${message}`);
       "csv-quiz-filter-toggle"
     );
     const toggleIcon = toggleHeader.createSpan("csv-quiz-filter-icon");
-    toggleHeader.createEl("span", { text: "\u7EC3\u4E60" });
+    toggleHeader.createSpan({ text: "\u7EC3\u4E60" });
     const panelOpen = settings.practicePanelOpen;
     const body = this.practicePanelEl.createDiv("csv-quiz-filter-body");
     this.practiceBodyEl = body;
@@ -8410,7 +8411,7 @@ ${message}`);
     const excludedSet = new Set(parseTags(this.filterTagsExcluded));
     const allTags = getUniqueTags(this.allQuestions);
     if (allTags.length === 0) {
-      this.tagsContainer.createEl("span", {
+      this.tagsContainer.createSpan({
         text: "\u65E0\u6807\u7B7E",
         cls: "csv-quiz-tag-chip csv-quiz-tag-chip-empty"
       });
@@ -8418,7 +8419,7 @@ ${message}`);
     }
     for (const tag of allTags) {
       const state = excludedSet.has(tag) ? "excluded" : selectedSet.has(tag) ? "included" : "none";
-      const chip = this.tagsContainer.createEl("span", {
+      const chip = this.tagsContainer.createSpan({
         text: tag,
         cls: "csv-quiz-tag-chip" + (state === "included" ? " csv-quiz-tag-chip-selected" : "") + (state === "excluded" ? " csv-quiz-tag-chip-excluded" : ""),
         attr: {
@@ -8638,7 +8639,7 @@ ${message}`);
       return;
     }
     if (multi) {
-      this.questionArea.createEl("span", {
+      this.questionArea.createSpan({
         text: "(\u591A\u9009)",
         cls: "csv-quiz-multi-badge"
       });
@@ -8710,7 +8711,7 @@ ${message}`);
   renderPracticeSourceBadge(question) {
     if (!this.memoryActive || !this.practiceSource[question.id]) return;
     const src = this.practiceSource[question.id];
-    this.questionArea.createEl("span", {
+    this.questionArea.createSpan({
       text: src === "new" ? "\u{1F195} \u65B0\u9898" : src === "early" ? "\u26A1 \u63D0\u524D\u590D\u4E60" : "\u{1F501} \u590D\u4E60",
       cls: "csv-quiz-source-badge" + (src === "new" ? " csv-quiz-source-badge-new" : src === "early" ? " csv-quiz-source-badge-early" : " csv-quiz-source-badge-review")
     });
@@ -8726,13 +8727,13 @@ ${message}`);
     const tagText = question.tags || "\uFF08\u65E0\uFF09";
     if (tagText !== "\uFF08\u65E0\uFF09") {
       for (const tag of tagText.split(/\s+/).filter(Boolean)) {
-        tagsChips.createEl("span", {
+        tagsChips.createSpan({
           text: tag,
           cls: "csv-quiz-tag-chip csv-quiz-tag-chip-selected"
         });
       }
     } else {
-      tagsChips.createEl("span", {
+      tagsChips.createSpan({
         text: "\uFF08\u65E0\uFF09",
         cls: "csv-quiz-tag-chip csv-quiz-tag-chip-empty"
       });
@@ -8757,8 +8758,8 @@ ${message}`);
     var _a;
     const panel = this.questionArea.createDiv("csv-quiz-card-panel");
     const header = panel.createDiv("csv-quiz-card-toggle");
-    header.createEl("span", { text: this.cardPanelOpen ? "\u25BC" : "\u25B6" });
-    header.createEl("span", { text: "\u8BB0\u5FC6\u5361\u7247" });
+    header.createSpan({ text: this.cardPanelOpen ? "\u25BC" : "\u25B6" });
+    header.createSpan({ text: "\u8BB0\u5FC6\u5361\u7247" });
     const body = panel.createDiv("csv-quiz-card-body");
     body.classList.toggle("csv-quiz-card-body-hidden", !this.cardPanelOpen);
     header.addEventListener("click", () => {
@@ -8766,7 +8767,7 @@ ${message}`);
       body.classList.toggle("csv-quiz-card-body-hidden", !this.cardPanelOpen);
     });
     if (this.isExamAnswersHidden()) {
-      body.createEl("span", {
+      body.createSpan({
         text: "\u8003\u8BD5\u7ED3\u675F\u540E\u663E\u793A\u8BB0\u5FC6\u5361\u7247",
         cls: "csv-quiz-card-empty"
       });
@@ -8774,7 +8775,7 @@ ${message}`);
     }
     const card = this.memoryCards[question.id];
     if (!card) {
-      body.createEl("span", {
+      body.createSpan({
         text: "\u8BE5\u9898\u6682\u65E0\u8BB0\u5FC6\u5361\u7247",
         cls: "csv-quiz-card-empty"
       });
@@ -8802,8 +8803,8 @@ ${message}`);
     ];
     for (const [label, value] of rows) {
       const row = body.createDiv("csv-quiz-card-row");
-      row.createEl("span", { text: label, cls: "csv-quiz-card-label" });
-      row.createEl("span", { text: value, cls: "csv-quiz-card-value" });
+      row.createSpan({ text: label, cls: "csv-quiz-card-label" });
+      row.createSpan({ text: value, cls: "csv-quiz-card-value" });
     }
   }
   renderFeedback(question, displayOptions) {
@@ -8828,7 +8829,7 @@ ${message}`);
     });
     if (!isCorrect) {
       const correctLetters = displayOptions.map((o, i) => ({ o, i })).filter(({ o }) => answerKeys.includes(o.key)).map(({ i }) => String.fromCharCode(65 + i)).join("");
-      feedbackDiv.createEl("span", {
+      feedbackDiv.createSpan({
         text: ` \u6B63\u786E\u7B54\u6848: ${correctLetters}`
       });
     }
@@ -9363,7 +9364,7 @@ ${message}`);
     const settings = this.getSettings();
     const toggleHeader = this.editArea.createDiv("csv-quiz-filter-toggle");
     const toggleIcon = toggleHeader.createSpan("csv-quiz-filter-icon");
-    toggleHeader.createEl("span", { text: "\u6807\u7B7E / \u5206\u7C7B (\u7F16\u8F91\u540E\u81EA\u52A8\u4FDD\u5B58)" });
+    toggleHeader.createSpan({ text: "\u6807\u7B7E / \u5206\u7C7B (\u7F16\u8F91\u540E\u81EA\u52A8\u4FDD\u5B58)" });
     const editBody = this.editArea.createDiv("csv-quiz-edit-grid");
     if (isShortAnswer(question)) {
       editBody.createDiv({
@@ -9627,7 +9628,7 @@ ${message}`);
     });
     const currentQuestion = this.filteredQuestions[this.currentIndex];
     const qId = currentQuestion == null ? void 0 : currentQuestion.id;
-    bottomRow.createEl("span", {
+    bottomRow.createSpan({
       text: currentQuestion ? isImageQuestion(currentQuestion) ? this.imageQuestionLabel(currentQuestion) : `\u9898\u53F7: ${qId}` : "",
       cls: "csv-quiz-q-id-bottom"
     });
@@ -10549,8 +10550,9 @@ function sortKeysDeep(value) {
   if (Array.isArray(value)) return value.map((item) => sortKeysDeep(item));
   if (value !== null && typeof value === "object") {
     const out = {};
-    for (const key of Object.keys(value).sort()) {
-      out[key] = sortKeysDeep(value[key]);
+    const record = value;
+    for (const key of Object.keys(record).sort()) {
+      out[key] = sortKeysDeep(record[key]);
     }
     return out;
   }
@@ -12537,7 +12539,7 @@ var CSVQuizPlugin = class extends import_obsidian8.Plugin {
       );
       if (result.status === "merged") {
         await markMerged();
-        console.info(
+        console.debug(
           `CSV Quiz: \u5DF2\u628A ${(_c = result.mergedComponents) != null ? _c : 0} \u4E2A\u7EC4\u6210 sidecar \u5E76\u5165 manifest \u8FDB\u5EA6\uFF08\u65B0\u589E\u7B54\u9898 ${(_d = result.addedAnswers) != null ? _d : 0} \u6761\uFF0C\u2705${(_e = result.correctCount) != null ? _e : 0} / \u274C${(_f = result.wrongCount) != null ? _f : 0}\uFF09`
         );
         return;

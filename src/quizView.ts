@@ -57,7 +57,6 @@ import {
 import { PracticeChart } from "./practiceChart";
 import {
   buildImageQuestions,
-  imageRatingLabel,
   isImageRatingKey,
   isImageQuestion,
   type ImageRatingKey,
@@ -1152,7 +1151,7 @@ export class QuizView extends ItemView {
       "csv-quiz-filter-toggle"
     );
     const toggleIcon = toggleHeader.createSpan("csv-quiz-filter-icon");
-    toggleHeader.createEl("span", { text: "筛选条件" });
+    toggleHeader.createSpan({ text: "筛选条件" });
 
     const panelOpen = settings.filterPanelOpen;
     const filterBody = this.filterContainer.createDiv(
@@ -1234,7 +1233,7 @@ export class QuizView extends ItemView {
       const group = boolRow.createSpan({ cls: "csv-quiz-bool-group" });
       group.createSpan({ text: bf.label, cls: "csv-quiz-bool-label" });
 
-      const posChip = group.createEl("span", {
+      const posChip = group.createSpan({
         text: "是",
         cls: "csv-quiz-bool-chip" + (bf.value === "1" ? " csv-quiz-bool-chip-active" : ""),
         attr: { "data-bool-key": bf.key, "data-bool-val": "1" },
@@ -1243,7 +1242,7 @@ export class QuizView extends ItemView {
         void this.toggleBoolFilter(bf.key, "1");
       });
 
-      const negChip = group.createEl("span", {
+      const negChip = group.createSpan({
         text: "否",
         cls: "csv-quiz-bool-chip" + (bf.value === "0" ? " csv-quiz-bool-chip-active csv-quiz-bool-chip-inverse" : ""),
         attr: { "data-bool-key": bf.key, "data-bool-val": "0" },
@@ -1269,7 +1268,7 @@ export class QuizView extends ItemView {
       "csv-quiz-filter-toggle"
     );
     const toggleIcon = toggleHeader.createSpan("csv-quiz-filter-icon");
-    toggleHeader.createEl("span", { text: "练习" });
+    toggleHeader.createSpan({ text: "练习" });
 
     const panelOpen = settings.practicePanelOpen;
     const body = this.practicePanelEl.createDiv("csv-quiz-filter-body");
@@ -2209,7 +2208,7 @@ export class QuizView extends ItemView {
 
     const allTags = getUniqueTags(this.allQuestions);
     if (allTags.length === 0) {
-      this.tagsContainer.createEl("span", {
+      this.tagsContainer.createSpan({
         text: "无标签",
         cls: "csv-quiz-tag-chip csv-quiz-tag-chip-empty",
       });
@@ -2223,7 +2222,7 @@ export class QuizView extends ItemView {
         : selectedSet.has(tag)
           ? "included"
           : "none";
-      const chip = this.tagsContainer.createEl("span", {
+      const chip = this.tagsContainer.createSpan({
         text: tag,
         cls:
           "csv-quiz-tag-chip" +
@@ -2510,7 +2509,7 @@ export class QuizView extends ItemView {
 
     // 多选题在题干前标注 (多选)
     if (multi) {
-      this.questionArea.createEl("span", {
+      this.questionArea.createSpan({
         text: "(多选)",
         cls: "csv-quiz-multi-badge",
       });
@@ -2618,7 +2617,7 @@ export class QuizView extends ItemView {
   private renderPracticeSourceBadge(question: Question): void {
     if (!this.memoryActive || !this.practiceSource[question.id]) return;
     const src = this.practiceSource[question.id];
-    this.questionArea.createEl("span", {
+    this.questionArea.createSpan({
       text:
         src === "new" ? "🆕 新题" : src === "early" ? "⚡ 提前复习" : "🔁 复习",
       cls:
@@ -2645,13 +2644,13 @@ export class QuizView extends ItemView {
     const tagText = question.tags || "（无）";
     if (tagText !== "（无）") {
       for (const tag of tagText.split(/\s+/).filter(Boolean)) {
-        tagsChips.createEl("span", {
+        tagsChips.createSpan({
           text: tag,
           cls: "csv-quiz-tag-chip csv-quiz-tag-chip-selected",
         });
       }
     } else {
-      tagsChips.createEl("span", {
+      tagsChips.createSpan({
         text: "（无）",
         cls: "csv-quiz-tag-chip csv-quiz-tag-chip-empty",
       });
@@ -2685,8 +2684,8 @@ export class QuizView extends ItemView {
   private renderCardPanel(question: Question): void {
     const panel = this.questionArea.createDiv("csv-quiz-card-panel");
     const header = panel.createDiv("csv-quiz-card-toggle");
-    header.createEl("span", { text: this.cardPanelOpen ? "▼" : "▶" });
-    header.createEl("span", { text: "记忆卡片" });
+    header.createSpan({ text: this.cardPanelOpen ? "▼" : "▶" });
+    header.createSpan({ text: "记忆卡片" });
     const body = panel.createDiv("csv-quiz-card-body");
     body.classList.toggle("csv-quiz-card-body-hidden", !this.cardPanelOpen);
     // 切换折叠只改本栏，不重渲染题目（避免丢失当前答题状态）
@@ -2696,7 +2695,7 @@ export class QuizView extends ItemView {
     });
     // 随机考试进行中：作答会改变卡片状态（如再学习/到期），展示会泄露本题对错
     if (this.isExamAnswersHidden()) {
-      body.createEl("span", {
+      body.createSpan({
         text: "考试结束后显示记忆卡片",
         cls: "csv-quiz-card-empty",
       });
@@ -2704,7 +2703,7 @@ export class QuizView extends ItemView {
     }
     const card = this.memoryCards[question.id];
     if (!card) {
-      body.createEl("span", {
+      body.createSpan({
         text: "该题暂无记忆卡片",
         cls: "csv-quiz-card-empty",
       });
@@ -2732,8 +2731,8 @@ export class QuizView extends ItemView {
     ];
     for (const [label, value] of rows) {
       const row = body.createDiv("csv-quiz-card-row");
-      row.createEl("span", { text: label, cls: "csv-quiz-card-label" });
-      row.createEl("span", { text: value, cls: "csv-quiz-card-value" });
+      row.createSpan({ text: label, cls: "csv-quiz-card-label" });
+      row.createSpan({ text: value, cls: "csv-quiz-card-value" });
     }
   }
 
@@ -2779,7 +2778,7 @@ export class QuizView extends ItemView {
         .filter(({ o }) => answerKeys.includes(o.key))
         .map(({ i }) => String.fromCharCode(65 + i))
         .join("");
-      feedbackDiv.createEl("span", {
+      feedbackDiv.createSpan({
         text: ` 正确答案: ${correctLetters}`,
       });
     }
@@ -3470,7 +3469,7 @@ export class QuizView extends ItemView {
     // Toggle header
     const toggleHeader = this.editArea.createDiv("csv-quiz-filter-toggle");
     const toggleIcon = toggleHeader.createSpan("csv-quiz-filter-icon");
-    toggleHeader.createEl("span", { text: "标签 / 分类 (编辑后自动保存)" });
+    toggleHeader.createSpan({ text: "标签 / 分类 (编辑后自动保存)" });
 
     const editBody = this.editArea.createDiv("csv-quiz-edit-grid");
 
@@ -3790,7 +3789,7 @@ export class QuizView extends ItemView {
 
     const currentQuestion = this.filteredQuestions[this.currentIndex];
     const qId = currentQuestion?.id;
-    bottomRow.createEl("span", {
+    bottomRow.createSpan({
       text: currentQuestion
         ? isImageQuestion(currentQuestion)
           ? this.imageQuestionLabel(currentQuestion)

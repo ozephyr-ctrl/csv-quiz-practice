@@ -799,7 +799,7 @@ export default class CSVQuizPlugin extends Plugin {
       );
       if (result.status === "merged") {
         await markMerged();
-        console.info(
+        console.debug(
           `CSV Quiz: 已把 ${result.mergedComponents ?? 0} 个组成 sidecar 并入 manifest 进度` +
             `（新增答题 ${result.addedAnswers ?? 0} 条，✅${result.correctCount ?? 0} / ❌${result.wrongCount ?? 0}）`
         );

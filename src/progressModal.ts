@@ -213,7 +213,7 @@ export class ProgressModal extends Modal {
       const isImage = isImageQuestion(q);
       const ratingLabel = a !== undefined ? imageRatingLabel(a) : null;
 
-      const row = createEl("div", { cls: "csv-quiz-progress-row" });
+      const row = createDiv({ cls: "csv-quiz-progress-row" });
       row.dataset.id = q.id;
       if (q.id === currentId) row.addClass("csv-quiz-progress-row-current");
       if (isImage) {
@@ -223,13 +223,13 @@ export class ProgressModal extends Modal {
           typeof q.imageNumber === "number" && Number.isFinite(q.imageNumber)
             ? Math.max(1, Math.trunc(q.imageNumber))
             : 1;
-        row.createEl("span", {
+        row.createSpan({
           text: `图片题 #${num}`,
           cls: "csv-quiz-progress-image-label",
         });
         // 随机考试进行中：文件名即答案，不能展示
         const showName = ratingLabel !== null && !maskCorrectness;
-        row.createEl("span", {
+        row.createSpan({
           text: showName ? q.answer : "（图片题）",
           cls: showName
             ? "csv-quiz-progress-image-answer"
@@ -237,23 +237,23 @@ export class ProgressModal extends Modal {
         });
         // 状态：图片题无对错，统一用中性样式（避免红绿）
         if (a === undefined) {
-          row.createEl("span", {
+          row.createSpan({
             text: "未答",
             cls: "csv-quiz-progress-status csv-quiz-progress-unanswered",
           });
         } else if (maskCorrectness) {
-          row.createEl("span", {
+          row.createSpan({
             text: "已答",
             cls: "csv-quiz-progress-status csv-quiz-progress-masked",
           });
         } else if (ratingLabel !== null) {
-          row.createEl("span", {
+          row.createSpan({
             text: `已评 · ${ratingLabel}`,
             cls: "csv-quiz-progress-status",
           });
         } else {
           // revealed：已看答案但未评分
-          row.createEl("span", {
+          row.createSpan({
             text: "已看答案",
             cls: "csv-quiz-progress-status csv-quiz-progress-unanswered",
           });
@@ -261,44 +261,44 @@ export class ProgressModal extends Modal {
       } else if (isShortAnswer(q)) {
         // 简答题：自评题型，与图片题同样不显示对错红绿；stem 是卡面题干
         // （反向卡的 stem 是原答案文本，同属可预览内容），绝不展示 q.answer
-        row.createEl("span", {
+        row.createSpan({
           text: shortAnswerBadge(q),
           cls: "csv-quiz-progress-image-label csv-quiz-progress-short-label",
         });
-        row.createEl("span", {
+        row.createSpan({
           text: progressStemPreview(q.stem),
           cls: "csv-quiz-progress-stem",
         });
         const status = shortAnswerStatus(a, maskCorrectness);
-        row.createEl("span", { text: status.text, cls: status.cls });
+        row.createSpan({ text: status.text, cls: status.cls });
       } else {
-        row.createEl("span", { text: q.id, cls: "csv-quiz-progress-id" });
+        row.createSpan({ text: q.id, cls: "csv-quiz-progress-id" });
         // 题干(去 Markdown 符号截断 30 字)
-        row.createEl("span", {
+        row.createSpan({
           text: progressStemPreview(q.stem),
           cls: "csv-quiz-progress-stem",
         });
         // 答题状态
         if (a === undefined) {
-          row.createEl("span", {
+          row.createSpan({
             text: "未答",
             cls: "csv-quiz-progress-status csv-quiz-progress-unanswered",
           });
         } else if (maskCorrectness) {
           // 随机考试进行中：只显示已答，不泄露对错
-          row.createEl("span", {
+          row.createSpan({
             text: "已答",
             cls: "csv-quiz-progress-status csv-quiz-progress-masked",
           });
         } else if (
           normCache.get(`u:${q.id}`) === normCache.get(`c:${q.id}`)
         ) {
-          row.createEl("span", {
+          row.createSpan({
             text: a ? `✓ 已答${a}` : "✓ 已答",
             cls: "csv-quiz-progress-status csv-quiz-progress-correct",
           });
         } else {
-          row.createEl("span", {
+          row.createSpan({
             text: a ? `✗ 答错${a}` : "✗ 答错",
             cls: "csv-quiz-progress-status csv-quiz-progress-wrong",
           });
@@ -308,7 +308,7 @@ export class ProgressModal extends Modal {
       const card = memoryCards[q.id];
       if (maskCorrectness) {
         // 随机考试进行中：卡片会因本次作答进入再学习/到期，展示状态会间接泄露对错
-        row.createEl("span", { text: "—", cls: "csv-quiz-progress-memory" });
+        row.createSpan({ text: "—", cls: "csv-quiz-progress-memory" });
       } else if (card) {
         const dueT = new Date(card.due).getTime();
         const dueText = Number.isNaN(dueT)
@@ -319,12 +319,12 @@ export class ProgressModal extends Modal {
         const memCls =
           "csv-quiz-progress-memory" +
           (dueT <= now ? " csv-quiz-progress-memory-due" : "");
-        row.createEl("span", {
+        row.createSpan({
           text: `${stateNames[card.state] ?? "未知"} ${dueText}`,
           cls: memCls,
         });
       } else {
-        row.createEl("span", { text: "—", cls: "csv-quiz-progress-memory" });
+        row.createSpan({ text: "—", cls: "csv-quiz-progress-memory" });
       }
       // 标记（考试进行中隐藏错题标记，答错会自动置位会泄露对错）
       const flags: string[] = [];
@@ -332,7 +332,7 @@ export class ProgressModal extends Modal {
       if (q.mastered === "1") flags.push("✓");
       if (!maskCorrectness && q.wrong === "1") flags.push("✗");
       if (flags.length > 0) {
-        row.createEl("span", {
+        row.createSpan({
           text: flags.join(" "),
           cls: "csv-quiz-progress-flags",
         });
