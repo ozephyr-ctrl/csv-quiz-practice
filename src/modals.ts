@@ -1,4 +1,5 @@
 import { App, Modal } from "obsidian";
+import type { FilterPracticeOrder } from "./practiceOrder";
 
 export interface ChoiceOption {
   label: string;
@@ -151,6 +152,147 @@ export function askConflictMergeChoice(
   });
   modal.open();
   return modal.promise.then((res) => (res === "merge" ? "merge" : null));
+}
+
+/** 「按当前筛选练习」的顺序选项文案：弹窗按钮与开始提示共用。 */
+export const FILTER_PRACTICE_ORDER_LABELS: Record<
+  FilterPracticeOrder,
+  string
+> = {
+  bank: "题库顺序",
+  random: "随机顺序",
+  due: "按到期时间",
+};
+
+export interface FilterPracticeOrderModalOptions {
+  /** 记忆曲线关闭时，「按到期时间」仍然显示，但不可选。 */
+  memoryEnabled: boolean;
+}
+
+interface FilterPracticeOrderOptionSpec {
+  mode: FilterPracticeOrder;
+  description: string;
+  /** 默认顺序：作为主要操作呈现并获得焦点。 */
+  primary?: boolean;
+  /** 不可选时显示的原因（选项本身不隐藏）。 */
+  disabledReason?: string;
+}
+
+const FILTER_PRACTICE_ORDER_OPTIONS: FilterPracticeOrderOptionSpec[] = [
+  {
+    mode: "bank",
+    description: "按题库中的原始顺序练习",
+  },
+  {
+    mode: "random",
+    description: "打乱全部题目",
+    primary: true,
+  },
+  {
+    mode: "due",
+    description: "最早到期的先刷，无记忆卡片的题排在最后",
+    disabledReason: "需先在设置中开启记忆曲线",
+  },
+];
+
+/**
+ * Promise-based modal for choosing the order of 「按当前筛选练习」.
+ * Resolves with the chosen order, or `null` if the user closes it (Esc / backdrop)
+ * without choosing. When the memory feature is off, 「按到期时间」 is shown but
+ * disabled, and 「随机顺序」 stays the default.
+ */
+export class FilterPracticeOrderModal extends Modal {
+  readonly promise: Promise<FilterPracticeOrder | null>;
+  private resolveFn!: (value: FilterPracticeOrder | null) => void;
+  private resolved = false;
+  private readonly memoryEnabled: boolean;
+
+  constructor(app: App, opts: FilterPracticeOrderModalOptions) {
+    super(app);
+    this.memoryEnabled = opts.memoryEnabled;
+    this.promise = new Promise<FilterPracticeOrder | null>((resolve) => {
+      this.resolveFn = resolve;
+    });
+  }
+
+  onOpen(): void {
+    this.titleEl.setText("选择刷题顺序");
+    this.contentEl.empty();
+
+    this.contentEl.createEl("p", {
+      text: "本次练习的题目将按所选顺序排列。",
+      cls: "csv-quiz-modal-message",
+    });
+
+    const list = this.contentEl.createDiv("csv-quiz-modal-options");
+    let primaryBtn: HTMLButtonElement | null = null;
+
+    for (const spec of FILTER_PRACTICE_ORDER_OPTIONS) {
+      const item = list.createDiv("csv-quiz-modal-option");
+      const disabled = spec.mode === "due" && !this.memoryEnabled;
+
+      const btn = item.createEl("button", {
+        text: FILTER_PRACTICE_ORDER_LABELS[spec.mode],
+        cls:
+          "csv-quiz-btn csv-quiz-modal-btn" +
+          (spec.primary ? " csv-quiz-btn-primary" : ""),
+      });
+
+      if (disabled) {
+        btn.disabled = true;
+        btn.setAttribute("aria-disabled", "true");
+        item.addClass("csv-quiz-modal-option-disabled");
+      } else {
+        btn.addEventListener("click", () => this.choose(spec.mode));
+      }
+
+      item.createDiv({
+        text: spec.description,
+        cls: "csv-quiz-modal-option-desc",
+      });
+
+      if (disabled && spec.disabledReason) {
+        item.createDiv({
+          text: spec.disabledReason,
+          cls: "csv-quiz-modal-option-hint",
+        });
+      }
+
+      if (spec.primary) primaryBtn = btn;
+    }
+
+    // 默认顺序是主要操作：弹窗打开后把焦点放在它上面，回车即沿用旧行为
+    if (primaryBtn) {
+      const btn = primaryBtn;
+      window.setTimeout(() => {
+        if (!this.resolved) btn.focus();
+      }, 0);
+    }
+  }
+
+  onClose(): void {
+    if (!this.resolved) {
+      this.resolved = true;
+      this.resolveFn(null);
+    }
+  }
+
+  private choose(mode: FilterPracticeOrder): void {
+    if (this.resolved) return;
+    this.resolved = true;
+    this.close();
+    this.resolveFn(mode);
+  }
+}
+
+/** 弹「选择刷题顺序」框；返回所选顺序，取消、Esc 或点击外部返回 null。 */
+export function askFilterPracticeOrder(
+  app: App,
+  opts: FilterPracticeOrderModalOptions
+): Promise<FilterPracticeOrder | null> {
+  const modal = new FilterPracticeOrderModal(app, opts);
+  modal.open();
+  return modal.promise;
 }
 
 /**

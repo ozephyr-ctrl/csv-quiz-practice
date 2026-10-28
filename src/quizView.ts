@@ -42,7 +42,10 @@ import {
   askResetChoice,
   askPrompt,
   askConflictMergeChoice,
+  askFilterPracticeOrder,
+  FILTER_PRACTICE_ORDER_LABELS,
 } from "./modals";
+import { orderFilterPracticePool } from "./practiceOrder";
 import { ProgressModal } from "./progressModal";
 import { fsrs, createEmptyCard, Rating, type Card, type Grade } from "ts-fsrs";
 import Papa from "papaparse";
@@ -1315,7 +1318,7 @@ export class QuizView extends ItemView {
       cls: "csv-quiz-practice-count",
     });
 
-    // 按当前筛选练习：当前筛选结果全集随机打乱，行为同普通刷题（即时反馈）
+    // 按当前筛选练习：当前筛选结果全集作为一个练习集，开始前选择顺序（默认为随机，即旧行为）
     this.filterPracticeBtn = practiceRow.createEl("button", {
       text: "📚 按当前筛选练习",
       cls: "csv-quiz-btn csv-quiz-btn-sm csv-quiz-practice-btn",
@@ -1702,8 +1705,9 @@ export class QuizView extends ItemView {
   }
 
   /**
-   * 按当前筛选练习：把当前筛选结果的全部题目随机打乱后作为一个临时练习集，
-   * 行为与普通刷题一致（即时反馈），不限制随机考试题数。
+   * 按当前筛选练习：把当前筛选结果的全部题目作为一个临时练习集，
+   * 练习前先选择题目顺序（随机为默认），行为与普通刷题一致（即时反馈），
+   * 不限制随机考试题数。
    */
   private async enableFilterPractice(): Promise<void> {
     if (
@@ -1731,7 +1735,13 @@ export class QuizView extends ItemView {
       return;
     }
 
-    const picked = shuffle(pool);
+    // 先选顺序：取消/关闭弹窗则直接返回，不改动任何状态
+    const mode = await askFilterPracticeOrder(this.app, {
+      memoryEnabled: this.getSettings().memoryEnabled,
+    });
+    if (mode === null || this.isClosed) return;
+
+    const picked = orderFilterPracticePool(pool, mode, this.memoryCards);
     this.practiceFocusId = this.filteredQuestions[this.currentIndex]?.id ?? null;
     this.practiceIds = picked.map((q) => q.id);
     this.filterPracticeActive = true;
@@ -1745,7 +1755,9 @@ export class QuizView extends ItemView {
     this.cancelAutoNext();
     this.renderQuestion();
     this.saveState();
-    new Notice(`按当前筛选练习开始：${picked.length} 题`);
+    new Notice(
+      `按当前筛选练习开始：${picked.length} 题（${FILTER_PRACTICE_ORDER_LABELS[mode]}）`
+    );
   }
 
   /** 退出按当前筛选练习：恢复常规筛选结果并定位到进入前的位置。不渲染、不保存。 */

@@ -612,6 +612,96 @@ function askConflictMergeChoice(app, conflictCount) {
   modal.open();
   return modal.promise.then((res) => res === "merge" ? "merge" : null);
 }
+var FILTER_PRACTICE_ORDER_LABELS = {
+  bank: "\u9898\u5E93\u987A\u5E8F",
+  random: "\u968F\u673A\u987A\u5E8F",
+  due: "\u6309\u5230\u671F\u65F6\u95F4"
+};
+var FILTER_PRACTICE_ORDER_OPTIONS = [
+  {
+    mode: "bank",
+    description: "\u6309\u9898\u5E93\u4E2D\u7684\u539F\u59CB\u987A\u5E8F\u7EC3\u4E60"
+  },
+  {
+    mode: "random",
+    description: "\u6253\u4E71\u5168\u90E8\u9898\u76EE",
+    primary: true
+  },
+  {
+    mode: "due",
+    description: "\u6700\u65E9\u5230\u671F\u7684\u5148\u5237\uFF0C\u65E0\u8BB0\u5FC6\u5361\u7247\u7684\u9898\u6392\u5728\u6700\u540E",
+    disabledReason: "\u9700\u5148\u5728\u8BBE\u7F6E\u4E2D\u5F00\u542F\u8BB0\u5FC6\u66F2\u7EBF"
+  }
+];
+var FilterPracticeOrderModal = class extends import_obsidian.Modal {
+  constructor(app, opts) {
+    super(app);
+    this.resolved = false;
+    this.memoryEnabled = opts.memoryEnabled;
+    this.promise = new Promise((resolve) => {
+      this.resolveFn = resolve;
+    });
+  }
+  onOpen() {
+    this.titleEl.setText("\u9009\u62E9\u5237\u9898\u987A\u5E8F");
+    this.contentEl.empty();
+    this.contentEl.createEl("p", {
+      text: "\u672C\u6B21\u7EC3\u4E60\u7684\u9898\u76EE\u5C06\u6309\u6240\u9009\u987A\u5E8F\u6392\u5217\u3002",
+      cls: "csv-quiz-modal-message"
+    });
+    const list = this.contentEl.createDiv("csv-quiz-modal-options");
+    let primaryBtn = null;
+    for (const spec of FILTER_PRACTICE_ORDER_OPTIONS) {
+      const item = list.createDiv("csv-quiz-modal-option");
+      const disabled = spec.mode === "due" && !this.memoryEnabled;
+      const btn = item.createEl("button", {
+        text: FILTER_PRACTICE_ORDER_LABELS[spec.mode],
+        cls: "csv-quiz-btn csv-quiz-modal-btn" + (spec.primary ? " csv-quiz-btn-primary" : "")
+      });
+      if (disabled) {
+        btn.disabled = true;
+        btn.setAttribute("aria-disabled", "true");
+        item.addClass("csv-quiz-modal-option-disabled");
+      } else {
+        btn.addEventListener("click", () => this.choose(spec.mode));
+      }
+      item.createDiv({
+        text: spec.description,
+        cls: "csv-quiz-modal-option-desc"
+      });
+      if (disabled && spec.disabledReason) {
+        item.createDiv({
+          text: spec.disabledReason,
+          cls: "csv-quiz-modal-option-hint"
+        });
+      }
+      if (spec.primary) primaryBtn = btn;
+    }
+    if (primaryBtn) {
+      const btn = primaryBtn;
+      window.setTimeout(() => {
+        if (!this.resolved) btn.focus();
+      }, 0);
+    }
+  }
+  onClose() {
+    if (!this.resolved) {
+      this.resolved = true;
+      this.resolveFn(null);
+    }
+  }
+  choose(mode) {
+    if (this.resolved) return;
+    this.resolved = true;
+    this.close();
+    this.resolveFn(mode);
+  }
+};
+function askFilterPracticeOrder(app, opts) {
+  const modal = new FilterPracticeOrderModal(app, opts);
+  modal.open();
+  return modal.promise;
+}
 var TagPickerModal = class extends import_obsidian.Modal {
   constructor(app, allTags, currentTags) {
     super(app);
@@ -3357,6 +3447,43 @@ function decodeCqv(buffer) {
     },
     questions
   };
+}
+
+// src/practiceOrder.ts
+function hasValidDue(card) {
+  if (!card) return false;
+  return !Number.isNaN(new Date(card.due).getTime());
+}
+function orderFilterPracticePool(pool, mode, memoryCards, now, shuffleFn) {
+  const base = Array.isArray(pool) ? pool : [];
+  void now;
+  if (mode === "random") {
+    const doShuffle = shuffleFn != null ? shuffleFn : shuffle;
+    return [...doShuffle(base)];
+  }
+  if (mode === "due") {
+    const cards = memoryCards != null ? memoryCards : {};
+    const dueItems = [];
+    const rest = [];
+    base.forEach((question, index) => {
+      const card = cards[question.id];
+      if (!hasValidDue(card)) {
+        rest.push(question);
+        return;
+      }
+      dueItems.push({
+        question,
+        dueMs: new Date(card.due).getTime(),
+        index
+      });
+    });
+    dueItems.sort((a, b) => {
+      if (a.dueMs !== b.dueMs) return a.dueMs - b.dueMs;
+      return a.index - b.index;
+    });
+    return [...dueItems.map((item) => item.question), ...rest];
+  }
+  return [...base];
 }
 
 // src/progressModal.ts
@@ -7995,8 +8122,9 @@ ${message}`);
     }
   }
   /**
-   * 按当前筛选练习：把当前筛选结果的全部题目随机打乱后作为一个临时练习集，
-   * 行为与普通刷题一致（即时反馈），不限制随机考试题数。
+   * 按当前筛选练习：把当前筛选结果的全部题目作为一个临时练习集，
+   * 练习前先选择题目顺序（随机为默认），行为与普通刷题一致（即时反馈），
+   * 不限制随机考试题数。
    */
   async enableFilterPractice() {
     var _a, _b;
@@ -8017,7 +8145,11 @@ ${message}`);
       new import_obsidian6.Notice("\u5F53\u524D\u7B5B\u9009\u6761\u4EF6\u4E0B\u6CA1\u6709\u9898\u76EE\uFF0C\u65E0\u6CD5\u5F00\u59CB\u7EC3\u4E60");
       return;
     }
-    const picked = shuffle(pool);
+    const mode = await askFilterPracticeOrder(this.app, {
+      memoryEnabled: this.getSettings().memoryEnabled
+    });
+    if (mode === null || this.isClosed) return;
+    const picked = orderFilterPracticePool(pool, mode, this.memoryCards);
     this.practiceFocusId = (_b = (_a = this.filteredQuestions[this.currentIndex]) == null ? void 0 : _a.id) != null ? _b : null;
     this.practiceIds = picked.map((q) => q.id);
     this.filterPracticeActive = true;
@@ -8031,7 +8163,9 @@ ${message}`);
     this.cancelAutoNext();
     this.renderQuestion();
     this.saveState();
-    new import_obsidian6.Notice(`\u6309\u5F53\u524D\u7B5B\u9009\u7EC3\u4E60\u5F00\u59CB\uFF1A${picked.length} \u9898`);
+    new import_obsidian6.Notice(
+      `\u6309\u5F53\u524D\u7B5B\u9009\u7EC3\u4E60\u5F00\u59CB\uFF1A${picked.length} \u9898\uFF08${FILTER_PRACTICE_ORDER_LABELS[mode]}\uFF09`
+    );
   }
   /** 退出按当前筛选练习：恢复常规筛选结果并定位到进入前的位置。不渲染、不保存。 */
   exitFilterPractice() {
