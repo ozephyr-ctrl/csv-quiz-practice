@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, type Mock } from "vitest";
 import {
   hasValidDue,
+  hasValidLastReview,
   orderFilterPracticePool,
   FilterPracticeOrder,
 } from "../practiceOrder";
@@ -19,6 +20,12 @@ const card = (due: string): MemoryCard => ({
   lapses: 0,
   learningSteps: 0,
   lastReview: due,
+});
+
+/** 构造指定 lastReview 的卡片（due 与 lastReview 分离，便于 lastReview 模式断言）。 */
+const cardWith = (lastReview: string, due = lastReview): MemoryCard => ({
+  ...card(due),
+  lastReview,
 });
 
 /** 固定基准：2026-09-20 12:00 本地时间。 */
@@ -192,8 +199,107 @@ describe("orderFilterPracticePool / due", () => {
   });
 });
 
+describe("hasValidLastReview", () => {
+  it("卡片存在且 lastReview 非空可解析时为 true", () => {
+    expect(hasValidLastReview(cardWith("2026-01-01T00:00:00.000Z"))).toBe(true);
+  });
+
+  it("无卡片、空串或不可解析时为 false", () => {
+    expect(hasValidLastReview(undefined)).toBe(false);
+    expect(hasValidLastReview(cardWith(""))).toBe(false);
+    expect(hasValidLastReview(cardWith("not-a-date"))).toBe(false);
+  });
+});
+
+describe("orderFilterPracticePool / lastReview", () => {
+  it("最久没刷的排最前，最近刷过的排最后", () => {
+    const pool = [q("mid"), q("newest"), q("oldest")];
+    const cards: Record<string, MemoryCard> = {
+      oldest: cardWith("2026-01-01T00:00:00.000Z"),
+      mid: cardWith("2026-09-01T00:00:00.000Z"),
+      newest: cardWith("2026-10-20T00:00:00.000Z"),
+    };
+    expect(ids(orderFilterPracticePool(pool, "lastReview", cards, NOW))).toEqual([
+      "oldest",
+      "mid",
+      "newest",
+    ]);
+  });
+
+  it("从未刷过的题（无卡片 / lastReview 空串）排最前且保持原序", () => {
+    const pool = [q("rev1"), q("neverA"), q("rev2"), q("neverB")];
+    const cards: Record<string, MemoryCard> = {
+      rev1: cardWith("2026-09-01T00:00:00.000Z"),
+      rev2: cardWith("2026-01-01T00:00:00.000Z"),
+      neverB: cardWith(""),
+    };
+    expect(ids(orderFilterPracticePool(pool, "lastReview", cards, NOW))).toEqual([
+      "neverA",
+      "neverB",
+      "rev2",
+      "rev1",
+    ]);
+  });
+
+  it("lastReview 不可解析的卡片等同从未刷过（排最前）", () => {
+    const pool = [q("ok"), q("bad1"), q("bad2")];
+    const cards: Record<string, MemoryCard> = {
+      ok: cardWith("2026-05-01T00:00:00.000Z"),
+      bad1: cardWith("not-a-date"),
+      bad2: cardWith(""),
+    };
+    expect(ids(orderFilterPracticePool(pool, "lastReview", cards, NOW))).toEqual([
+      "bad1",
+      "bad2",
+      "ok",
+    ]);
+  });
+
+  it("同 lastReview 的题保持题池相对顺序（显式稳定排序）", () => {
+    const same = "2026-06-15T08:00:00.000Z";
+    const pool = [q("tie3"), q("tie1"), q("tie2")];
+    const cards: Record<string, MemoryCard> = {
+      tie3: cardWith(same),
+      tie1: cardWith(same),
+      tie2: cardWith(same),
+    };
+    expect(ids(orderFilterPracticePool(pool, "lastReview", cards, NOW))).toEqual([
+      "tie3",
+      "tie1",
+      "tie2",
+    ]);
+  });
+
+  it("不修改入参题池与卡片表", () => {
+    const pool = [q("b"), q("a")];
+    const cards: Record<string, MemoryCard> = {
+      a: cardWith("2026-09-01T00:00:00.000Z"),
+      b: cardWith("2026-01-01T00:00:00.000Z"),
+    };
+    const poolSnapshot = ids(pool);
+    const cardsSnapshot = JSON.stringify(cards);
+    const result = orderFilterPracticePool(pool, "lastReview", cards, NOW);
+    expect(ids(pool)).toEqual(poolSnapshot);
+    expect(JSON.stringify(cards)).toBe(cardsSnapshot);
+    expect(result).not.toBe(pool);
+    expect(ids(result)).toEqual(["b", "a"]);
+  });
+
+  it("保留完整题池长度", () => {
+    const pool = [q("a"), q("b"), q("c"), q("d")];
+    const cards: Record<string, MemoryCard> = {
+      a: cardWith("2026-01-01T00:00:00.000Z"),
+      c: cardWith("2026-10-20T00:00:00.000Z"),
+      d: cardWith(""),
+    };
+    const result = orderFilterPracticePool(pool, "lastReview", cards, NOW);
+    expect(result.length).toBe(pool.length);
+    expect([...ids(result)].sort()).toEqual(["a", "b", "c", "d"]);
+  });
+});
+
 describe("orderFilterPracticePool / 边界与全长保留", () => {
-  const modes: FilterPracticeOrder[] = ["bank", "random", "due"];
+  const modes: FilterPracticeOrder[] = ["bank", "random", "due", "lastReview"];
 
   it("空题池返回空数组", () => {
     for (const mode of modes) {

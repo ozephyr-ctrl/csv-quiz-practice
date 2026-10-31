@@ -181,8 +181,8 @@ Each state file holds answer records, statistics, FSRS cards, filters, favorite/
 
 - **随机考试**：按当前筛选条件从**全部普通选择题**（不限未答，**不含图片题、简答题**）随机抽取作为考试集，题数可在设置中修改（默认 100，不足自适应）；答题过程中**不显示对错与正确答案**，全部答完后弹出评分（每题 1 分），关闭评分后可继续在题目列表/题目间复盘错题，退出考试模式前不会自动离开
   **Random exam**: pick a configurable number of **text** questions (default 100, respecting current filters, answered or not; image questions excluded) as an exam set. Correctness and answers stay hidden during the exam; after all questions are answered a score dialog appears (1 point per question). Closing it keeps the exam session open for review until you exit
-- **按当前筛选练习**：把当前筛选结果中的**全部题目**（含图片题、简答题）作为一个练习集，开始前可选择顺序（题库顺序 / 随机顺序 / 按到期时间，默认随机打乱），不限制题数，答题过程与普通刷题一致（即时反馈对错；图片题/简答题展示答案后可评分）
-  **Practice current filter**: all questions matching the current filters (including image questions) form one session (no question-count cap) with instant answer feedback like normal practice; you pick the order first (bank order / random / by due date, random is the default), and image questions can be rated after revealing the answer
+- **按当前筛选练习**：把当前筛选结果中的**全部题目**（含图片题、简答题）作为一个练习集，开始前可选择顺序（题库顺序 / 随机顺序 / 按到期时间 / 按刷题时间，默认随机打乱；按刷题时间按 FSRS 上次复习时间排序，最久未刷优先，未开启记忆曲线时「按到期时间」「按刷题时间」不可选），不限制题数，答题过程与普通刷题一致（即时反馈对错；图片题/简答题展示答案后可评分）
+  **Practice current filter**: all questions matching the current filters (including image questions) form one session (no question-count cap) with instant answer feedback like normal practice; you pick the order first (bank order / random / by due date / by last practice time, random is the default; the last-practice-time order uses the FSRS last review timestamp so the longest-unpracticed come first, and both the due-date and last-practice-time orders are disabled when the memory feature is off), and image questions can be rated after revealing the answer
 - **记忆练习（FSRS 间隔重复）**：基于记忆曲线的智能复习
   **Memory practice (FSRS spaced repetition)**: smart review based on memory curve
   - 选题 = 到期复习题（按紧迫度排序）+ 每日新题（数量可配置，按自然日累计，每题库独立配额）；到期/新题池忽略「未答/已答」筛选（其它筛选仍生效），避免答过的到期卡片被永久排除。图片题、简答题同样参与到期/新题选择，展示答案后选择四级评分写入 FSRS；`<>` 的正向/反向卡各占一张

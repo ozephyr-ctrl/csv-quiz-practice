@@ -6,13 +6,22 @@ import { shuffle } from "./utils";
  * - "bank"：保持调用方给定的题库顺序（CSV 解析顺序）
  * - "random"：随机打乱
  * - "due"：记忆到期时间升序（已到期/逾期在前），无卡片的题按原序追加
+ * - "lastReview"：上次复习时间升序（最久没刷的在前），从未刷过的题按原序排在最前
  */
-export type FilterPracticeOrder = "bank" | "random" | "due";
+export type FilterPracticeOrder = "bank" | "random" | "due" | "lastReview";
 
 /** 卡片是否存在且 due 可解析。 */
 export function hasValidDue(card: MemoryCard | undefined): boolean {
   if (!card) return false;
   return !Number.isNaN(new Date(card.due).getTime());
+}
+
+/** 卡片是否存在且 lastReview 为非空且可解析的时间字符串。 */
+export function hasValidLastReview(card: MemoryCard | undefined): boolean {
+  if (!card) return false;
+  const raw = card.lastReview;
+  if (typeof raw !== "string" || raw === "") return false;
+  return !Number.isNaN(new Date(raw).getTime());
 }
 
 /**
@@ -66,6 +75,35 @@ export function orderFilterPracticePool(
     });
 
     return [...dueItems.map((item) => item.question), ...rest];
+  }
+
+  if (mode === "lastReview") {
+    const cards = memoryCards ?? {};
+    const never: Question[] = [];
+    const reviewed: Array<{ question: Question; ts: number; index: number }> =
+      [];
+
+    base.forEach((question, index) => {
+      const card = cards[question.id];
+      if (!hasValidLastReview(card)) {
+        never.push(question);
+        return;
+      }
+      reviewed.push({
+        question,
+        ts: new Date(card.lastReview).getTime(),
+        index,
+      });
+    });
+
+    // 显式按 [ts, 原下标] 排序，保证同期稳定且不依赖引擎的排序稳定性。
+    reviewed.sort((a, b) => {
+      if (a.ts !== b.ts) return a.ts - b.ts;
+      return a.index - b.index;
+    });
+
+    // 从未刷过的题排最前，保持题池相对顺序。
+    return [...never, ...reviewed.map((item) => item.question)];
   }
 
   // "bank"（及未知模式兜底）：原序返回，不排序、不洗牌。

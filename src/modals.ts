@@ -162,10 +162,11 @@ export const FILTER_PRACTICE_ORDER_LABELS: Record<
   bank: "题库顺序",
   random: "随机顺序",
   due: "按到期时间",
+  lastReview: "按刷题时间",
 };
 
 export interface FilterPracticeOrderModalOptions {
-  /** 记忆曲线关闭时，「按到期时间」仍然显示，但不可选。 */
+  /** 记忆曲线关闭时，「按到期时间」「按刷题时间」仍然显示，但不可选。 */
   memoryEnabled: boolean;
 }
 
@@ -174,6 +175,8 @@ interface FilterPracticeOrderOptionSpec {
   description: string;
   /** 默认顺序：作为主要操作呈现并获得焦点。 */
   primary?: boolean;
+  /** 依赖记忆曲线：记忆功能关闭时不可选。 */
+  memoryOnly?: boolean;
   /** 不可选时显示的原因（选项本身不隐藏）。 */
   disabledReason?: string;
 }
@@ -191,6 +194,13 @@ const FILTER_PRACTICE_ORDER_OPTIONS: FilterPracticeOrderOptionSpec[] = [
   {
     mode: "due",
     description: "最早到期的先刷，无记忆卡片的题排在最后",
+    memoryOnly: true,
+    disabledReason: "需先在设置中开启记忆曲线",
+  },
+  {
+    mode: "lastReview",
+    description: "最久没刷的先刷，从未刷过的排最前",
+    memoryOnly: true,
     disabledReason: "需先在设置中开启记忆曲线",
   },
 ];
@@ -198,8 +208,8 @@ const FILTER_PRACTICE_ORDER_OPTIONS: FilterPracticeOrderOptionSpec[] = [
 /**
  * Promise-based modal for choosing the order of 「按当前筛选练习」.
  * Resolves with the chosen order, or `null` if the user closes it (Esc / backdrop)
- * without choosing. When the memory feature is off, 「按到期时间」 is shown but
- * disabled, and 「随机顺序」 stays the default.
+ * without choosing. When the memory feature is off, 「按到期时间」/「按刷题时间」
+ * are shown but disabled, and 「随机顺序」 stays the default.
  */
 export class FilterPracticeOrderModal extends Modal {
   readonly promise: Promise<FilterPracticeOrder | null>;
@@ -229,7 +239,7 @@ export class FilterPracticeOrderModal extends Modal {
 
     for (const spec of FILTER_PRACTICE_ORDER_OPTIONS) {
       const item = list.createDiv("csv-quiz-modal-option");
-      const disabled = spec.mode === "due" && !this.memoryEnabled;
+      const disabled = !!spec.memoryOnly && !this.memoryEnabled;
 
       const btn = item.createEl("button", {
         text: FILTER_PRACTICE_ORDER_LABELS[spec.mode],

@@ -615,7 +615,8 @@ function askConflictMergeChoice(app, conflictCount) {
 var FILTER_PRACTICE_ORDER_LABELS = {
   bank: "\u9898\u5E93\u987A\u5E8F",
   random: "\u968F\u673A\u987A\u5E8F",
-  due: "\u6309\u5230\u671F\u65F6\u95F4"
+  due: "\u6309\u5230\u671F\u65F6\u95F4",
+  lastReview: "\u6309\u5237\u9898\u65F6\u95F4"
 };
 var FILTER_PRACTICE_ORDER_OPTIONS = [
   {
@@ -630,6 +631,13 @@ var FILTER_PRACTICE_ORDER_OPTIONS = [
   {
     mode: "due",
     description: "\u6700\u65E9\u5230\u671F\u7684\u5148\u5237\uFF0C\u65E0\u8BB0\u5FC6\u5361\u7247\u7684\u9898\u6392\u5728\u6700\u540E",
+    memoryOnly: true,
+    disabledReason: "\u9700\u5148\u5728\u8BBE\u7F6E\u4E2D\u5F00\u542F\u8BB0\u5FC6\u66F2\u7EBF"
+  },
+  {
+    mode: "lastReview",
+    description: "\u6700\u4E45\u6CA1\u5237\u7684\u5148\u5237\uFF0C\u4ECE\u672A\u5237\u8FC7\u7684\u6392\u6700\u524D",
+    memoryOnly: true,
     disabledReason: "\u9700\u5148\u5728\u8BBE\u7F6E\u4E2D\u5F00\u542F\u8BB0\u5FC6\u66F2\u7EBF"
   }
 ];
@@ -653,7 +661,7 @@ var FilterPracticeOrderModal = class extends import_obsidian.Modal {
     let primaryBtn = null;
     for (const spec of FILTER_PRACTICE_ORDER_OPTIONS) {
       const item = list.createDiv("csv-quiz-modal-option");
-      const disabled = spec.mode === "due" && !this.memoryEnabled;
+      const disabled = !!spec.memoryOnly && !this.memoryEnabled;
       const btn = item.createEl("button", {
         text: FILTER_PRACTICE_ORDER_LABELS[spec.mode],
         cls: "csv-quiz-btn csv-quiz-modal-btn" + (spec.primary ? " csv-quiz-btn-primary" : "")
@@ -3454,6 +3462,12 @@ function hasValidDue(card) {
   if (!card) return false;
   return !Number.isNaN(new Date(card.due).getTime());
 }
+function hasValidLastReview(card) {
+  if (!card) return false;
+  const raw = card.lastReview;
+  if (typeof raw !== "string" || raw === "") return false;
+  return !Number.isNaN(new Date(raw).getTime());
+}
 function orderFilterPracticePool(pool, mode, memoryCards, now, shuffleFn) {
   const base = Array.isArray(pool) ? pool : [];
   void now;
@@ -3482,6 +3496,28 @@ function orderFilterPracticePool(pool, mode, memoryCards, now, shuffleFn) {
       return a.index - b.index;
     });
     return [...dueItems.map((item) => item.question), ...rest];
+  }
+  if (mode === "lastReview") {
+    const cards = memoryCards != null ? memoryCards : {};
+    const never = [];
+    const reviewed = [];
+    base.forEach((question, index) => {
+      const card = cards[question.id];
+      if (!hasValidLastReview(card)) {
+        never.push(question);
+        return;
+      }
+      reviewed.push({
+        question,
+        ts: new Date(card.lastReview).getTime(),
+        index
+      });
+    });
+    reviewed.sort((a, b) => {
+      if (a.ts !== b.ts) return a.ts - b.ts;
+      return a.index - b.index;
+    });
+    return [...never, ...reviewed.map((item) => item.question)];
   }
   return [...base];
 }
